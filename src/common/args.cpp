@@ -862,8 +862,8 @@ fs::path GetDefaultDataDir()
     // Windows:
     //   old: C:\Users\Username\AppData\Roaming\Chains
     //   new: C:\Users\Username\AppData\Local\Chains
-    // macOS: ~/Library/Application Support/Chains
-    // Unix-like: ~/.chains
+    // macOS: ~/Library/Application Support/<name> (Chains, Thunder...)
+    // Unix-like: ~/.<name> (~/.chains, ~/.thunder...)
 #ifdef WIN32
     // Windows
     // Check for existence of datadir in old location and keep it there
@@ -881,7 +881,7 @@ fs::path GetDefaultDataDir()
         pathRet = fs::path(pszHome);
 #ifdef __APPLE__
     // macOS
-    return pathRet / "Library/Application Support/Chains";
+    return pathRet / "Library/Application Support" / CLIENT_NAME;
 #else
     // Unix-like
     return pathRet / "." CLIENT_BIN_NAME;

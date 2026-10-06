@@ -2183,7 +2183,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (args.IsArgSet("-mainchainrpccookiefile")) {
             options.cookie_file = fs::absolute(args.GetPathArg("-mainchainrpccookiefile"));
         } else {
-            fs::path main_datadir{args.IsArgSet("-mainchaindatadir") ? fs::absolute(args.GetPathArg("-mainchaindatadir")) : GetDefaultDataDir().parent_path() / ".chains"};
+            // The default data directory of the mainchain node is next to this one's, named as on this system.
+#if defined(WIN32) || defined(__APPLE__)
+            const fs::path default_main_datadir{GetDefaultDataDir().parent_path() / "Chains"};
+#else
+            const fs::path default_main_datadir{GetDefaultDataDir().parent_path() / ".chains"};
+#endif
+            fs::path main_datadir{args.IsArgSet("-mainchaindatadir") ? fs::absolute(args.GetPathArg("-mainchaindatadir")) : default_main_datadir};
             const char* subdir{chain_type == ChainType::MAIN ? "" : chain_type == ChainType::TESTNET ? "testnet" : chain_type == ChainType::SIGNET ? "signet" : "regtest"};
             options.cookie_file = main_datadir / subdir / ".cookie";
         }
