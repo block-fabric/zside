@@ -92,6 +92,26 @@ endif()
 
 # Home for common functionality shared by different executables and libraries.
 # Similar to `bitcoin_util` library, but higher-level.
+# zSide: the Orchard shielded pool of Zcash, a Rust library (src/rust) behind a C interface.
+find_program(CARGO cargo HINTS $ENV{HOME}/.cargo/bin REQUIRED)
+set(ZSIDE_RUST_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rust)
+set(ZSIDE_CARGO_JOBS 4 CACHE STRING "Jobs cargo builds the Orchard library with")
+set(ZSIDE_RUST_LIB ${ZSIDE_RUST_TARGET_DIR}/release/libzside_orchard.a)
+file(GLOB ZSIDE_RUST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rust/src/*.rs)
+add_custom_command(
+  OUTPUT ${ZSIDE_RUST_LIB}
+  COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${ZSIDE_RUST_TARGET_DIR} CARGO_BUILD_JOBS=${ZSIDE_CARGO_JOBS}
+          ${CARGO} build --release --locked --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml
+  DEPENDS ${ZSIDE_RUST_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml ${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.lock
+  COMMENT "Building the Orchard library (Rust)"
+  VERBATIM
+)
+add_custom_target(zside_orchard_build DEPENDS ${ZSIDE_RUST_LIB})
+add_library(zside_orchard STATIC IMPORTED GLOBAL)
+set_target_properties(zside_orchard PROPERTIES IMPORTED_LOCATION ${ZSIDE_RUST_LIB})
+target_link_libraries(zside_orchard INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
+add_dependencies(zside_orchard zside_orchard_build)
+
 add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   addresstype.cpp
   base58.cpp
@@ -116,6 +136,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   common/url.cpp
   compressor.cpp
   core_io.cpp
+  zside/shielded.cpp
   sidechain/script.cpp
   drivechain/sidechain.cpp
   deploymentinfo.cpp
@@ -151,6 +172,7 @@ target_link_libraries(bitcoin_common
   PRIVATE
     core_interface
     bitcoin_consensus
+    zside_orchard
     bitcoin_util
     univalue
     secp256k1
@@ -201,6 +223,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   index/base.cpp
   index/blockfilterindex.cpp
   index/coinstatsindex.cpp
+  index/orchardindex.cpp
   index/txindex.cpp
   index/txospenderindex.cpp
   init.cpp
@@ -266,6 +289,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   policy/truc_policy.cpp
   private_broadcast.cpp
   rest.cpp
+  rpc/shielded.cpp
   rpc/blockchain.cpp
   rpc/drivechain.cpp
   rpc/sidechain.cpp

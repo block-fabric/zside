@@ -18,6 +18,7 @@
 #include <httprpc.h>
 #include <index/blockfilterindex.h>
 #include <init.h>
+#include <index/orchardindex.h>
 #include <interfaces/chain.h>
 #include <interfaces/handler.h>
 #include <interfaces/mining.h>
@@ -716,6 +717,12 @@ public:
         if (!m_node.mempool) return IsRBFOptInEmptyMempool(tx);
         LOCK(m_node.mempool->cs);
         return IsRBFOptIn(tx, *m_node.mempool);
+    }
+    std::optional<OrchardWitnesses> getOrchardWitnesses(const std::vector<uint256>& cmxs) override
+    {
+        if (!g_orchardindex) return std::nullopt;
+        g_orchardindex->BlockUntilSyncedToCurrentChain();
+        return g_orchardindex->FindNotes(cmxs);
     }
     std::optional<BmmRequestInfo> getMempoolBmmRequest(uint32_t slot) override
     {

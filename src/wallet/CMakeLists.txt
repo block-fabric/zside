@@ -18,7 +18,10 @@ add_library(bitcoin_wallet STATIC EXCLUDE_FROM_ALL
   load.cpp
   migrate.cpp
   receive.cpp
+  meltcast.cpp
+  shielded.cpp
   rpc/addresses.cpp
+  rpc/shielded.cpp
   rpc/backup.cpp
   rpc/coins.cpp
   rpc/encrypt.cpp

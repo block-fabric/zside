@@ -107,6 +107,9 @@ private:
 
     virtual bool AllowPrune() const = 0;
 
+    /** Whether the index builds itself again when its best block is unknown, instead of stopping the node. */
+    virtual bool RebuildWhenLost() const { return false; }
+
     template <typename... Args>
     void FatalErrorf(util::ConstevalFormatString<sizeof...(Args)> fmt, const Args&... args);
 

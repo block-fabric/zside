@@ -231,11 +231,45 @@ void UnserializeTransaction(TxType& tx, Stream& s, const TransactionSerParams& p
             throw std::ios_base::failure("Superfluous witness record");
         }
     }
+    if ((flags & 2) && fAllowWitness) {
+        /* zSide: no transparent inputs, as announced. */
+        flags ^= 2;
+        if (!tx.vin.empty()) {
+            throw std::ios_base::failure("Unknown transaction optional data");
+        }
+    }
     if (flags) {
         /* Unknown flag in the serialization */
         throw std::ios_base::failure("Unknown transaction optional data");
     }
     s >> tx.nLockTime;
+}
+
+/**
+ * zSide: whether a transaction carries a shielded bundle, by its marker: an OP_RETURN output whose
+ * push starts with "ZORC" (zside/marker.h, which this cannot include).
+ */
+template<typename TxType>
+bool CarriesShieldedBundle(const TxType& tx)
+{
+    for (const auto& out : tx.vout) {
+        const auto& script{out.scriptPubKey};
+        if (script.size() < 2 || script[0] != 0x6a) continue;
+        size_t at;
+        if (script[1] < 0x4c) {
+            at = 2;
+        } else if (script[1] == 0x4c) {
+            at = 3;
+        } else if (script[1] == 0x4d) {
+            at = 4;
+        } else if (script[1] == 0x4e) {
+            at = 6;
+        } else {
+            continue;
+        }
+        if (script.size() >= at + 4 && script[at] == 'Z' && script[at + 1] == 'O' && script[at + 2] == 'R' && script[at + 3] == 'C') return true;
+    }
+    return false;
 }
 
 template<typename Stream, typename TxType>
@@ -250,6 +284,12 @@ void SerializeTransaction(const TxType& tx, Stream& s, const TransactionSerParam
         /* Check whether witnesses need to be serialized. */
         if (tx.HasWitness()) {
             flags |= 1;
+        }
+        /* zSide: a shielded transaction without transparent inputs says so, since an empty vin is
+         * how the extended format starts. Other transactions without inputs (the blind form of a
+         * BIP300 bundle) are written as they always were. */
+        if (tx.vin.empty() && CarriesShieldedBundle(tx)) {
+            flags |= 2;
         }
     }
     if (flags) {

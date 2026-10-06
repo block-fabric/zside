@@ -12,6 +12,7 @@
 #include <script/script.h>
 #include <serialize.h>
 #include <uint256.h>
+#include <zside/shielded.h>
 
 #include <cstdint>
 #include <map>
@@ -119,13 +120,15 @@ struct StateUndo {
     uint64_t queued{0};
     std::vector<CTxOut> paid_tx;
     uint64_t queued_tx{0};
+    //! What the block changed in the shielded pool.
+    zside::ShieldedUndo shielded;
 
     template <typename Stream>
     void Serialize(Stream& s) const
     {
         s << main_height << bundle.has_value();
         if (bundle) s << *bundle;
-        s << last_failure_height << added << removed << paid << queued << paid_tx << queued_tx;
+        s << last_failure_height << added << removed << paid << queued << paid_tx << queued_tx << shielded;
     }
     template <typename Stream>
     void Unserialize(Stream& s)
@@ -134,7 +137,7 @@ struct StateUndo {
         s >> main_height >> has_bundle;
         bundle.reset();
         if (has_bundle) s >> bundle.emplace();
-        s >> last_failure_height >> added >> removed >> paid >> queued >> paid_tx >> queued_tx;
+        s >> last_failure_height >> added >> removed >> paid >> queued >> paid_tx >> queued_tx >> shielded;
     }
 };
 
@@ -201,13 +204,15 @@ public:
     std::optional<CMutableTransaction> BundleTx() const;
     bool InBundle(const COutPoint& withdrawal) const;
     int32_t LastFailureHeight() const { return m_last_failure_height; }
+    /** The shielded pool. */
+    const zside::ShieldedState& Shielded() const { return m_shielded; }
 
     template <typename Stream>
     void Serialize(Stream& s) const
     {
         s << m_main_height << m_withdrawals << m_bundle.has_value();
         if (m_bundle) s << *m_bundle;
-        s << m_last_failure_height << m_queue << m_queue_tx;
+        s << m_last_failure_height << m_queue << m_queue_tx << m_shielded;
     }
     template <typename Stream>
     void Unserialize(Stream& s)
@@ -216,7 +221,7 @@ public:
         s >> m_main_height >> m_withdrawals >> has_bundle;
         m_bundle.reset();
         if (has_bundle) s >> m_bundle.emplace();
-        s >> m_last_failure_height >> m_queue >> m_queue_tx;
+        s >> m_last_failure_height >> m_queue >> m_queue_tx >> m_shielded;
     }
     friend bool operator==(const State&, const State&) = default;
 
@@ -232,6 +237,7 @@ private:
     //! Payouts owed beyond what earlier blocks could pay, oldest first: from the mainchain, and from transactions.
     std::vector<CTxOut> m_queue;
     std::vector<CTxOut> m_queue_tx;
+    zside::ShieldedState m_shielded;
 };
 
 //

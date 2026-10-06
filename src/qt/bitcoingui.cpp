@@ -334,6 +334,15 @@ void BitcoinGUI::createActions()
     connect(historyAction, &QAction::triggered, this, &BitcoinGUI::gotoHistoryPage);
     connect(sidechainAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(sidechainAction, &QAction::triggered, this, &BitcoinGUI::gotoSidechainPage);
+
+    shieldedAction = new QAction(platformStyle->SingleColorIcon(":/icons/lock_closed"), tr("&Private"), this);
+    shieldedAction->setStatusTip(tr("Private payments: shield coins, pay and get paid without showing who or how much"));
+    shieldedAction->setToolTip(shieldedAction->statusTip());
+    shieldedAction->setCheckable(true);
+    shieldedAction->setShortcut(QKeySequence(QStringLiteral("Alt+6")));
+    tabGroup->addAction(shieldedAction);
+    connect(shieldedAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
+    connect(shieldedAction, &QAction::triggered, this, &BitcoinGUI::gotoShieldedPage);
 #endif // ENABLE_WALLET
 
     quitAction = new QAction(tr("E&xit"), this);
@@ -815,6 +824,7 @@ void BitcoinGUI::createToolBars()
         entry(sendCoinsAction);
         entry(receiveCoinsAction);
         entry(historyAction);
+        entry(shieldedAction);
 
         section(tr("Chain"));
         entry(sidechainAction);
@@ -1136,6 +1146,7 @@ void BitcoinGUI::setWalletActionsEnabled(bool enabled)
     receiveCoinsAction->setEnabled(enabled);
     historyAction->setEnabled(enabled && !isPrivacyModeActivated());
     sidechainAction->setEnabled(enabled);
+    shieldedAction->setEnabled(enabled);
     encryptWalletAction->setEnabled(enabled);
     backupWalletAction->setEnabled(enabled);
     changePassphraseAction->setEnabled(enabled);
@@ -1302,6 +1313,12 @@ void BitcoinGUI::gotoReceiveCoinsPage()
 {
     receiveCoinsAction->setChecked(true);
     if (walletFrame) walletFrame->gotoReceiveCoinsPage();
+}
+
+void BitcoinGUI::gotoShieldedPage()
+{
+    shieldedAction->setChecked(true);
+    if (walletFrame) walletFrame->gotoShieldedPage();
 }
 
 void BitcoinGUI::gotoSidechainPage()

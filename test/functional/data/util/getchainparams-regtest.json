@@ -7,8 +7,8 @@
     "limit": "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   },
   "net": {
-    "default_port": 29655,
-    "magic": "5c1dec04",
+    "default_port": 29455,
+    "magic": "7a736404",
     "dns_seeds": [
       "dummySeed.invalid."
     ]

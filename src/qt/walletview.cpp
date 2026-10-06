@@ -4,6 +4,8 @@
 
 #include <qt/walletview.h>
 
+#include <qt/shieldedpage.h>
+
 #include <qt/addressbookpage.h>
 #include <qt/askpassphrasedialog.h>
 #include <qt/clientmodel.h>
@@ -79,6 +81,9 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     sidechainPage->setWalletModel(walletModel);
     addWidget(sidechainPage);
 
+    shieldedPage = new ShieldedPage([this]() -> std::optional<QString> { return walletModel->getWalletName(); }, this);
+    addWidget(shieldedPage);
+
     connect(overviewPage, &OverviewPage::transactionClicked, this, &WalletView::transactionClicked);
     // Clicking on a transaction on the overview pre-selects the transaction on the transaction history page
     connect(overviewPage, &OverviewPage::transactionClicked, transactionView, qOverload<const QModelIndex&>(&TransactionView::focusTransaction));
@@ -126,6 +131,7 @@ void WalletView::setClientModel(ClientModel *_clientModel)
     overviewPage->setClientModel(_clientModel);
     sendCoinsPage->setClientModel(_clientModel);
     sidechainPage->setClientModel(_clientModel);
+    shieldedPage->setClientModel(_clientModel);
     walletModel->setClientModel(_clientModel);
 }
 
@@ -163,6 +169,11 @@ void WalletView::gotoHistoryPage()
 void WalletView::gotoReceiveCoinsPage()
 {
     setCurrentWidget(receiveCoinsPage);
+}
+
+void WalletView::gotoShieldedPage()
+{
+    setCurrentWidget(shieldedPage);
 }
 
 void WalletView::gotoSidechainPage()

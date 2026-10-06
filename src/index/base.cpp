@@ -128,10 +128,15 @@ bool BaseIndex::Init()
         // Setting the best block to the locator's top block. If it is not part of the
         // best chain, we will rewind to the fork point during index sync
         const CBlockIndex* locator_index{m_chainstate->m_blockman.LookupBlockIndex(locator.vHave.at(0))};
-        if (!locator_index) {
+        if (!locator_index && RebuildWhenLost()) {
+            // An index that is on by default builds itself again, rather than stopping the node.
+            LogWarning("best block of %s not found: building it again", GetName());
+            SetBestBlockIndex(nullptr);
+        } else if (!locator_index) {
             return InitError(Untranslated(strprintf("best block of %s not found. Please rebuild the index.", GetName())));
+        } else {
+            SetBestBlockIndex(locator_index);
         }
-        SetBestBlockIndex(locator_index);
     }
 
     // Child init

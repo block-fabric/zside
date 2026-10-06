@@ -59,6 +59,17 @@ public:
  */
 static const CRPCConvertParam vRPCConvertParams[] =
 {
+    { "getshieldedaddress", 0, "new" },
+    { "listshieldednotes", 0, "include_spent" },
+    { "shieldcoins", 0, "amount" },
+    { "unshieldcoins", 0, "amount", ParamFormat::JSON_OR_STRING },
+    { "unshieldcoins", 2, "subtractfeefromamount" },
+    { "meltcoins", 0, "spread" },
+    { "castcoins", 0, "amount" },
+    { "castcoins", 1, "spread" },
+    { "sendshielded", 0, "amounts" },
+    { "sendshielded", 2, "fee" },
+    { "listshieldedtransactions", 0, "count" },
     { "setbmm", 0, "mine" },
     { "setbmm", 2, "always" },
     { "setbmm", 3, "amount" },

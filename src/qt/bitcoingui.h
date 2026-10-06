@@ -151,6 +151,7 @@ private:
     QAction* overviewAction = nullptr;
     QAction* historyAction = nullptr;
     QAction* sidechainAction = nullptr;
+    QAction* shieldedAction = nullptr;
     QAction* quitAction = nullptr;
     QAction* sendCoinsAction = nullptr;
     QAction* usedSendingAddressesAction = nullptr;
@@ -309,6 +310,8 @@ public Q_SLOTS:
     void gotoReceiveCoinsPage();
     /** Switch to sidechain page */
     void gotoSidechainPage();
+    /** Switch to the shielded account */
+    void gotoShieldedPage();
     /** Switch to send coins page */
     void gotoSendCoinsPage(QString addr = "");
 

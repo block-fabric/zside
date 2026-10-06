@@ -4,6 +4,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <rpc/blockchain.h>
+
+#include <zside/shielded.h>
 #include <rpc/register.h> // IWYU pragma: associated
 
 #include <arith_uint256.h>
@@ -2173,7 +2175,8 @@ static RPCMethod getblockstats()
                 utxo_size_inc_actual -= prevout_size;
             }
 
-            CAmount txfee = tx_total_in - tx_total_out;
+            // zSide: what the transaction takes out of the shielded pool is an input too.
+            CAmount txfee = tx_total_in + zside::ShieldedValueIn(*tx) - tx_total_out;
             CHECK_NONFATAL(MoneyRange(txfee));
             if (do_medianfee) {
                 fee_array.push_back(txfee);

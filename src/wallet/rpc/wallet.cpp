@@ -1073,6 +1073,17 @@ RPCMethod derivehdkey()
 }
 
 // addresses
+RPCMethod getshieldedaddress();
+RPCMethod getshieldedbalance();
+RPCMethod listshieldednotes();
+RPCMethod shieldcoins();
+RPCMethod sendshielded();
+RPCMethod listshieldedtransactions();
+RPCMethod meltcoins();
+RPCMethod unshieldcoins();
+RPCMethod castcoins();
+RPCMethod listmeltcast();
+RPCMethod cancelmeltcast();
 RPCMethod getaddressinfo();
 RPCMethod getnewaddress();
 RPCMethod getrawchangeaddress();
@@ -1140,6 +1151,17 @@ std::span<const CRPCCommand> GetWalletRPCCommands()
 {
     static const CRPCCommand commands[]{
         {"rawtransactions", &fundrawtransaction},
+        {"wallet", &getshieldedaddress},
+        {"wallet", &getshieldedbalance},
+        {"wallet", &listshieldednotes},
+        {"wallet", &shieldcoins},
+        {"wallet", &sendshielded},
+        {"wallet", &listshieldedtransactions},
+        {"wallet", &unshieldcoins},
+        {"wallet", &meltcoins},
+        {"wallet", &castcoins},
+        {"wallet", &listmeltcast},
+        {"wallet", &cancelmeltcast},
         {"wallet", &abandontransaction},
         {"wallet", &abortrescan},
         {"wallet", &addhdkey},

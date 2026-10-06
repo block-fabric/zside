@@ -29,8 +29,8 @@ get_directory_property(precious_variables CACHE_VARIABLES)
 # The name of this sidechain, and the name its programs, data directory and
 # configuration file are derived from. A new sidechain changes these two,
 # then its chain parameters in src/kernel/chainparams.cpp.
-set(CLIENT_NAME "Sidechain")
-set(CLIENT_BIN_NAME "sidechain")
+set(CLIENT_NAME "zSide")
+set(CLIENT_BIN_NAME "zside")
 set(CLIENT_VERSION_MAJOR 32)
 set(CLIENT_VERSION_MINOR 0)
 set(CLIENT_VERSION_BUILD 0)

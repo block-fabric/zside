@@ -14,9 +14,9 @@
             "n": 0,
             "scriptPubKey": {
                 "asm": "0 e15a86a23178f433d514dbbce042e87d72662b8b5edcacfd2e37ab7a2d135f05",
-                "desc": "addr(sc1qu9dgdg330r6r84g5mw7wqshg04exv2uttmw2elfwx74h5tgntuzsys247f)#duv4syv3",
+                "desc": "addr(zs1qu9dgdg330r6r84g5mw7wqshg04exv2uttmw2elfwx74h5tgntuzsa0cm5j)#wy4qtdkl",
                 "hex": "0020e15a86a23178f433d514dbbce042e87d72662b8b5edcacfd2e37ab7a2d135f05",
-                "address": "sc1qu9dgdg330r6r84g5mw7wqshg04exv2uttmw2elfwx74h5tgntuzsys247f",
+                "address": "zs1qu9dgdg330r6r84g5mw7wqshg04exv2uttmw2elfwx74h5tgntuzsa0cm5j",
                 "type": "witness_v0_scripthash"
             }
         }

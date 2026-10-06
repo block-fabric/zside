@@ -102,7 +102,7 @@
         }
     ],
     [
-        "sc1qvyq0cc6rahyvsazfdje0twl7ez82ndmuufq7hz",
+        "zs1qvyq0cc6rahyvsazfdje0twl7ez82ndmu96rqer",
         "00146100fc6343edc8c874496cb2f5bbfec88ea9b77c",
         {
             "chain": "main",
@@ -111,7 +111,7 @@
         }
     ],
     [
-        "sc1qyucykdlhp62tezs0hagqury402qwhk589q80tqs5myh3rxq34nwqxn0xml",
+        "zs1qyucykdlhp62tezs0hagqury402qwhk589q80tqs5myh3rxq34nwqlvag3y",
         "002027304b37f70e94bc8a0fbf500e0c957a80ebda87280ef58214d92f119811acdc",
         {
             "chain": "main",
@@ -120,7 +120,7 @@
         }
     ],
     [
-        "sc1p83n3au0rjylefxq2nc2xh2y4jzz4pm6zxj4mw5pagdjjr2a9f36sthszya",
+        "zs1p83n3au0rjylefxq2nc2xh2y4jzz4pm6zxj4mw5pagdjjr2a9f36sjgzvwx",
         "51203c671ef1e3913f94980a9e146ba895908550ef4234abb7503d436521aba54c75",
         {
             "chain": "main",
@@ -129,7 +129,7 @@
         }
     ],
     [
-        "sc1z2rksy4q7vf",
+        "zs1z2rkshml3al",
         "520250ed",
         {
             "chain": "main",
@@ -138,7 +138,7 @@
         }
     ],
     [
-        "tsc1q3vya2h5435jkugq2few7dmktlrwq4ejmcvd934",
+        "tzs1q3vya2h5435jkugq2few7dmktlrwq4ejmplwml5",
         "00148b09d55e958d256e200a4e5de6eecbf8dc0ae65b",
         {
             "chain": "signet",
@@ -147,7 +147,7 @@
         }
     ],
     [
-        "tsc1qxkhrl2s6ttrclckldruea0e8anhrehffl8xv7t0pdyrzm08v2hyqrpf70g",
+        "tzs1qxkhrl2s6ttrclckldruea0e8anhrehffl8xv7t0pdyrzm08v2hyq67ms9n",
         "002035ae3faa1a5ac78fe2df68f99ebf27ecee3cdd29f9cccf2de169062dbcec55c8",
         {
             "chain": "signet",
@@ -156,7 +156,7 @@
         }
     ],
     [
-        "tsc1pae5um27ahn8n73pgexe3kcwlp8dhswpn684h2k2w6t9a7w3eq65q7435g9",
+        "tzs1pae5um27ahn8n73pgexe3kcwlp8dhswpn684h2k2w6t9a7w3eq65q82r6z7",
         "5120ee69cdabddbccf3f4428c9b31b61df09db783833d1eb75594ed2cbdf3a3906a8",
         {
             "chain": "signet",
@@ -165,7 +165,7 @@
         }
     ],
     [
-        "tsc1rx9n9g37az8mu236e5jpxdt0m67y4fuq8rhs0ss3djnm0kscfrwvqg8dxcf",
+        "tzs1rx9n9g37az8mu236e5jpxdt0m67y4fuq8rhs0ss3djnm0kscfrwvq3clgjj",
         "532031665447dd11f7c54759a48266adfbd78954f0071de0f8422d94f6fb43091b98",
         {
             "chain": "signet",
@@ -312,7 +312,7 @@
         }
     ],
     [
-        "sc1qhxt04s5xnpy0kxw4x99n5hpdf5pmtzpq39qcsy",
+        "zs1qhxt04s5xnpy0kxw4x99n5hpdf5pmtzpqgkrx79",
         "0014b996fac2869848fb19d5314b3a5c2d4d03b58820",
         {
             "chain": "main",
@@ -321,7 +321,7 @@
         }
     ],
     [
-        "sc1qgc9ljrvdf2e0zg9rmmq86xklqwfys7r6wptjlacdgrcdc7sa6ggqdspj3g",
+        "zs1qgc9ljrvdf2e0zg9rmmq86xklqwfys7r6wptjlacdgrcdc7sa6ggq50numn",
         "0020460bf90d8d4ab2f120a3dec07d1adf039248787a70572ff70d40f0dc7a1dd210",
         {
             "chain": "main",
@@ -330,7 +330,7 @@
         }
     ],
     [
-        "sc1pve739yap4uxjvfk0jrey69078u0gasm2nwvv483ec6zkzulgw9xqdsv57v",
+        "zs1pve739yap4uxjvfk0jrey69078u0gasm2nwvv483ec6zkzulgw9xq50765h",
         "5120667d1293a1af0d2626cf90f24d15fe3f1e8ec36a9b98ca9e39c6856173e8714c",
         {
             "chain": "main",
@@ -339,7 +339,7 @@
         }
     ],
     [
-        "sc1zmjtq745ugt",
+        "zs1zmjtqdmtnea",
         "5202dc96",
         {
             "chain": "main",
@@ -348,7 +348,7 @@
         }
     ],
     [
-        "tsc1q6mwf89hnqhlu8txjgjfs4s7p93ugffn387e3cf",
+        "tzs1q6mwf89hnqhlu8txjgjfs4s7p93ugffn37d60kg",
         "0014d6dc9396f305ffc3acd244930ac3c12c7884a671",
         {
             "chain": "signet",
@@ -357,7 +357,7 @@
         }
     ],
     [
-        "tsc1qafrjalu4d73dql0czau9j6z422434kef235mzljf48ckd5xz3sysg35zel",
+        "tzs1qafrjalu4d73dql0czau9j6z422434kef235mzljf48ckd5xz3sys3wxvny",
         "0020ea472eff956fa2d07df8177859685552ab1adb295469b17e49a9f166d0c28c09",
         {
             "chain": "signet",
@@ -366,7 +366,7 @@
         }
     ],
     [
-        "tsc1pwst9qszjrhuv2e7as0flcq9gm698v6gdxzz9e87p07s8rssdx3zq3tagsg",
+        "tzs1pwst9qszjrhuv2e7as0flcq9gm698v6gdxzz9e87p07s8rssdx3zqg50x6n",
         "512074165040521df8c567dd83d3fc00a8de8a76690d30845c9fc17fa071c20d3444",
         {
             "chain": "signet",
@@ -375,7 +375,7 @@
         }
     ],
     [
-        "tsc1r3ss76jtsuxe8c8c8lxsehnpak55ylrgr345pww076l536ahjr6jsremz6s",
+        "tzs1r3ss76jtsuxe8c8c8lxsehnpak55ylrgr345pww076l536ahjr6js6xfvst",
         "53208c21ed4970e1b27c1f07f9a19bcc3db5284f8d038d681739fed7e91d76f21ea5",
         {
             "chain": "signet",

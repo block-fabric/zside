@@ -33,7 +33,7 @@ from test_framework.segwit_addr import (
 
 # The human-readable part of the addresses of each network of this chain (bech32_hrp in src/kernel/chainparams.cpp).
 # contrib/sidechain/rename-hrp.py keeps it up to date.
-HRP_BY_CHAIN = {"main": "sc", "test": "tsc", "regtest": "rsc"}
+HRP_BY_CHAIN = {"main": "zs", "test": "tzs", "regtest": "rsc"}
 
 ADDRESS_RCHN1_UNSPENDABLE = 'rsc1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq7r4vx7'
 ADDRESS_RCHN1_UNSPENDABLE_DESCRIPTOR = 'addr(rsc1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq7r4vx7)#r5hewd9k'

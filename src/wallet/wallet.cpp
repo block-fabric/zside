@@ -638,6 +638,8 @@ bool CWallet::Unlock(const SecureString& strWalletPassphrase)
             if (Unlock(plain_master_key)) {
                 // Now that we've unlocked, upgrade the descriptor cache
                 UpgradeDescriptorCache();
+                // zSide: the viewing key of the shielded account, if it was not known yet.
+                SetupShieldedAccount(*this);
                 return true;
             }
         }
@@ -1167,6 +1169,9 @@ CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const TxState& state, const 
     // Cache the outputs that belong to the wallet
     RefreshTXOsFromTx(wtx);
 
+    // zSide: the notes it pays the shielded account, and what it spends.
+    ShieldedTxAdded(*this, wtx);
+
     // Notify UI of new or updated transaction
     NotifyTransactionChanged(hash, fInsertedNew ? CT_NEW : CT_UPDATED);
 
@@ -1225,6 +1230,9 @@ bool CWallet::LoadToWallet(CWalletTx&& wtx_in)
         }
     }
 
+    // zSide: the notes it pays the shielded account, and what it spends.
+    ShieldedTxAdded(*this, wtx);
+
     // Update birth time when tx time is older than it.
     MaybeUpdateBirthTime(wtx.GetTxTime());
 
@@ -1253,7 +1261,7 @@ bool CWallet::AddToWalletIfInvolvingMe(const CTransactionRef& ptx, const SyncTxS
         }
 
         bool fExisted = mapWallet.contains(tx.GetHash());
-        if (fExisted || IsMine(tx) || IsFromMe(tx))
+        if (fExisted || IsMine(tx) || IsFromMe(tx) || IsShieldedMine(*this, tx))
         {
             /* Check if any keys in the wallet keypool that were supposed to be unused
              * have appeared in a new transaction. If so, remove those keys from the keypool.
@@ -3254,6 +3262,8 @@ bool CWallet::AttachChain(const std::shared_ptr<CWallet>& walletInstance, interf
     // allow setting the chain if it hasn't been set already but prevent changing it
     assert(!walletInstance->m_chain || walletInstance->m_chain == &chain);
     walletInstance->m_chain = &chain;
+    // zSide: the shielded account, before any rescan, so that the rescan finds its notes.
+    SetupShieldedAccount(*walletInstance);
 
     // Unless allowed, ensure wallet files are not reused across chains:
     if (!gArgs.GetBoolArg("-walletcrosschain", DEFAULT_WALLETCROSSCHAIN)) {

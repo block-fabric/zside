@@ -5,6 +5,8 @@
 
 #include <txmempool.h>
 
+#include <zside/shielded.h>
+
 #include <chain.h>
 #include <coins.h>
 #include <common/system.h>
@@ -249,6 +251,12 @@ void CTxMemPool::addNewTransaction(CTxMemPool::txiter newit)
     for (const CTxOut& out : tx.vout) {
         if (const auto refund{sidechain::ParseRefundScript(out.scriptPubKey)}) m_refunds[refund->withdrawal] = tx.GetHash();
     }
+    if (zside::HasShieldedMarker(tx)) {
+        std::string error;
+        if (const auto bundle{zside::Bundle::FromTx(tx, error)}) {
+            for (const uint256& nf : bundle->Nullifiers()) m_shielded_nullifiers[nf] = tx.GetHash();
+        }
+    }
     // Don't bother worrying about child transactions of this one.
     // Normal case of a new transaction arriving is that there can't be any
     // children, because such children would be orphans.
@@ -312,6 +320,10 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
                 m_refunds.erase(entry);
             }
         }
+    }
+
+    if (zside::HasShieldedMarker(it->GetTx())) {
+        std::erase_if(m_shielded_nullifiers, [&](const auto& entry) { return entry.second == it->GetTx().GetHash(); });
     }
 
     RemoveUnbroadcastTx(it->GetTx().GetHash(), true /* add logging because unchecked */);

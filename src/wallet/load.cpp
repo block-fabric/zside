@@ -13,6 +13,7 @@
 #include <util/string.h>
 #include <util/translation.h>
 #include <wallet/context.h>
+#include <wallet/meltcast.h>
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
@@ -171,6 +172,10 @@ void StartWallets(WalletContext& context)
     }
 
     context.scheduler->scheduleEvery([&context] { MaybeResendWalletTxs(context); }, 1min);
+    // zSide: what the melt/cast plans have due, as the blocks come.
+    context.scheduler->scheduleEvery([&context] {
+        for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) RunMeltCast(*pwallet);
+    }, 10s);
 }
 
 void UnloadWallets(WalletContext& context)

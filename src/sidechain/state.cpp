@@ -190,6 +190,9 @@ bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason
 bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
                     std::vector<CTxOut>& payouts, std::string& reject_reason)
 {
+    // The shielded pool: a transaction that breaks its rules is invalid, so it comes first, and
+    // changes nothing if it fails.
+    if (!m_shielded.ApplyTx(tx, undo.shielded, reject_reason)) return false;
     for (uint32_t n{0}; n < tx.vout.size(); ++n) {
         const CTxOut& out{tx.vout[n]};
         if (IsWithdrawalScript(out.scriptPubKey)) {
@@ -253,9 +256,17 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
         if (!StartBundle(*commitment, height, block.hashPrevBlock, params, undo, reject_reason)) return false;
     }
 
+    // The coinbase has no part in the shielded pool (its transactions are checked one by one below).
+    if (zside::HasShieldedMarker(*block.vtx[0])) {
+        reject_reason = "bad-zs-coinbase";
+        return false;
+    }
     for (size_t i{1}; i < block.vtx.size(); ++i) {
         if (!ApplyTx(*block.vtx[i], height, params, undo, tx_payouts, reject_reason)) return false;
     }
+
+    // The root the block leaves the shielded tree with is an anchor for the next blocks.
+    m_shielded.EndBlock(undo.shielded);
 
     // The coinbase pays the deposits and the refunds, right after its first output, as many as a block can.
     payouts = TakePayouts(std::move(payouts), std::move(tx_payouts), undo);
@@ -314,6 +325,7 @@ void State::DisconnectBlock(const StateUndo& undo)
     m_main_height = undo.main_height;
     m_bundle = undo.bundle;
     m_last_failure_height = undo.last_failure_height;
+    m_shielded.Revert(undo.shielded);
 }
 
 } // namespace sidechain
