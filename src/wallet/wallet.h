@@ -31,6 +31,7 @@
 #include <util/string.h>
 #include <util/time.h>
 #include <util/ui_change_type.h>
+#include <wallet/shielded.h>
 #include <wallet/crypter.h>
 #include <wallet/db.h>
 #include <wallet/scriptpubkeyman.h>
@@ -501,6 +502,8 @@ public:
     /** Map from txid to CWalletTx for all transactions this wallet is
      * interested in, including received and sent transactions. */
     std::unordered_map<Txid, CWalletTx, SaltedTxidHasher> mapWallet GUARDED_BY(cs_wallet);
+    //! zSide: the shielded account (see wallet/shielded.h).
+    ShieldedAccount m_shielded GUARDED_BY(cs_wallet);
 
     typedef std::multimap<int64_t, CWalletTx*> TxItems;
     TxItems wtxOrdered;

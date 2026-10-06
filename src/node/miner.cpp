@@ -43,6 +43,7 @@
 #include <versionbits.h>
 
 #include <algorithm>
+#include <set>
 #include <compare>
 #include <condition_variable>
 #include <cstddef>
@@ -133,6 +134,11 @@ void BlockAssembler::resetBlock()
     // Reserve space for fixed-size block header, txs count, and coinbase tx.
     nBlockWeight = *Assert(m_options.block_reserved_weight);
     nBlockSigOpsCost = m_options.coinbase_output_max_additional_sigops;
+    // On a sidechain the coinbase pays deposits and refunds as well: room for as many as a block
+    // may pay, each to an address that can take a signature check (P2PKH).
+    if (m_chainstate.m_chainman.GetConsensus().sidechain.enabled) {
+        nBlockSigOpsCost += WITNESS_SCALE_FACTOR * sidechain::MAX_PAYOUTS_PER_BLOCK;
+    }
 
     // These counters do not include coinbase tx
     nBlockTx = 0;
@@ -198,32 +204,95 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
 
     // Sidechain: what the coinbase has to pay because of what the mainchain did
     // and of the transactions in the block, and the withdrawal bundle to commit to.
-    std::vector<CTxOut> side_outputs;
+    std::vector<CTxOut> side_outputs, side_tx_outputs;
     if (const Consensus::SidechainParams& side_params{chainparams.GetConsensus().sidechain}; side_params.enabled) {
         const sidechain::Mainchain& mainchain{*Assert(chainman.m_mainchain)};
         sidechain::State side{m_chainstate.m_scdb.m_side};
         sidechain::StateUndo undo;
         std::string reject_reason;
         // The block is built for the next mainchain block to commit to.
-        if (!side.ApplyMainEvents(mainchain.Height(), mainchain, nHeight, undo, side_outputs, reject_reason)) {
+        if (!side.ApplyMainEvents(mainchain.Height(), mainchain, nHeight, side_params, undo, side_outputs, reject_reason)) {
             throw std::runtime_error(strprintf("%s: the block does not fit the mainchain on record (%s)", __func__, reject_reason));
         }
+        // Take transactions out of the block, with what spends their outputs.
+        const auto drop{[&](std::set<Txid> dropped) {
+            // The fee and sigop lists have no entry for the coinbase: transaction i is entry i - 1.
+            std::vector<CTransactionRef> vtx{pblock->vtx[0]};
+            std::vector<CAmount> fees;
+            std::vector<int64_t> sigops;
+            for (size_t i{1}; i < pblock->vtx.size(); ++i) {
+                const CTransaction& tx{*pblock->vtx[i]};
+                const bool depends{std::any_of(tx.vin.begin(), tx.vin.end(), [&](const CTxIn& in) { return dropped.contains(in.prevout.hash); })};
+                if (depends) dropped.insert(tx.GetHash());
+                if (dropped.contains(tx.GetHash())) {
+                    nFees -= pblocktemplate->vTxFees[i - 1];
+                    nBlockWeight -= GetTransactionWeight(tx);
+                    nBlockSigOpsCost -= pblocktemplate->vTxSigOpsCost[i - 1];
+                    --nBlockTx;
+                    continue;
+                }
+                vtx.push_back(pblock->vtx[i]);
+                fees.push_back(pblocktemplate->vTxFees[i - 1]);
+                sigops.push_back(pblocktemplate->vTxSigOpsCost[i - 1]);
+            }
+            pblock->vtx = std::move(vtx);
+            pblocktemplate->vTxFees = std::move(fees);
+            pblocktemplate->vTxSigOpsCost = std::move(sigops);
+        }};
         std::optional<uint256> bundle_hash;
         std::vector<COutPoint> bundled;
-        if (const auto bundle{side.NextBundle(nHeight, side_params, &bundled)}) {
-            // A bundle takes the withdrawals out of reach of refunds. If some are being
-            // refunded by transactions that may go in this block, the bundle waits.
-            const bool refund_pending{m_mempool && WITH_LOCK(m_mempool->cs, return std::any_of(bundled.begin(), bundled.end(), [&](const COutPoint& withdrawal) EXCLUSIVE_LOCKS_REQUIRED(m_mempool->cs) { return m_mempool->m_refunds.contains(withdrawal); }))};
+        const auto bundle{side.NextBundle(nHeight, pindexPrev->GetBlockHash(), side_params, &bundled)};
+        // Not a bundle the mainchain has closed already: the block would be invalid.
+        if (bundle && !mainchain.ClosedHeight(bundle->GetHash().ToUint256())) {
+            // A bundle takes its withdrawals out of reach of refunds. Someone who just made a
+            // withdrawal can still take it back: while every withdrawal of the bundle is recent, the
+            // bundle waits for refunds that may go in this block. Once one has waited longer, the
+            // bundle goes first, and requests in this block to refund one of its withdrawals leave it,
+            // with what depends on them -- otherwise a refund kept pending on purpose, of ever new
+            // withdrawals, would hold every withdrawal back.
+            const bool overdue{std::any_of(bundled.begin(), bundled.end(), [&](const COutPoint& withdrawal) {
+                const auto it{side.Withdrawals().find(withdrawal)};
+                return it != side.Withdrawals().end() && nHeight - it->second.height > sidechain::REFUND_GRACE_BLOCKS;
+            })};
+            const bool refund_pending{!overdue && m_mempool && WITH_LOCK(m_mempool->cs, return std::any_of(bundled.begin(), bundled.end(), [&](const COutPoint& withdrawal) EXCLUSIVE_LOCKS_REQUIRED(m_mempool->cs) { return m_mempool->m_refunds.contains(withdrawal); }))};
+            const std::set<COutPoint> taken(bundled.begin(), bundled.end());
+            std::set<Txid> dropped;
+            for (size_t i{1}; !refund_pending && i < pblock->vtx.size(); ++i) {
+                const CTransaction& tx{*pblock->vtx[i]};
+                const bool refunds_taken{std::any_of(tx.vout.begin(), tx.vout.end(), [&](const CTxOut& out) {
+                    const auto refund{sidechain::ParseRefundScript(out.scriptPubKey)};
+                    return refund && taken.contains(refund->withdrawal);
+                })};
+                const bool depends{std::any_of(tx.vin.begin(), tx.vin.end(), [&](const CTxIn& in) { return dropped.contains(in.prevout.hash); })};
+                if (refunds_taken || depends) dropped.insert(tx.GetHash());
+            }
+            if (!dropped.empty()) drop(std::move(dropped));
             if (!refund_pending) {
                 bundle_hash = bundle->GetHash().ToUint256();
-                if (!side.StartBundle(*bundle_hash, nHeight, side_params, undo, reject_reason)) bundle_hash.reset();
+                if (!side.StartBundle(*bundle_hash, nHeight, pindexPrev->GetBlockHash(), side_params, undo, reject_reason)) bundle_hash.reset();
             }
         }
-        for (size_t i{1}; i < pblock->vtx.size(); ++i) {
-            if (!side.ApplyTx(*pblock->vtx[i], nHeight, side_params, undo, side_outputs, reject_reason)) {
-                throw std::runtime_error(strprintf("%s: transaction %s breaks the sidechain rules (%s)", __func__, pblock->vtx[i]->GetHash().ToString(), reject_reason));
+        // A transaction of the mempool can break the rules of the sidechain in this block: a refund of a
+        // withdrawal that the mainchain events above paid, say. It is left out, with what depends on it,
+        // rather than making no block at all -- the mempool is only cleaned when the tip changes.
+        const sidechain::State side_before_txs{side};
+        const sidechain::StateUndo undo_before_txs{undo};
+        for (bool applied{false}; !applied;) {
+            applied = true;
+            side = side_before_txs;
+            undo = undo_before_txs;
+            side_tx_outputs.clear();
+            for (size_t i{1}; i < pblock->vtx.size(); ++i) {
+                if (!side.ApplyTx(*pblock->vtx[i], nHeight, side_params, undo, side_tx_outputs, reject_reason)) {
+                    LogInfo("%s: leaving out transaction %s, which breaks the sidechain rules in this block (%s)", __func__, pblock->vtx[i]->GetHash().ToString(), reject_reason);
+                    drop({pblock->vtx[i]->GetHash()});
+                    applied = false;
+                    break;
+                }
             }
         }
+        // As many of the payouts owed as a block may pay; the rest wait for the next block.
+        side_outputs = side.TakePayouts(std::move(side_outputs), std::move(side_tx_outputs), undo);
         if (bundle_hash) side_outputs.emplace_back(0, sidechain::BundleCommitScript(*bundle_hash));
     }
 

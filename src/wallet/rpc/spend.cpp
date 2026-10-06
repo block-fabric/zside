@@ -403,7 +403,7 @@ RPCMethod createsidechaindeposit()
     pwallet->BlockUntilSyncedToCurrentChain();
 
     const int64_t slot{request.params[0].getInt<int64_t>()};
-    if (slot < 0 || slot > std::numeric_limits<uint32_t>::max()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid sidechain slot");
+    if (slot < 0 || slot >= drivechain::MAX_SLOTS) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid sidechain slot");
     const std::string destination{request.params[1].get_str()};
     if (destination.empty() || destination.size() > drivechain::MAX_DEPOSIT_DESTINATION_SIZE || destination == drivechain::WITHDRAWAL_RETURN_DEST) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid destination: it must have 1 to %u bytes and cannot be \"%s\"", drivechain::MAX_DEPOSIT_DESTINATION_SIZE, drivechain::WITHDRAWAL_RETURN_DEST));
@@ -431,7 +431,8 @@ RPCMethod createsidechaindeposit()
         {CNoDestination{escrow_script}, escrow.amount + amount, /*fSubtractFeeFromAmount=*/false},
         {CNoDestination{drivechain::DestinationScript(destination)}, 0, /*fSubtractFeeFromAmount=*/false},
     };
-    auto res{FundTransaction(*pwallet, tx, recipients, /*change_pos=*/std::nullopt, /*lockUnspents=*/false, coin_control)};
+    // The destination has to follow the treasury output (BIP300 M5): the change goes after both.
+    auto res{FundTransaction(*pwallet, tx, recipients, /*change_pos=*/2, /*lockUnspents=*/false, coin_control)};
     if (!res) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(res).original);
 
     CMutableTransaction mtx{*res->tx};
@@ -471,7 +472,7 @@ RPCMethod createbmmrequest()
     pwallet->BlockUntilSyncedToCurrentChain();
 
     const int64_t slot{request.params[0].getInt<int64_t>()};
-    if (slot < 0 || slot > std::numeric_limits<uint32_t>::max()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid sidechain slot");
+    if (slot < 0 || slot >= drivechain::MAX_SLOTS) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid sidechain slot");
     const uint256 side_block_hash{ParseHashV(request.params[1], "sideblockhash")};
     const CAmount amount{AmountFromValue(request.params[2])};
     if (amount <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "The amount must be positive");
@@ -494,12 +495,13 @@ RPCMethod createbmmrequest()
     coin_control.fOverrideFeeRate = true;
     const CFeeRate probe_rate{DEFAULT_MIN_RELAY_TX_FEE * 10};
     coin_control.m_feerate = probe_rate;
-    auto probe{CreateTransaction(*pwallet, recipients, /*change_pos=*/std::nullopt, coin_control, /*sign=*/false)};
+    // The request has to be output 0 (BIP301 M8): the change goes after it.
+    auto probe{CreateTransaction(*pwallet, recipients, /*change_pos=*/1, coin_control, /*sign=*/false)};
     if (!probe) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(probe).original);
     const int64_t vsize{std::max<int64_t>(1, probe->fee * 1000 / probe_rate.GetFeePerK())};
     coin_control.m_feerate = CFeeRate{amount, static_cast<int32_t>(vsize)};
 
-    auto res{CreateTransaction(*pwallet, recipients, /*change_pos=*/std::nullopt, coin_control, /*sign=*/true)};
+    auto res{CreateTransaction(*pwallet, recipients, /*change_pos=*/1, coin_control, /*sign=*/true)};
     if (!res) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(res).original);
     pwallet->CommitTransaction(res->tx, /*replaces_txid=*/std::nullopt, /*comment=*/std::nullopt, /*comment_to=*/std::nullopt);
     if (!pwallet->chain().isInMempool(res->tx->GetHash())) {

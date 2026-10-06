@@ -8,8 +8,17 @@
 #include <QColor>
 #include <QFile>
 #include <QFont>
+#include <QFontDatabase>
 #include <QObject>
+#include <QFontMetrics>
 #include <QPalette>
+#include <QScreen>
+#include <QSize>
+#include <QLayout>
+#include <QTimer>
+#include <QWidget>
+#include <QEvent>
+#include <QPushButton>
 #include <QSettings>
 #include <QStyle>
 #include <QStyleFactory>
@@ -23,6 +32,7 @@ const char* const SETTING{"Theme"};
 const char* const SYSTEM{"system"};
 const char* const SETTING_FONT_FAMILY{"FontFamily"};
 const char* const SETTING_FONT_SIZE{"FontSizeAdjustment"};
+const char* const SETTING_FRAME{"ThemedFrame"};
 
 /** The colours a theme is made of. The rest of the palette is derived from them. */
 struct Colors {
@@ -130,27 +140,165 @@ QPalette MakePalette(const Colors& c)
     return palette;
 }
 
+/** A colour as a faint wash over what is behind it, in the notation of style sheets. */
+QString Tint(const QColor& color)
+{
+    return QStringLiteral("rgba(%1, %2, %3, 56)").arg(color.red()).arg(color.green()).arg(color.blue());
+}
+
 QString MakeStyleSheet(const Colors& c)
 {
     return QStringLiteral(
                "QToolTip { color: %1; background-color: %2; border: 1px solid %3; }"
                "QToolBar { border: none; }"
-               "QToolBar#sidebar { border-right: 2px solid %3; background-color: %2; spacing: 2px; padding: 4px 0px; }"
-               "QToolBar#sidebar QToolButton { padding: 6px 8px; border-radius: 4px; text-align: left; }"
+               "QToolBar#sidebar { border-right: 2px solid %3; background-color: %2; spacing: 1px; padding: 4px 0px; }"
+               "QPushButton#sidebarEntry { background: transparent; border: none; border-radius: 4px; padding: 5px 8px 5px 6px; margin: 0px 3px; text-align: left; font-weight: normal; }"
+               "QPushButton#sidebarEntry:hover { background-color: rgba(128, 128, 128, 45); }"
+               "QPushButton#sidebarEntry:checked { background-color: %5; color: %1; border-left: 3px solid %3; padding-left: 3px; font-weight: bold; }"
+               "QToolBar#sidebar QToolButton#textSmaller, QToolBar#sidebar QToolButton#textLarger { padding: 2px 3px; }"
                "QToolBar QToolButton:checked { background-color: %3; color: %4; border-radius: 4px; }"
                "QGroupBox { font-weight: bold; }"
                "QHeaderView::section { background-color: %2; color: %1; padding: 4px; border: none; border-bottom: 1px solid %3; }")
-        .arg(c.button_text.name(), c.button.name(), c.highlight.name(), c.highlighted_text.name());
+        .arg(c.button_text.name(), c.button.name(), c.highlight.name(), c.highlighted_text.name(), Tint(c.highlight));
 }
 
 QString SidebarStyleSheet(const Colors& c)
 {
     return QStringLiteral(
-               "QToolBar#sidebar { border: none; border-right: 2px solid %1; spacing: 2px; padding: 4px 0px; }"
-               "QToolBar#sidebar QToolButton { padding: 6px 8px; border-radius: 4px; text-align: left; }"
-               "QToolBar#sidebar QToolButton:checked { background-color: %1; color: %2; }")
-        .arg(c.highlight.name(), c.highlighted_text.name());
+               "QToolBar#sidebar { border: none; border-right: 2px solid %1; spacing: 1px; padding: 4px 0px; min-width: 0px; }"
+               "QPushButton#sidebarEntry { background: transparent; border: none; border-radius: 4px; padding: 5px 8px 5px 6px; margin: 0px 3px; min-width: 0px; text-align: left; font-weight: normal; }"
+               "QPushButton#sidebarEntry:hover { background-color: rgba(128, 128, 128, 45); }"
+               "QPushButton#sidebarEntry:checked { background-color: %2; color: %3; border-left: 3px solid %1; padding-left: 3px; font-weight: bold; }"
+               "QPushButton#sidebarEntry:disabled { background: transparent; }"
+               "QToolBar#sidebar QToolButton#textSmaller, QToolBar#sidebar QToolButton#textLarger { padding: 2px 3px; }"
+               "QWidget#sidebarMining QPushButton { padding: 4px 6px; min-width: 0px; }"
+               "QWidget#sidebarMining QPushButton:checked { background-color: %2; border: 1px solid %1; color: %3; }"
+               "QWidget#sidebarMining QLineEdit { padding: 3px 4px; min-width: 0px; }")
+        .arg(c.highlight.name(), Tint(c.highlight), c.window_text.name());
 }
+
+/** The title bar and the border of a window framed by ThemedFrame. */
+QString FrameStyleSheet(const Colors& c)
+{
+    return QStringLiteral(
+               "QWidget#titleBar { background-color: %1; border-bottom: 1px solid %3; }"
+               "QWidget#titleBar QMenuBar { background-color: transparent; }"
+               "QLabel#titleText { color: %2; font-weight: bold; background-color: transparent; }"
+               "QLabel#titleIcon { background-color: transparent; }"
+               "QToolButton#titleButton, QToolButton#titleClose { border: none; border-radius: 0px; padding: 5px 14px; color: %2; background-color: transparent; }"
+               "QToolButton#titleButton:hover { background-color: %3; color: %4; }"
+               "QToolButton#titleClose:hover { background-color: #d9343f; color: #ffffff; }"
+               // The border the window is resized by is there, and does not show.
+               "QFrame#frameEdge { background-color: %5; border: none; }")
+        .arg(c.button.name(), c.button_text.name(), c.highlight.name(), c.highlighted_text.name(), c.window.name());
+}
+
+/** Kinds of font a look asks for. Which family it gets depends on what the computer has. */
+enum class FontKind { DESKTOP, SANS, ROUNDED, SERIF, MONO };
+
+struct LookDef {
+    //! The theme whose colours the look has; the look goes by its name too.
+    const char* theme;
+    FontKind font;
+};
+
+const LookDef LOOKS[]{
+    {"system", FontKind::DESKTOP},
+    {"light", FontKind::SANS},
+    {"dark", FontKind::SANS},
+    {"classic", FontKind::SERIF},
+    {"sepia", FontKind::SERIF},
+    {"rose", FontKind::ROUNDED},
+    {"midnight", FontKind::SANS},
+    {"ocean", FontKind::ROUNDED},
+    {"nord", FontKind::SANS},
+    {"dracula", FontKind::MONO},
+    {"glass", FontKind::ROUNDED},
+    {"amethyst", FontKind::SERIF},
+    {"wow", FontKind::ROUNDED},
+    {"solar", FontKind::SERIF},
+    {"crimson", FontKind::SANS},
+    {"neon", FontKind::MONO},
+    {"matrix", FontKind::MONO},
+    {"qdarkstyle", FontKind::DESKTOP},
+};
+
+/** The first family of its kind that this computer has; empty, the font of the desktop, if it has none. */
+QString FontFamily(FontKind kind)
+{
+    QStringList wanted;
+    switch (kind) {
+    case FontKind::DESKTOP: return {};
+    case FontKind::SANS: wanted = {"Inter", "Segoe UI", "Noto Sans", "Open Sans", "DejaVu Sans", "Helvetica Neue", "Arial"}; break;
+    case FontKind::ROUNDED: wanted = {"Nunito", "Quicksand", "Ubuntu", "Cantarell", "Verdana", "Trebuchet MS", "DejaVu Sans"}; break;
+    case FontKind::SERIF: wanted = {"Georgia", "Noto Serif", "DejaVu Serif", "Liberation Serif", "Times New Roman"}; break;
+    case FontKind::MONO: wanted = {"JetBrains Mono", "Fira Code", "Cascadia Mono", "DejaVu Sans Mono", "Menlo", "Consolas", "Liberation Mono", "Courier New"}; break;
+    }
+    static const QStringList installed{QFontDatabase::families()};
+    for (const QString& family : wanted) {
+        if (installed.contains(family)) return family;
+    }
+    return {};
+}
+
+/**
+ * Keeps push buttons at least as wide as their text. A style sheet that gives buttons a minimum width
+ * makes that the least a layout may give them, and a crowded row then cuts their text off, the more so
+ * the larger the text is.
+ *
+ * And keeps windows at least as large as what is in them: a window that was given a size when it was
+ * made, for the text of the desktop, is too small for larger text, and what is in it gets squeezed.
+ */
+class ButtonFitter : public QObject
+{
+public:
+    using QObject::QObject;
+
+    static void Fit(QPushButton* button)
+    {
+        if (button->text().isEmpty()) return;
+        QString text{button->text()};
+        text.remove(QLatin1Char('&'));
+        // The themes write buttons in bold, which the metrics of the button do not always know yet.
+        QFont bold{button->font()};
+        bold.setBold(true);
+        int width{QFontMetrics{bold}.horizontalAdvance(text) + 36};
+        if (!button->icon().isNull()) width += button->iconSize().width() + 6;
+        if (button->minimumWidth() != width) button->setMinimumWidth(width);
+    }
+
+    static void Fit(QWidget* window)
+    {
+        if (!window->isWindow() || !window->isVisible() || !window->layout() || window->isMaximized() || window->isFullScreen()) return;
+        window->layout()->activate();
+        // The size the contents would like, not the least they put up with: under a style sheet that is
+        // less than what they need. No larger than the screen has room for.
+        QSize needed{window->layout()->totalSizeHint()};
+        if (const QScreen* screen{window->screen()}) needed = needed.boundedTo(screen->availableGeometry().size() - QSize(40, 60));
+        if (needed.width() > window->width() || needed.height() > window->height()) window->resize(window->size().expandedTo(needed));
+    }
+
+protected:
+    bool eventFilter(QObject* object, QEvent* event) override
+    {
+        switch (event->type()) {
+        case QEvent::Show:
+        case QEvent::FontChange:
+        case QEvent::StyleChange:
+        case QEvent::LanguageChange:
+            if (auto* button{qobject_cast<QPushButton*>(object)}) {
+                Fit(button);
+            } else if (auto* widget{qobject_cast<QWidget*>(object)}; widget && widget->isWindow() && event->type() == QEvent::Show) {
+                // Once what is in the window has its fonts and its sizes.
+                QTimer::singleShot(0, widget, [widget] { Fit(widget); });
+            }
+            break;
+        default:
+            break;
+        }
+        return false;
+    }
+};
 
 /** The look the application had before a theme was applied. */
 struct Original {
@@ -160,6 +308,46 @@ struct Original {
 };
 std::optional<Original> g_original;
 } // namespace
+
+Signals* Changes()
+{
+    static Signals signals_object;
+    return &signals_object;
+}
+
+QList<Info> Looks()
+{
+    QList<Info> looks;
+    for (const LookDef& look : LOOKS) {
+        const Colors* theme{Find(look.theme)};
+        QString name{theme ? QApplication::translate("Theme", theme->name) : QObject::tr("Same as the desktop")};
+        if (const QString family{FontFamily(look.font)}; !family.isEmpty()) name += QStringLiteral(" · ") + family;
+        looks.push_back({look.theme, name});
+    }
+    return looks;
+}
+
+QString SavedLook()
+{
+    for (const LookDef& look : LOOKS) {
+        // The size of the text is the user's own business, whatever the look.
+        if (Saved() == look.theme && SavedFontFamily() == FontFamily(look.font)) return look.theme;
+    }
+    return {};
+}
+
+void SaveLook(const QString& id)
+{
+    for (const LookDef& look : LOOKS) {
+        if (id != look.theme) continue;
+        QSettings settings;
+        settings.setValue(SETTING, id);
+        settings.setValue(SETTING_FONT_FAMILY, FontFamily(look.font));
+        Apply(id);
+        Q_EMIT Changes()->changed();
+        return;
+    }
+}
 
 QList<Info> Available()
 {
@@ -178,6 +366,7 @@ void Save(const QString& id)
 {
     QSettings().setValue(SETTING, id);
     Apply(id);
+    Q_EMIT Changes()->changed();
 }
 
 void Apply(const QString& id)
@@ -194,11 +383,11 @@ void Apply(const QString& id)
         // The Fusion style draws everything with the palette, which the styles of some desktops do not.
         QApplication::setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
         QApplication::setPalette(MakePalette(*theme));
-        QString style_sheet{MakeStyleSheet(*theme)};
+        QString style_sheet{MakeStyleSheet(*theme) + FrameStyleSheet(*theme)};
         if (theme->style_sheet) {
             QFile file{theme->style_sheet};
             // The sheet of the theme, then what this wallet has that the sheet does not know of.
-            if (file.open(QFile::ReadOnly | QFile::Text)) style_sheet = QString::fromUtf8(file.readAll()) + SidebarStyleSheet(*theme);
+            if (file.open(QFile::ReadOnly | QFile::Text)) style_sheet = QString::fromUtf8(file.readAll()) + SidebarStyleSheet(*theme) + FrameStyleSheet(*theme);
         }
         qApp->setStyleSheet(style_sheet);
     } else {
@@ -209,9 +398,27 @@ void Apply(const QString& id)
     ApplyFont();
 }
 
+bool SavedFrame() { return QSettings().value(SETTING_FRAME, true).toBool(); }
+
+void SaveFrame(bool themed)
+{
+    QSettings().setValue(SETTING_FRAME, themed);
+    Q_EMIT Changes()->changed();
+}
+
+bool FrameWanted()
+{
+#ifdef Q_OS_MACOS
+    // The menus are at the top of the screen there, and the frame is the one of the system.
+    return false;
+#else
+    return SavedFrame() && Find(Saved()) != nullptr;
+#endif
+}
+
 QString SavedFontFamily() { return QSettings().value(SETTING_FONT_FAMILY).toString(); }
 
-int SavedFontSizeAdjustment() { return std::clamp(QSettings().value(SETTING_FONT_SIZE, 0).toInt(), MIN_FONT_SIZE_ADJUSTMENT, MAX_FONT_SIZE_ADJUSTMENT); }
+int SavedFontSizeAdjustment() { return std::clamp(QSettings().value(SETTING_FONT_SIZE, DEFAULT_FONT_SIZE_ADJUSTMENT).toInt(), MIN_FONT_SIZE_ADJUSTMENT, MAX_FONT_SIZE_ADJUSTMENT); }
 
 void SaveFont(const QString& family, int size_adjustment)
 {
@@ -219,10 +426,16 @@ void SaveFont(const QString& family, int size_adjustment)
     settings.setValue(SETTING_FONT_FAMILY, family);
     settings.setValue(SETTING_FONT_SIZE, std::clamp(size_adjustment, MIN_FONT_SIZE_ADJUSTMENT, MAX_FONT_SIZE_ADJUSTMENT));
     ApplyFont();
+    Q_EMIT Changes()->changed();
 }
 
 void ApplyFont()
 {
+    static ButtonFitter* fitter{nullptr};
+    if (!fitter) {
+        fitter = new ButtonFitter(qApp);
+        qApp->installEventFilter(fitter);
+    }
     static const QFont original{QApplication::font()};
     const QString family{SavedFontFamily()};
     const int adjustment{SavedFontSizeAdjustment()};
@@ -241,6 +454,13 @@ void ApplyFont()
                             .arg(font.pointSizeF() > 0 ? font.pointSizeF() : 9.0, 0, 'f', 1);
     }
     if (sheet != qApp->styleSheet()) qApp->setStyleSheet(sheet);
+    // The buttons there are take the width their text has now.
+    for (QWidget* widget : QApplication::allWidgets()) {
+        if (auto* button{qobject_cast<QPushButton*>(widget)}) ButtonFitter::Fit(button);
+    }
+    for (QWidget* window : QApplication::topLevelWidgets()) {
+        if (window->isVisible()) QTimer::singleShot(0, window, [window] { ButtonFitter::Fit(window); });
+    }
 }
 
 } // namespace Theme

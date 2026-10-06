@@ -11,6 +11,7 @@
  * headers for everything under src/rpc/ */
 class CRPCTable;
 
+void RegisterShieldedRPCCommands(CRPCTable&);
 void RegisterBlockchainRPCCommands(CRPCTable &tableRPC);
 void RegisterDrivechainRPCCommands(CRPCTable&);
 void RegisterSidechainRPCCommands(CRPCTable&);
@@ -27,6 +28,7 @@ void RegisterTxoutProofRPCCommands(CRPCTable&);
 
 static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
 {
+    RegisterShieldedRPCCommands(t);
     RegisterBlockchainRPCCommands(t);
     // This chain is a sidechain and has none of its own, so the commands that
     // manage the sidechains of a chain (RegisterDrivechainRPCCommands) are left out.

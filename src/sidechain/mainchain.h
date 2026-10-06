@@ -7,6 +7,7 @@
 
 #include <consensus/amount.h>
 #include <dbwrapper.h>
+#include <primitives/transaction.h>
 #include <serialize.h>
 #include <sync.h>
 #include <uint256.h>
@@ -27,8 +28,11 @@ struct MainDeposit {
     CAmount amount{0};
     uint256 txid;
     uint32_t burn_index{0};
+    //! For the change of a withdrawal: the bundle it paid out, and what it paid.
+    uint256 bundle;
+    std::vector<CTxOut> payouts;
 
-    SERIALIZE_METHODS(MainDeposit, obj) { READWRITE(obj.destination, obj.amount, obj.txid, obj.burn_index); }
+    SERIALIZE_METHODS(MainDeposit, obj) { READWRITE(obj.destination, obj.amount, obj.txid, obj.burn_index, obj.bundle, obj.payouts); }
     friend bool operator==(const MainDeposit&, const MainDeposit&) = default;
 };
 
@@ -46,6 +50,7 @@ struct MainBundleEvent {
 struct MainBlock {
     uint256 hash;
     uint256 prev_hash;
+    //! The median time of the block (see getsidechainevents), which miners cannot move ahead.
     int64_t time{0};
     //! Hash of the block of this sidechain that the mainchain block committed to (blind merged mining).
     std::optional<uint256> bmm;
@@ -96,6 +101,10 @@ public:
      * `side_hash`, if any did.
      */
     std::optional<int> BmmHeight(const uint256& side_hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Like BmmHeight, but only what is on record: never a commitment assumed by AssumeCommitted. */
+    std::optional<int> CommittedHeight(const uint256& side_hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Height of the mainchain block that closed (paid out or failed) the bundle `hash`, if any did. */
+    std::optional<int> ClosedHeight(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Add the block that follows the last one on record. @return false if it does not follow it. */
     bool Append(const MainBlock& block) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -130,6 +139,8 @@ private:
     std::vector<MainBlock> m_blocks GUARDED_BY(m_mutex);
     //! Sidechain block hash to the height of the mainchain block that committed to it.
     std::map<uint256, int> m_bmm GUARDED_BY(m_mutex);
+    //! Bundle hash to the height of the mainchain block that closed it.
+    std::map<uint256, int> m_closed GUARDED_BY(m_mutex);
     std::optional<int> m_assumed_height GUARDED_BY(m_mutex);
     std::unique_ptr<CDBWrapper> m_db;
 };

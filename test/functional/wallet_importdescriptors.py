@@ -569,11 +569,11 @@ class ImportDescriptorsTest(BitcoinTestFramework):
         self.log.info('Key ranges should be imported in order')
         xpub = "tpubDAXcJ7s7ZwicqjprRaEWdPoHKrCS215qxGYxpusRLLmJuT69ZSicuGdSfyvyKpvUNYBW1s2U3NSrT6vrCYB9e6nZUEvrqnwXPF8ArTCRXMY"
         addresses = [
-            'rchn1qtmp74ayg7p24uslctssvjm06q5phz4yru34yep', # m/0'/0'/0
-            'rchn1q8vprchan07gzagd5e6v9wd7azyucksq2u4nku2', # m/0'/0'/1
-            'rchn1qtuqdtha7zmqgcrr26n2rqxztv5y8rafjmgjs43', # m/0'/0'/2
-            'rchn1qau64272ymawq26t90md6an0ps99qkrsew2kklz', # m/0'/0'/3
-            'rchn1qsg97266hrh6cpmutqen8s4s962aryy77gvz9zz', # m/0'/0'/4
+            'rsc1qtmp74ayg7p24uslctssvjm06q5phz4yr882kz9', # m/0'/0'/0
+            'rsc1q8vprchan07gzagd5e6v9wd7azyucksq28rvy8w', # m/0'/0'/1
+            'rsc1qtuqdtha7zmqgcrr26n2rqxztv5y8rafjq7dzw4', # m/0'/0'/2
+            'rsc1qau64272ymawq26t90md6an0ps99qkrse4ufyyx', # m/0'/0'/3
+            'rsc1qsg97266hrh6cpmutqen8s4s962aryy77n6ahex', # m/0'/0'/4
         ]
 
         self.test_importdesc({'desc': descsum_create('wpkh([80002067/0h/0h]' + xpub + '/*)'),

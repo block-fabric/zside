@@ -4,6 +4,8 @@
 
 #include <core_io.h>
 
+#include <zside/shielded.h>
+
 #include <addresstype.h>
 #include <coins.h>
 #include <consensus/amount.h>
@@ -521,7 +523,8 @@ void TxToUniv(const CTransaction& tx, const uint256& block_hash, UniValue& entry
     entry.pushKV("vout", std::move(vout));
 
     if (have_undo) {
-        const CAmount fee = amt_total_in - amt_total_out;
+        // zSide: what the transaction takes out of the shielded pool is an input too.
+        const CAmount fee = amt_total_in + zside::ShieldedValueIn(tx) - amt_total_out;
         CHECK_NONFATAL(MoneyRange(fee));
         entry.pushKV("fee", ValueFromAmount(fee));
     }

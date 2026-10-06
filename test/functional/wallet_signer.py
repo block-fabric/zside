@@ -88,7 +88,7 @@ class WalletSignerTest(BitcoinTestFramework):
         assert_equal(hww.getwalletinfo()["keypoolsize"], 40)
 
         address1 = hww.getnewaddress(address_type="bech32")
-        assert_equal(address1, "rchn1qm90ugl4d48jv8n6e5t9ln6t9zlpm5th6atc9d9")
+        assert_equal(address1, "rsc1qm90ugl4d48jv8n6e5t9ln6t9zlpm5th6xa8hkp")
         address_info = hww.getaddressinfo(address1)
         assert_equal(address_info['solvable'], True)
         assert_equal(address_info['ismine'], True)
@@ -109,7 +109,7 @@ class WalletSignerTest(BitcoinTestFramework):
         assert_equal(address_info['hdkeypath'], "m/44h/1h/0h/0/0")
 
         address4 = hww.getnewaddress(address_type="bech32m")
-        assert_equal(address4, "rchn1phw4cgpt6cd30kz9k4wkpwm872cdvhss29jga2xpmftelhqll62mssefn9h")
+        assert_equal(address4, "rsc1phw4cgpt6cd30kz9k4wkpwm872cdvhss29jga2xpmftelhqll62ms6uv9z7")
         address_info = hww.getaddressinfo(address4)
         assert_equal(address_info['solvable'], True)
         assert_equal(address_info['ismine'], True)
@@ -144,7 +144,7 @@ class WalletSignerTest(BitcoinTestFramework):
 
         # Returned address MUST match:
         address_fail = hww.getnewaddress(address_type="bech32")
-        assert_equal(address_fail, "rchn1ql7zg7ukh3dwr25ex2zn9jse926f27xy2g0etpk")
+        assert_equal(address_fail, "rsc1ql7zg7ukh3dwr25ex2zn9jse926f27xy2nexe6j")
         assert_raises_rpc_error(-1, 'Signer echoed unexpected address wrong_address',
             hww.walletdisplayaddress, address_fail
         )

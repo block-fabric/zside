@@ -35,19 +35,21 @@ struct BlockUndo {
     uint256 prev_block_hash;
     //! The value each changed slot had before the block.
     std::vector<SlotUndo> slots;
-    //! Whether the block added a proposal, at the end of the list.
-    bool proposal_added{false};
-    //! Hashes of the proposals whose ack count the block incremented.
-    std::vector<uint256> acked;
+    //! Number of proposals the block added, at the end of the list.
+    uint32_t proposals_added{0};
+    //! Slots and hashes of the proposals whose ack count the block incremented.
+    std::vector<std::pair<SidechainId, uint256>> acked;
     //! Proposals the block removed, with the position each had when it was removed, in order of removal.
     std::vector<std::pair<uint32_t, Proposal>> removed;
     //! Bundles the block closed, by being paid out or by failing.
     std::vector<std::pair<SidechainId, uint256>> closed;
+    //! The votes of the previous block, which this block replaced.
+    std::map<SidechainId, Vote> last_votes;
 
     //! What the block changed in the state of this chain as a sidechain.
     sidechain::StateUndo side;
 
-    SERIALIZE_METHODS(BlockUndo, obj) { READWRITE(obj.prev_block_hash, obj.slots, obj.proposal_added, obj.acked, obj.removed, obj.closed, obj.side); }
+    SERIALIZE_METHODS(BlockUndo, obj) { READWRITE(obj.prev_block_hash, obj.slots, obj.proposals_added, obj.acked, obj.removed, obj.closed, obj.last_votes, obj.side); }
 };
 
 /** What the rules of a chain that is itself a sidechain need to check a block. */
@@ -70,7 +72,7 @@ struct SideContext {
 class SidechainDB
 {
 public:
-    /** Vote of a block on the bundles of the sidechain in `first`. */
+    /** The active sidechains with their pending bundles, in slot order; a vote message has one entry per element. */
     using PendingBundles = std::vector<std::pair<SidechainId, std::vector<Bundle>>>;
 
     /**
@@ -117,7 +119,9 @@ public:
     const Slot* GetSlot(SidechainId id) const;
     bool IsActive(SidechainId id) const { return m_slots.contains(id); }
     const std::vector<Proposal>& GetProposals() const { return m_proposals; }
+    /** The proposal with this hash, for any slot; see the other overload. */
     const Proposal* GetProposal(const uint256& hash) const;
+    const Proposal* GetProposal(SidechainId slot, const uint256& hash) const;
     /** Whether a bundle was paid out or failed. */
     bool IsClosed(SidechainId id, const uint256& bundle_hash) const { return m_closed.contains({id, bundle_hash}); }
     /** Whether a bundle was paid out (true) or failed (false), if it was closed. Sidechains refund the withdrawals of a failed bundle. */
@@ -128,10 +132,12 @@ public:
     }
 
     /**
-     * The sidechains that have pending bundles, in slot order. The vote
-     * message of the next block has one entry per element.
+     * The active sidechains, in slot order, with their pending bundles. The
+     * vote message of the next block has one entry per element.
      */
     PendingBundles GetPendingBundles() const;
+    /** What the last block voted, per sidechain; what a REPEAT_PREVIOUS vote repeats. */
+    const std::map<SidechainId, Vote>& GetLastVotes() const { return m_last_votes; }
 
     /** Number of blocks a proposal has left before it activates, if it keeps collecting acks. */
     static int BlocksUntilActivation(const Proposal& proposal, bool slot_in_use, int height, const Consensus::DrivechainParams& params);
@@ -149,7 +155,7 @@ public:
      */
     sidechain::State m_side;
 
-    SERIALIZE_METHODS(SidechainDB, obj) { READWRITE(obj.m_block_hash, obj.m_slots, obj.m_proposals, obj.m_closed, obj.m_side); }
+    SERIALIZE_METHODS(SidechainDB, obj) { READWRITE(obj.m_block_hash, obj.m_slots, obj.m_proposals, obj.m_closed, obj.m_last_votes, obj.m_side); }
 
     friend bool operator==(const SidechainDB&, const SidechainDB&) = default;
 
@@ -166,6 +172,8 @@ private:
     std::vector<Proposal> m_proposals;
     //! Bundles that were paid out (true) or failed (false); they cannot be proposed again.
     std::map<std::pair<SidechainId, uint256>, bool> m_closed;
+    //! The votes the last block cast: an upvote of a bundle or a downvote, per sidechain.
+    std::map<SidechainId, Vote> m_last_votes;
 };
 
 } // namespace drivechain

@@ -452,7 +452,7 @@ BOOST_AUTO_TEST_CASE(script_standard_taproot_builder)
     builder.Finalize(key_inner);
     BOOST_CHECK(builder.IsValid());
     BOOST_CHECK(builder.IsComplete());
-    BOOST_CHECK_EQUAL(EncodeDestination(builder.GetOutput()), "sc1pj6gaw944fy0xpmzzu45ugqde4rz7mqj5kj0tg8kmr5f0pjq8vnaqep3zlc");
+    BOOST_CHECK_EQUAL(EncodeDestination(builder.GetOutput()), "zs1pj6gaw944fy0xpmzzu45ugqde4rz7mqj5kj0tg8kmr5f0pjq8vnaqq7rv4r");
 }
 
 BOOST_AUTO_TEST_CASE(bip341_spk_test_vectors)

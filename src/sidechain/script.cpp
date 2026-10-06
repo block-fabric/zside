@@ -6,8 +6,10 @@
 
 #include <addresstype.h>
 #include <crypto/common.h>
+#include <drivechain/sidechain.h>
 #include <key_io.h>
 #include <pubkey.h>
+#include <script/solver.h>
 #include <tinyformat.h>
 
 #include <algorithm>
@@ -67,6 +69,20 @@ std::optional<Withdrawal> ParseWithdrawalOutput(const CTxOut& out)
     withdrawal.main_script = CScript{payload->begin() + 28, payload->end()};
     // Paying an output that cannot be spent would only take the coins out of the escrow for nobody.
     if (withdrawal.main_script.IsUnspendable()) return std::nullopt;
+    // Only output types every mainchain node relays: a bundle that pays anything else -- a sidechain
+    // treasury, bare multisig, a script of one's own -- cannot be broadcast, and would hold up
+    // every withdrawal behind it.
+    std::vector<std::vector<unsigned char>> solutions;
+    switch (Solver(withdrawal.main_script, solutions)) {
+    case TxoutType::PUBKEYHASH:
+    case TxoutType::SCRIPTHASH:
+    case TxoutType::WITNESS_V0_KEYHASH:
+    case TxoutType::WITNESS_V0_SCRIPTHASH:
+    case TxoutType::WITNESS_V1_TAPROOT:
+        break;
+    default:
+        return std::nullopt;
+    }
     return withdrawal;
 }
 
@@ -107,9 +123,19 @@ std::optional<uint256> ParseBundleCommitScript(const CScript& script)
     return uint256{std::span{*payload}};
 }
 
-CScript DepositScript(const std::string& destination)
+CScript DepositScript(const std::string& destination, uint32_t slot)
 {
-    const CTxDestination dest{DecodeDestination(destination)};
+    std::string address{destination};
+    drivechain::DepositAddress deposit_address;
+    switch (drivechain::ParseDepositAddress(destination, deposit_address)) {
+    case drivechain::DepositAddressKind::PLAIN: break;
+    case drivechain::DepositAddressKind::INVALID: return CScript() << OP_RETURN;
+    case drivechain::DepositAddressKind::VALID:
+        if (deposit_address.slot != slot) return CScript() << OP_RETURN;
+        address = deposit_address.address;
+        break;
+    }
+    const CTxDestination dest{DecodeDestination(address)};
     if (!IsValidDestination(dest)) return CScript() << OP_RETURN;
     return GetScriptForDestination(dest);
 }

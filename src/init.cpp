@@ -27,6 +27,7 @@
 #include <index/base.h>
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
+#include <index/orchardindex.h>
 #include <index/txindex.h>
 #include <index/txospenderindex.h>
 #include <init/common.h>
@@ -331,7 +332,7 @@ void Shutdown(NodeContext& node)
     if (node.cpu_miner) node.cpu_miner->Stop();
     if (node.follower) {
         node.follower->Stop();
-        if (node.chainman) node.chainman->m_mainchain_poll = nullptr;
+        if (node.chainman) WITH_LOCK(::cs_main, node.chainman->m_mainchain_poll = nullptr);
     }
     for (auto& client : node.chain_clients) {
         try {
@@ -396,6 +397,7 @@ void Shutdown(NodeContext& node)
     // Stop and delete all indexes only after flushing background callbacks.
     for (auto* index : node.indexes) index->Stop();
     if (g_txindex) g_txindex.reset();
+    if (g_orchardindex) g_orchardindex.reset();
     if (g_txospenderindex) g_txospenderindex.reset();
     if (g_coin_stats_index) g_coin_stats_index.reset();
     DestroyAllBlockFilterIndexes();
@@ -554,6 +556,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-startupnotify=<cmd>", "Execute command on startup.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-shutdownnotify=<cmd>", "Execute command immediately before beginning shutdown. The need for shutdown may be urgent, so be careful not to delay it long (if the command doesn't require interaction with the server, consider having it fork into the background).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
+    argsman.AddArg("-orchardindex", strprintf("Keep the whole note commitment tree of the shielded pool, which wallets need to spend shielded notes (default: %u)", DEFAULT_ORCHARDINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-txindex", strprintf("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)", DEFAULT_TXINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-txospenderindex", strprintf("Maintain a transaction output spender index, used by the gettxspendingprevout rpc call (default: %u)", DEFAULT_TXOSPENDERINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blockfilterindex=<type>",
@@ -1985,6 +1988,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (args.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {
         g_txindex = std::make_unique<TxIndex>(interfaces::MakeChain(node), index_cache_sizes.tx_index, false, do_reindex);
         node.indexes.emplace_back(g_txindex.get());
+    }
+
+    // zSide: the note commitment tree, for wallets to spend shielded notes.
+    if (args.GetBoolArg("-orchardindex", DEFAULT_ORCHARDINDEX)) {
+        g_orchardindex = std::make_unique<OrchardIndex>(interfaces::MakeChain(node), 8_MiB, false, do_reindex);
+        node.indexes.emplace_back(g_orchardindex.get());
     }
 
     if (args.GetBoolArg("-txospenderindex", DEFAULT_TXOSPENDERINDEX)) {

@@ -11,6 +11,7 @@
 #include <primitives/transaction_identifier.h>
 #include <script/sign.h>
 #include <wallet/db.h>
+#include <wallet/meltcast.h>
 #include <wallet/walletutil.h>
 
 #include <cstdint>
@@ -87,6 +88,8 @@ extern const std::string WALLETDESCRIPTORCKEY;
 extern const std::string WALLETDESCRIPTORKEY;
 extern const std::string WATCHMETA;
 extern const std::string WATCHS;
+extern const std::string ORCHARDFVK;
+extern const std::string MELTCAST;
 
 // Keys in this set pertain only to legacy wallets and are removed during migration to descriptors.
 extern const std::unordered_set<std::string> LEGACY_TYPES;
@@ -286,6 +289,11 @@ public:
     bool EraseRecords(const std::unordered_set<std::string>& types);
 
     bool WriteWalletFlags(uint64_t flags);
+    //! zSide: the full viewing key of the shielded account.
+    bool WriteOrchardViewingKey(const std::vector<unsigned char>& fvk) { return WriteIC(DBKeys::ORCHARDFVK, fvk); }
+    //! zSide: a step of the melt/cast plan.
+    bool WriteMeltCastJob(const MeltCastJob& job) { return WriteIC(std::make_pair(DBKeys::MELTCAST, job.id), job); }
+    bool EraseMeltCastJob(uint64_t id) { return EraseIC(std::make_pair(DBKeys::MELTCAST, id)); }
     //! Begin a new transaction
     bool TxnBegin();
     //! Commit current transaction

@@ -41,6 +41,7 @@ Mainchain::Mainchain(const std::optional<DBParams>& db_params)
         // The record is only as long as it is consistent.
         if (!m_blocks.empty() && block.prev_hash != m_blocks.back().hash) break;
         if (block.bmm) m_bmm.emplace(*block.bmm, m_blocks.size());
+        for (const MainBundleEvent& event : block.bundles) m_closed.emplace(event.hash, m_blocks.size());
         m_blocks.push_back(std::move(block));
     }
     LogInfo("Loaded the record of %d mainchain blocks", m_blocks.size());
@@ -65,6 +66,14 @@ std::optional<MainBlock> Mainchain::GetBlock(int height) const
     return m_blocks[height];
 }
 
+std::optional<int> Mainchain::CommittedHeight(const uint256& side_hash) const
+{
+    LOCK(m_mutex);
+    const auto it{m_bmm.find(side_hash)};
+    if (it != m_bmm.end()) return it->second;
+    return std::nullopt;
+}
+
 std::optional<int> Mainchain::BmmHeight(const uint256& side_hash) const
 {
     LOCK(m_mutex);
@@ -73,12 +82,21 @@ std::optional<int> Mainchain::BmmHeight(const uint256& side_hash) const
     return m_assumed_height;
 }
 
+std::optional<int> Mainchain::ClosedHeight(const uint256& hash) const
+{
+    LOCK(m_mutex);
+    const auto it{m_closed.find(hash)};
+    if (it == m_closed.end()) return std::nullopt;
+    return it->second;
+}
+
 bool Mainchain::Append(const MainBlock& block)
 {
     LOCK(m_mutex);
     if (!m_blocks.empty() && block.prev_hash != m_blocks.back().hash) return false;
     // A sidechain block has one place in the mainchain; a second commitment to it means nothing.
     if (block.bmm) m_bmm.emplace(*block.bmm, m_blocks.size());
+    for (const MainBundleEvent& event : block.bundles) m_closed.emplace(event.hash, m_blocks.size());
     if (m_db) m_db->Write(BlockKey{static_cast<uint32_t>(m_blocks.size())}, block);
     m_blocks.push_back(block);
     return true;
@@ -97,6 +115,10 @@ std::vector<MainBlock> Mainchain::Truncate(int height)
         m_db->WriteBatch(batch, /*fSync=*/true);
     }
     for (size_t i{keep}; i < m_blocks.size(); ++i) {
+        for (const MainBundleEvent& event : m_blocks[i].bundles) {
+            const auto it{m_closed.find(event.hash)};
+            if (it != m_closed.end() && it->second == static_cast<int>(i)) m_closed.erase(it);
+        }
         if (!m_blocks[i].bmm) continue;
         const auto it{m_bmm.find(*m_blocks[i].bmm)};
         if (it != m_bmm.end() && it->second == static_cast<int>(i)) m_bmm.erase(it);

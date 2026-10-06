@@ -4,6 +4,7 @@
 
 #include <addresstype.h>
 #include <core_io.h>
+#include <drivechain/sidechain.h>
 #include <key_io.h>
 #include <rpc/util.h>
 #include <sidechain/state.h>
@@ -31,6 +32,47 @@ CTransactionRef SendScript(CWallet& wallet, const CScript& script, CAmount value
 }
 
 } // namespace
+
+RPCMethod getdepositaddress()
+{
+    return RPCMethod{
+        "getdepositaddress",
+        "Returns a deposit address: what to give the wallet of the mainchain as the destination of a deposit to this\n"
+        "sidechain. It names this sidechain and ends in a checksum, so that the mainchain wallet refuses it if it is\n"
+        "mistyped or used for another sidechain.",
+        {
+            {"address", RPCArg::Type::STR, RPCArg::DefaultHint{"a new address of this wallet"}, "The address of this chain to credit"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR, "depositaddress", "The deposit address"},
+            {RPCResult::Type::STR, "address", "The address of this chain that deposits to it are credited to"},
+            {RPCResult::Type::NUM, "slot", "The slot of this sidechain on the mainchain"},
+        }},
+        RPCExamples{HelpExampleCli("getdepositaddress", "")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return UniValue::VNULL;
+    const auto slot{pwallet->chain().getSidechainSlot()};
+    if (!slot) throw JSONRPCError(RPC_MISC_ERROR, "This chain is not running as a sidechain");
+    std::string address;
+    if (request.params[0].isNull()) {
+        const auto dest{pwallet->GetNewDestination(OutputType::BECH32, "deposit")};
+        if (!dest) throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, util::ErrorString(dest).original);
+        address = EncodeDestination(*dest);
+    } else {
+        address = request.params[0].get_str();
+        if (!IsValidDestinationString(address)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Not an address of this chain");
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("depositaddress", drivechain::FormatDepositAddress({*slot, address}));
+    result.pushKV("address", address);
+    result.pushKV("slot", *slot);
+    return result;
+},
+    };
+}
 
 RPCMethod createwithdrawal()
 {

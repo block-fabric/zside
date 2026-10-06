@@ -36,12 +36,18 @@ const Proposal* SidechainDB::GetProposal(const uint256& hash) const
     return nullptr;
 }
 
+const Proposal* SidechainDB::GetProposal(SidechainId slot, const uint256& hash) const
+{
+    for (const Proposal& proposal : m_proposals) {
+        if (proposal.sidechain.slot == slot && proposal.sidechain.GetHash() == hash) return &proposal;
+    }
+    return nullptr;
+}
+
 SidechainDB::PendingBundles SidechainDB::GetPendingBundles() const
 {
     PendingBundles pending;
-    for (const auto& [id, slot] : m_slots) {
-        if (!slot.bundles.empty()) pending.emplace_back(id, slot.bundles);
-    }
+    for (const auto& [id, slot] : m_slots) pending.emplace_back(id, slot.bundles);
     return pending;
 }
 
@@ -149,41 +155,26 @@ bool SidechainDB::ConnectTx(const CTransaction& tx, const Consensus::DrivechainP
 
     std::string destination;
     if (new_amount > old_amount) {
-        // Deposit. The first OP_RETURN output names the destination on the sidechain.
+        // Deposit (M5). The output after the treasury output names the destination on the sidechain.
         std::optional<std::string> dest;
-        for (const CTxOut& out : tx.vout) {
-            if (out.scriptPubKey.empty() || out.scriptPubKey[0] != OP_RETURN) continue;
-            dest = ParseDestinationScript(out.scriptPubKey);
-            break;
-        }
+        if (burn_index + 1 < tx.vout.size()) dest = ParseDestinationScript(tx.vout[burn_index + 1].scriptPubKey);
         if (!dest || dest->empty() || dest->size() > MAX_DEPOSIT_DESTINATION_SIZE || *dest == WITHDRAWAL_RETURN_DEST) {
             return invalid("bad-dc-deposit-destination");
         }
         destination = *dest;
     } else if (new_amount < old_amount) {
-        // Withdrawal: outputs are the return destination marker, the fee, the
-        // payouts and finally the change returned to the escrow.
+        // Withdrawal (M6): the treasury output is the only input, the new
+        // treasury output is output 0, the payouts follow, and whatever else
+        // left the treasury is the fee for mainchain miners.
         if (!allow_withdrawal) return invalid("bad-dc-withdrawal-loose");
         if (tx.vin.size() != 1) return invalid("bad-dc-withdrawal-inputs");
-        if (tx.vout.size() < 3 || burn_index != tx.vout.size() - 1) return invalid("bad-dc-withdrawal-outputs");
-        if (ParseDestinationScript(tx.vout[0].scriptPubKey) != WITHDRAWAL_RETURN_DEST) return invalid("bad-dc-withdrawal-marker");
-        const auto fee{ParseWithdrawalFeeScript(tx.vout[1].scriptPubKey)};
-        if (!fee) return invalid("bad-dc-withdrawal-fee");
+        if (tx.vout.size() < 2 || burn_index != 0) return invalid("bad-dc-withdrawal-outputs");
 
-        const auto blind_hash{BlindWithdrawalHash(tx)};
-        if (!blind_hash) return invalid("bad-dc-withdrawal-format");
+        const auto blind_hash{BlindWithdrawalHash(tx, old_amount)};
+        if (!blind_hash) return invalid("bad-dc-withdrawal-amount");
         const auto bundle{std::find_if(slot.bundles.begin(), slot.bundles.end(), [&](const Bundle& b) { return b.hash == *blind_hash; })};
         if (bundle == slot.bundles.end()) return invalid("bad-dc-withdrawal-unknown");
         if (bundle->score < static_cast<uint32_t>(params.withdrawal_min_score)) return invalid("bad-dc-withdrawal-score");
-
-        CAmount paid_out{0};
-        for (size_t i{0}; i + 1 < tx.vout.size(); ++i) {
-            if (!MoneyRange(tx.vout[i].nValue)) return invalid("bad-dc-withdrawal-amount");
-            paid_out += tx.vout[i].nValue;
-            if (!MoneyRange(paid_out)) return invalid("bad-dc-withdrawal-amount");
-        }
-        // The change is what is left of the escrow after the payouts and the fee.
-        if (paid_out + *fee > old_amount || new_amount != old_amount - paid_out - *fee) return invalid("bad-dc-withdrawal-change");
 
         slot.bundles.erase(bundle);
         CloseBundle(id, *blind_hash, /*paid=*/true, undo);
@@ -237,10 +228,10 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
     // not know about, and messages that do not parse, are ignored so that later
     // versions can give them a meaning.
     //
-    std::optional<Sidechain> new_proposal;
-    std::vector<uint256> acks;
+    std::vector<Sidechain> new_proposals;
+    std::map<SidechainId, uint256> acks;
     std::map<SidechainId, uint256> new_bundles;
-    std::optional<std::vector<uint16_t>> votes;
+    std::optional<VoteMessage> votes;
     std::map<SidechainId, uint256> bmm_accepts;
 
     for (const CTxOut& out : block.vtx[0]->vout) {
@@ -254,10 +245,14 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
 
         if (const auto proposal{ParseProposalScript(script)}) {
             if (!proposal->IsValid(params.max_sidechains)) continue;
-            if (new_proposal) return invalid("bad-dc-multiple-proposals");
-            new_proposal = *proposal;
+            for (const Sidechain& other : new_proposals) {
+                if (other.slot == proposal->slot && other.GetHash() == proposal->GetHash()) return invalid("bad-dc-duplicate-proposal");
+            }
+            new_proposals.push_back(*proposal);
         } else if (const auto ack{ParseAckScript(script)}) {
-            acks.push_back(*ack);
+            if (ack->first >= params.max_sidechains) continue;
+            // A block can support one proposal per slot.
+            if (!acks.emplace(ack->first, ack->second).second) return invalid("bad-dc-multiple-acks");
         } else if (const auto bundle{ParseBundleScript(script)}) {
             if (bundle->first >= params.max_sidechains) continue;
             if (!new_bundles.emplace(bundle->first, bundle->second).second) return invalid("bad-dc-multiple-bundles");
@@ -271,8 +266,9 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
         }
     }
 
-    // Votes refer to the bundles as they were before this block.
+    // Votes refer to the sidechains and bundles as they were before this block.
     const PendingBundles votable{GetPendingBundles()};
+    undo.last_votes = m_last_votes;
 
     //
     // Transactions: deposits (M5), withdrawals (M6) and BMM requests (M8).
@@ -305,25 +301,24 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
     //
     // Sidechain proposals (M1) and acks (M2).
     //
-    if (new_proposal) {
-        if (GetProposal(new_proposal->GetHash())) return invalid("bad-dc-duplicate-proposal");
+    for (const Sidechain& sidechain : new_proposals) {
+        // Proposing again what is already proposed would reset its acks: such a proposal is ignored.
+        if (GetProposal(sidechain.slot, sidechain.GetHash())) continue;
         Proposal proposal;
-        proposal.sidechain = *new_proposal;
+        proposal.sidechain = sidechain;
         proposal.height = height;
         m_proposals.push_back(std::move(proposal));
-        undo.proposal_added = true;
+        ++undo.proposals_added;
     }
 
-    std::set<SidechainId> acked_slots;
-    for (const uint256& hash : acks) {
-        const auto proposal{std::find_if(m_proposals.begin(), m_proposals.end(), [&](const Proposal& p) { return p.sidechain.GetHash() == hash; })};
-        if (proposal == m_proposals.end()) return invalid("bad-dc-ack-unknown-proposal");
-        // A block can support one proposal per slot.
-        if (!acked_slots.insert(proposal->sidechain.slot).second) return invalid("bad-dc-multiple-acks");
+    for (const auto& [ack_slot, hash] : acks) {
+        const auto proposal{std::find_if(m_proposals.begin(), m_proposals.end(), [&](const Proposal& p) { return p.sidechain.slot == ack_slot && p.sidechain.GetHash() == hash; })};
+        // An ack of nothing that is proposed is ignored.
+        if (proposal == m_proposals.end()) continue;
         // The block that proposes a sidechain already counts as an ack of it.
         if (proposal->height == height) continue;
         ++proposal->acks;
-        undo.acked.push_back(hash);
+        undo.acked.emplace_back(ack_slot, hash);
     }
 
     // Proposals that ran out of time.
@@ -379,27 +374,79 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
         }
     }
 
+    // The vote (M4) of this block, per sidechain. A block without one abstains everywhere.
+    std::map<SidechainId, Vote> block_votes;
     if (votes) {
-        if (votes->size() > votable.size()) return invalid("bad-dc-votes-size");
-        for (size_t i{0}; i < votes->size(); ++i) {
-            const uint16_t vote{(*votes)[i]};
-            const auto& [id, bundles]{votable[i]};
-            if (vote == VOTE_ABSTAIN) continue;
-            if (vote != VOTE_DOWNVOTE && vote >= bundles.size()) return invalid("bad-dc-votes-index");
-            // The scores of a sidechain do not move in a block that proposes a bundle for it.
-            if (new_bundles.contains(id)) continue;
-
-            const auto it{m_slots.find(id)};
-            if (it == m_slots.end() || it->second.bundles.empty()) continue;
-            SaveSlot(id, undo);
-            for (Bundle& bundle : it->second.bundles) {
-                if (vote != VOTE_DOWNVOTE && bundle.hash == bundles[vote].hash) {
-                    if (bundle.score < std::numeric_limits<uint32_t>::max()) ++bundle.score;
-                } else if (bundle.score > 0) {
-                    --bundle.score;
+        switch (votes->form) {
+        case VoteForm::REPEAT_PREVIOUS:
+            block_votes = m_last_votes;
+            break;
+        case VoteForm::LEADING_BY_50:
+            for (const auto& [id, bundles] : votable) {
+                const Bundle* leader{nullptr};
+                uint32_t second{0};
+                for (const Bundle& bundle : bundles) {
+                    if (!leader || bundle.score > leader->score) {
+                        if (leader) second = std::max(second, leader->score);
+                        leader = &bundle;
+                    } else {
+                        second = std::max(second, bundle.score);
+                    }
                 }
+                if (!leader || leader->score < second + LEADING_BY_50_MARGIN) continue;
+                Vote vote;
+                vote.type = Vote::Type::UPVOTE;
+                vote.bundle = leader->hash;
+                block_votes[id] = vote;
+            }
+            break;
+        case VoteForm::ONE_BYTE:
+        case VoteForm::TWO_BYTES:
+            if (votes->votes.size() != votable.size()) return invalid("bad-dc-votes-size");
+            // The two byte form is only for votes that do not fit in one.
+            if (votes->form == VoteForm::TWO_BYTES && std::all_of(votes->votes.begin(), votes->votes.end(), [](uint16_t v) { return v <= VOTE_MAX_ONE_BYTE_INDEX; })) {
+                return invalid("bad-dc-votes-form");
+            }
+            for (size_t i{0}; i < votes->votes.size(); ++i) {
+                const uint16_t entry{votes->votes[i]};
+                const auto& [id, bundles]{votable[i]};
+                if (entry == VOTE_ABSTAIN) continue;
+                Vote vote;
+                if (entry == VOTE_DOWNVOTE) {
+                    vote.type = Vote::Type::DOWNVOTE;
+                } else {
+                    if (entry >= bundles.size()) return invalid("bad-dc-votes-index");
+                    vote.type = Vote::Type::UPVOTE;
+                    vote.bundle = bundles[entry].hash;
+                }
+                block_votes[id] = vote;
+            }
+            break;
+        }
+    }
+
+    // Upvoting a bundle downvotes the other bundles of its sidechain; a downvote downvotes them all.
+    m_last_votes.clear();
+    for (const auto& [id, vote] : block_votes) {
+        const auto it{m_slots.find(id)};
+        if (it == m_slots.end() || it->second.bundles.empty()) continue;
+        Slot& slot{it->second};
+        if (vote.type == Vote::Type::UPVOTE) {
+            // A repeated upvote of a bundle that is no longer pending casts no vote.
+            const bool pending{std::any_of(slot.bundles.begin(), slot.bundles.end(), [&](const Bundle& b) { return b.hash == vote.bundle; })};
+            if (!pending) continue;
+        } else if (vote.type != Vote::Type::DOWNVOTE) {
+            continue;
+        }
+        SaveSlot(id, undo);
+        for (Bundle& bundle : slot.bundles) {
+            if (vote.type == Vote::Type::UPVOTE && bundle.hash == vote.bundle) {
+                if (bundle.score < std::numeric_limits<uint32_t>::max()) ++bundle.score;
+            } else if (bundle.score > 0) {
+                --bundle.score;
             }
         }
+        m_last_votes[id] = vote;
     }
 
     for (const auto& [id, hash] : new_bundles) {
@@ -437,15 +484,16 @@ void SidechainDB::DisconnectBlock(const BlockUndo& undo)
     for (auto it{undo.removed.rbegin()}; it != undo.removed.rend(); ++it) {
         m_proposals.insert(m_proposals.begin() + it->first, it->second);
     }
-    for (const uint256& hash : undo.acked) {
+    for (const auto& [slot, hash] : undo.acked) {
         for (Proposal& proposal : m_proposals) {
-            if (proposal.sidechain.GetHash() == hash) {
+            if (proposal.sidechain.slot == slot && proposal.sidechain.GetHash() == hash) {
                 --proposal.acks;
                 break;
             }
         }
     }
-    if (undo.proposal_added) m_proposals.pop_back();
+    m_proposals.resize(m_proposals.size() - undo.proposals_added);
+    m_last_votes = undo.last_votes;
     m_block_hash = undo.prev_block_hash;
 }
 

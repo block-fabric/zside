@@ -8,6 +8,7 @@
 #include <qt/guiutil.h>
 #include <qt/noderpc.h>
 #include <qt/platformstyle.h>
+#include <qt/sidebarmining.h>
 #include <qt/walletmodel.h>
 
 #include <QFormLayout>
@@ -77,8 +78,8 @@ QWidget* SidechainPage::createDepositTab()
     m_deposit_address = new QLineEdit(tab);
     m_deposit_address->setObjectName("depositAddress");
     m_deposit_address->setReadOnly(true);
-    m_deposit_address->setPlaceholderText(tr("Press the button for an address of this wallet to deposit to"));
-    auto* new_address{new QPushButton(tr("New address"), tab)};
+    m_deposit_address->setPlaceholderText(tr("Press the button for a deposit address of this wallet"));
+    auto* new_address{new QPushButton(tr("New deposit address"), tab)};
     new_address->setObjectName("depositNewAddress");
     auto* copy{new QPushButton(tr("Copy"), tab)};
     row->addWidget(m_deposit_address, 1);
@@ -149,8 +150,12 @@ QWidget* SidechainPage::createMiningTab()
     auto* tab{new QWidget(this)};
     auto* layout{new QVBoxLayout(tab)};
     auto* intro{new QLabel(tr("The blocks of this chain are mined by the miners of the mainchain, who commit to them for a fee (blind merged "
-                              "mining). When mining is on, this node builds a block for every block of the mainchain and has the wallet "
-                              "of the mainchain node offer the fee; you earn the transaction fees of the blocks that get committed to."), tab)};
+                              "mining), which the wallet of the mainchain node pays.\n\n"
+                              "Automatic mining asks for a block whenever there are transactions whose fees pay for one. It offers the "
+                              "mainchain miners 99% of those fees and you keep the fees themselves, so one hundredth is yours. Without "
+                              "fees it asks for nothing and costs nothing.\n\n"
+                              "A block can also be mined by hand, for a fee you choose: this is how a deposit gets paid, or a "
+                              "withdrawal bundle started, when there are no transactions to pay for a block."), tab)};
     intro->setWordWrap(true);
     layout->addWidget(intro);
 
@@ -159,9 +164,6 @@ QWidget* SidechainPage::createMiningTab()
     m_mining_address->setObjectName("bmmAddress");
     m_mining_address->setPlaceholderText(tr("Address of this chain that receives the transaction fees; empty for a new one of this wallet"));
     form->addRow(tr("Pay fees to:"), m_mining_address);
-    m_mining_amount = new QLineEdit(QStringLiteral("0.0001"), tab);
-    m_mining_amount->setObjectName("bmmAmount");
-    form->addRow(tr("Offer per block, in mainchain coins:"), m_mining_amount);
     layout->addLayout(form);
 
     auto* buttons{new QHBoxLayout};
@@ -174,12 +176,27 @@ QWidget* SidechainPage::createMiningTab()
     buttons->addStretch();
     layout->addLayout(buttons);
 
+    auto* once{new QHBoxLayout};
+    once->addWidget(new QLabel(tr("One block by hand, offering in mainchain coins:"), tab));
+    m_mining_amount = new QLineEdit(QStringLiteral("0.0001"), tab);
+    m_mining_amount->setObjectName("bmmAmount");
+    m_mining_amount->setMaximumWidth(140);
+    once->addWidget(m_mining_amount);
+    auto* mine_once{new QPushButton(tr("Mine one block"), tab)};
+    mine_once->setObjectName("bmmOnce");
+    once->addWidget(mine_once);
+    once->addStretch();
+    layout->addLayout(once);
+    connect(mine_once, &QPushButton::clicked, this, &SidechainPage::mineOnce);
+
     m_mining_status = new QLabel(tab);
     m_mining_status->setObjectName("bmmStatus");
     m_mining_status->setWordWrap(true);
     layout->addWidget(m_mining_status);
     layout->addStretch();
 
+    // Mining is also set from the bar at the left of the main window.
+    connect(MiningChanges(), &MiningSignals::changed, this, &SidechainPage::refresh);
     connect(m_mining_start, &QPushButton::clicked, this, [this] { setMining(true); });
     connect(m_mining_stop, &QPushButton::clicked, this, [this] { setMining(false); });
     return tab;
@@ -224,7 +241,7 @@ std::optional<UniValue> SidechainPage::call(const std::string& method, const Uni
 
 void SidechainPage::newDepositAddress()
 {
-    if (const auto address{call("getnewaddress", Args({"deposit"}), /*wallet=*/true)}) m_deposit_address->setText(Text(*address));
+    if (const auto address{call("getdepositaddress", Args({}), /*wallet=*/true)}) m_deposit_address->setText(Text((*address)["depositaddress"]));
 }
 
 void SidechainPage::withdraw()
@@ -259,27 +276,47 @@ void SidechainPage::refund()
     refresh();
 }
 
+QString SidechainPage::miningAddress()
+{
+    QString address{m_mining_address->text().trimmed()};
+    if (address.isEmpty()) {
+        const auto fresh{call("getnewaddress", Args({"mining"}), /*wallet=*/true)};
+        if (!fresh) return {};
+        address = Text(*fresh);
+        m_mining_address->setText(address);
+    }
+    return address;
+}
+
 void SidechainPage::setMining(bool mine)
 {
     UniValue params{Args({mine})};
     if (mine) {
-        QString address{m_mining_address->text().trimmed()};
-        if (address.isEmpty()) {
-            const auto fresh{call("getnewaddress", Args({"mining"}), /*wallet=*/true)};
-            if (!fresh) return;
-            address = Text(*fresh);
-            m_mining_address->setText(address);
-        }
-        const QString amount{m_mining_amount->text().trimmed()};
-        if (!IsAmount(amount)) {
-            QMessageBox::information(this, tr("Mainchain"), tr("Enter the offer as a number, like 0.0001"));
-            return;
-        }
+        const QString address{miningAddress()};
+        if (address.isEmpty()) return;
         params.push_back(address.toStdString());
-        params.push_back(amount.toStdString());
     }
     call("setbmm", params);
-    refresh();
+    // The bar at the left shows the same.
+    Q_EMIT MiningChanges()->changed();
+}
+
+void SidechainPage::mineOnce()
+{
+    const QString amount{m_mining_amount->text().trimmed()};
+    if (!IsAmount(amount)) {
+        QMessageBox::information(this, tr("Mainchain"), tr("Enter the offer as a number, like 0.0001"));
+        return;
+    }
+    const QString address{miningAddress()};
+    if (address.isEmpty()) return;
+    UniValue params{Args({address.toStdString()})};
+    params.push_back(amount.toStdString());
+    if (const auto result{call("requestbmmblock", params)}) {
+        m_mining_once = tr("Asked for one block with %1 transactions and %2 of fees, offering %3. It is mined if the next block of the mainchain takes the offer.")
+                            .arg(QString::number((*result)["transactions"].getInt<int>() - 1), Amount((*result)["fees"]), Amount((*result)["amount"]));
+    }
+    Q_EMIT MiningChanges()->changed();
 }
 
 void SidechainPage::refresh()
@@ -297,9 +334,10 @@ void SidechainPage::refresh()
                            ? tr("Following the mainchain node at %1, which is at block %2. This chain is the sidechain in slot %3 of the mainchain.")
                                  .arg(Text((*info)["node"]), Text((*info)["height"])).arg(m_slot)
                            : tr("<b>The mainchain node cannot be reached</b>, so this node cannot tell which new blocks are valid. %1").arg(Text((*info)["error"]).toHtmlEscaped()));
-    m_deposit_instructions->setText(tr("Coins come to this chain from the mainchain. In the mainchain wallet, deposit to the sidechain in slot %1 "
-                                       "and give an address of this wallet as the destination. The coins arrive with the next block of this "
-                                       "chain after the deposit is mined on the mainchain.").arg(m_slot));
+    m_deposit_instructions->setText(tr("Coins come to this chain from the mainchain. Get a deposit address below and give it to the mainchain wallet "
+                                       "as the destination of a deposit (Sidechains, Deposit). The address names this sidechain, slot %1, and "
+                                       "ends in a checksum, so the mainchain wallet refuses it if it is mistyped or used for another sidechain. "
+                                       "The coins arrive with the next block of this chain after the deposit is mined on the mainchain.").arg(m_slot));
 
     if (const auto bundle{call("getwithdrawalbundle", Args({}), false, true)}) {
         const QString status{Text((*bundle)["status"])};
@@ -336,8 +374,10 @@ void SidechainPage::refresh()
         m_mining_start->setEnabled(!on);
         m_mining_stop->setEnabled(on);
         m_mining_address->setEnabled(!on);
-        m_mining_amount->setEnabled(!on);
-        QString text{on ? tr("Mining. Commitments asked for: %1. Blocks mined: %2.").arg(Text((*mining)["requests"]), Text((*mining)["blocks"])) : tr("Not mining.")};
+        QString text{on ? tr("Automatic mining is on. Blocks asked for: %1. Blocks mined: %2. Outbid by other nodes: %3.").arg(Text((*mining)["requests"]), Text((*mining)["blocks"]), Text((*mining)["outbid"])) : tr("Automatic mining is off.")};
+        if (on && mining->exists("idle") && (*mining)["idle"].get_bool()) text += QStringLiteral(" ") + tr("Waiting for transactions whose fees pay for a block.");
+        if (on && mining->exists("lastoffer")) text += QStringLiteral(" ") + tr("Last block asked for: %1 of fees, %2 offered.").arg(Amount((*mining)["lastfees"]), Amount((*mining)["lastoffer"]));
+        if (!m_mining_once.isEmpty()) text += QStringLiteral("\n") + m_mining_once;
         if (mining->exists("error")) text += ' ' + tr("Last attempt failed: %1").arg(Text((*mining)["error"]));
         m_mining_status->setText(text);
     }

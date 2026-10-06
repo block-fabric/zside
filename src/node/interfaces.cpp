@@ -18,6 +18,7 @@
 #include <httprpc.h>
 #include <index/blockfilterindex.h>
 #include <init.h>
+#include <index/orchardindex.h>
 #include <interfaces/chain.h>
 #include <interfaces/handler.h>
 #include <interfaces/mining.h>
@@ -665,6 +666,12 @@ public:
         }
         return escrow;
     }
+    std::optional<uint32_t> getSidechainSlot() override
+    {
+        const Consensus::SidechainParams& params{chainman().GetConsensus().sidechain};
+        if (!params.enabled) return std::nullopt;
+        return params.slot;
+    }
     util::Result<CScript> getMainchainScript(const std::string& address) override
     {
         if (!m_node.follower) return util::Error{Untranslated("This chain is not a sidechain")};
@@ -709,6 +716,12 @@ public:
         if (!m_node.mempool) return IsRBFOptInEmptyMempool(tx);
         LOCK(m_node.mempool->cs);
         return IsRBFOptIn(tx, *m_node.mempool);
+    }
+    std::optional<OrchardWitnesses> getOrchardWitnesses(const std::vector<uint256>& cmxs) override
+    {
+        if (!g_orchardindex) return std::nullopt;
+        g_orchardindex->BlockUntilSyncedToCurrentChain();
+        return g_orchardindex->FindNotes(cmxs);
     }
     bool isInMempool(const Txid& txid) override
     {

@@ -13,6 +13,7 @@ from test_framework.descriptors import descsum_create
 from test_framework.key import ECPubKey
 from test_framework.messages import COIN
 from test_framework.script_util import keys_to_multisig_script
+from test_framework.address import HRP_BY_CHAIN
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_raises_rpc_error,
@@ -109,7 +110,7 @@ class RpcCreateMultiSigTest(BitcoinTestFramework):
         mredeem = msig["redeemScript"]
         assert_equal(desc, msig['descriptor'])
         if output_type == 'bech32':
-            assert_equal(madd[0:4], "rchn")  # actually a bech32 address
+            assert madd.startswith(HRP_BY_CHAIN["regtest"] + "1")  # actually a bech32 address
 
         spk = address_to_scriptpubkey(madd)
         value = decimal.Decimal("0.00004000")

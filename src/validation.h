@@ -1059,7 +1059,20 @@ public:
     std::function<void()> m_mainchain_poll;
     //! Headers that were turned away because no mainchain block on record committed
     //! to them. They are tried again when the record gets such a block.
-    mutable std::map<uint256, CBlockHeader> m_bmm_waiting GUARDED_BY(::cs_main);
+    struct BmmWaiting {
+        CBlockHeader header;
+        //! The peer that sent it, -1 if none.
+        int64_t peer{-1};
+        uint64_t sequence{0};
+    };
+    mutable std::map<uint256, BmmWaiting> m_bmm_waiting GUARDED_BY(::cs_main);
+    mutable uint64_t m_bmm_waiting_sequence GUARDED_BY(::cs_main){0};
+    /**
+     * Remember a header the mainchain has not committed to yet. The headers kept are bounded;
+     * a full store makes room by dropping the oldest header of the peer that has the most, so
+     * that a peer flooding it with headers that will never be committed to only crowds out its own.
+     */
+    void AddBmmWaiting(const CBlockHeader& header, int64_t peer) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** What the sidechain rules need to check a block; empty if this chain is not a sidechain. */
     std::optional<drivechain::SideContext> SideContext(CAmount& minted) const;
 

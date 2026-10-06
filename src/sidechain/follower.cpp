@@ -4,6 +4,8 @@
 
 #include <sidechain/follower.h>
 
+#include <drivechain/db.h>
+
 #include <chain.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
@@ -17,6 +19,10 @@
 #include <sidechain/mainchain.h>
 #include <util/threadnames.h>
 #include <util/translation.h>
+#include <txmempool.h>
+#include <node/blockstorage.h>
+#include <sidechain/state.h>
+#include <primitives/block.h>
 #include <validation.h>
 
 namespace sidechain {
@@ -45,7 +51,9 @@ MainBlock ParseMainBlock(const UniValue& obj)
     MainBlock block;
     block.hash = Hash256(obj["hash"]);
     if (obj.exists("previousblockhash")) block.prev_hash = Hash256(obj["previousblockhash"]);
-    block.time = obj["time"].getInt<int64_t>();
+    // The median time of the block and the ten before it, which no single miner can set ahead (the
+    // time of the block itself can be two hours ahead); the time of the block from an older node.
+    block.time = obj.exists("mediantime") ? obj["mediantime"].getInt<int64_t>() : obj["time"].getInt<int64_t>();
     if (obj.exists("bmm")) block.bmm = Hash256(obj["bmm"]);
     for (const UniValue& entry : obj["deposits"].getValues()) {
         MainDeposit deposit;
@@ -53,6 +61,13 @@ MainBlock ParseMainBlock(const UniValue& obj)
         deposit.amount = AmountFromValue(entry["amount"]);
         deposit.txid = Hash256(entry["txid"]);
         deposit.burn_index = entry["burnindex"].getInt<uint32_t>();
+        if (entry.exists("bundle")) deposit.bundle = Hash256(entry["bundle"]);
+        if (entry.exists("payouts")) {
+            for (const UniValue& payout : entry["payouts"].getValues()) {
+                const std::vector<unsigned char> script{ParseHex(payout["script"].get_str())};
+                deposit.payouts.emplace_back(AmountFromValue(payout["amount"]), CScript{script.begin(), script.end()});
+            }
+        }
         block.deposits.push_back(std::move(deposit));
     }
     for (const UniValue& entry : obj["bundles"].getValues()) {
@@ -94,7 +109,7 @@ Follower::Status Follower::GetStatus() const
     return m_status;
 }
 
-bool Follower::UpdateRecord()
+bool Follower::UpdateRecord(bool may_drop)
 {
     Mainchain& record{*Assert(m_node.chainman->m_mainchain)};
     const uint32_t slot{m_node.chainman->GetConsensus().sidechain.slot};
@@ -110,17 +125,43 @@ bool Follower::UpdateRecord()
         size_t first_new{0};
         if (height >= 0) {
             if (events.empty() || Hash256(events[0]["hash"]) != record.TipHash()) {
-                // The mainchain dropped blocks on record: go back to the last one it still has.
+                // Finding where the chains part takes calls to the mainchain node, which a caller
+                // holding the main lock should not wait for.
+                if (!may_drop) break;
+                // A mainchain node that is still syncing, or reindexing, has not dropped anything: it
+                // has not got there yet. Dropping blocks on its word would drop the sidechain blocks
+                // committed in them too.
+                const UniValue info{m_client.Call("getblockchaininfo", UniValue{UniValue::VARR})};
+                if (info["initialblockdownload"].isTrue()) {
+                    throw std::runtime_error("The mainchain node is still syncing; waiting for it to catch up before following it");
+                }
+                // The mainchain dropped blocks on record: go back to the last one it still has, a
+                // batch of blocks at a time.
                 int common{height - 1};
-                for (; common >= 0; --common) {
-                    const UniValue event{fetch(common, 1)};
-                    if (!event.empty() && Hash256(event[0]["hash"]) == record.GetBlock(common)->hash) break;
+                while (common >= 0) {
+                    const int from{std::max(common - BATCH + 1, 0)};
+                    const UniValue batch{fetch(from, common - from + 1)};
+                    int found{-1};
+                    for (int h{common}; h >= from; --h) {
+                        const size_t i{static_cast<size_t>(h - from)};
+                        if (i < batch.size() && Hash256(batch[i]["hash"]) == record.GetBlock(h)->hash) {
+                            found = h;
+                            break;
+                        }
+                    }
+                    if (found >= 0) {
+                        common = found;
+                        break;
+                    }
+                    common = from - 1;
                 }
                 const std::vector<MainBlock> removed{record.Truncate(common)};
                 LogInfo("The mainchain dropped %d blocks above height %d", removed.size(), common);
                 LOCK(m_mutex);
                 for (const MainBlock& block : removed) {
-                    if (block.bmm) m_uncommitted.push_back(*block.bmm);
+                    // A block the mainchain committed to twice keeps its first commitment, below the
+                    // blocks dropped: dropping the second one changes nothing for it.
+                    if (block.bmm && !record.CommittedHeight(*block.bmm)) m_uncommitted.push_back(*block.bmm);
                 }
                 changed = true;
                 continue;
@@ -144,10 +185,18 @@ bool Follower::UpdateRecord()
 
 void Follower::Poll()
 {
+    // Headers from peers can ask for this at any rate, while the node holds its main lock: at most
+    // one call to the mainchain node every few seconds; a header it does not answer for waits.
+    const auto now{NodeClock::now()};
+    {
+        LOCK(m_mutex);
+        if (now < m_last_poll + POLL_SPACING) return;
+        m_last_poll = now;
+    }
     TRY_LOCK(m_sync_mutex, locked);
     if (!locked) return;
     try {
-        if (UpdateRecord()) {
+        if (UpdateRecord(/*may_drop=*/false)) {
             LOCK(m_mutex);
             m_woken = true;
             m_wake.notify_all();
@@ -165,7 +214,15 @@ bool Follower::Sync(std::string& error)
             LOCK(m_sync_mutex);
             UpdateRecord();
         }
-        Act();
+        // Stopping cut the update short: the record may be partial, nothing to act on.
+        if (m_stop) return false;
+        {
+            // One at a time: two callers acting on the same changes could otherwise invalidate a
+            // block after the other found it committed again.
+            LOCK(m_act_mutex);
+            Act();
+            CheckActiveChain();
+        }
         SendBundle();
     } catch (const std::exception& e) {
         error = e.what();
@@ -213,8 +270,10 @@ void Follower::Act()
 
     // A block that lost its commitment is no longer valid, and neither is what was built on it.
     const Mainchain& record{*chainman.m_mainchain};
+    // That includes a block whose commitment moved to another mainchain block in the same update:
+    // what the mainchain did before its commitment may differ now, so it is checked again, from the
+    // list of committed blocks below.
     for (const uint256& hash : uncommitted) {
-        if (record.BmmHeight(hash)) continue; // It has a commitment again.
         CBlockIndex* pindex{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(hash))};
         if (!pindex) continue;
         LogInfo("Block %s lost its commitment on the mainchain", hash.ToString());
@@ -239,7 +298,7 @@ void Follower::Act()
         {
             LOCK(::cs_main);
             if (const auto it{chainman.m_bmm_waiting.find(hash)}; it != chainman.m_bmm_waiting.end()) {
-                header = it->second;
+                header = it->second.header;
                 chainman.m_bmm_waiting.erase(it);
             }
         }
@@ -257,6 +316,59 @@ void Follower::Act()
     chainman.ActiveChainstate().ActivateBestChain(state);
 }
 
+void Follower::CheckActiveChain()
+{
+    if (WITH_LOCK(m_mutex, return m_chain_checked)) return;
+    ChainstateManager& chainman{*m_node.chainman};
+    const Mainchain& record{*Assert(chainman.m_mainchain)};
+    // Blocks that lost their commitment are dropped as soon as the record changes, but a node that
+    // stopped in between, or that was down meanwhile, starts with them on its active chain. The
+    // mainchain commits to the blocks of a chain in order: the uncommitted ones are at the top.
+    CBlockIndex* lowest{nullptr};
+    CBlockIndex* moved{nullptr};
+    {
+        LOCK(::cs_main);
+        for (CBlockIndex* pindex{chainman.ActiveChain().Tip()}; pindex && pindex->nHeight > 0; pindex = pindex->pprev) {
+            if (record.CommittedHeight(pindex->GetBlockHash())) break;
+            lowest = pindex;
+        }
+        // Each block was checked against what the mainchain did up to the block before its
+        // commitment. Commitments that moved while the node was down -- in a reorg of the mainchain
+        // -- are found from the tip down, as far as such a reorg could reach; the lowest block whose
+        // commitment moved is checked again, with all above it.
+        if (!lowest) {
+            int main_height{chainman.ActiveChainstate().m_scdb.m_side.MainHeight()};
+            for (CBlockIndex* pindex{chainman.ActiveChain().Tip()}; pindex && pindex->nHeight > 0; pindex = pindex->pprev) {
+                const auto bmm_height{record.CommittedHeight(pindex->GetBlockHash())};
+                if (!bmm_height) break;
+                if (*bmm_height - 1 != main_height) moved = pindex;
+                if (*bmm_height < record.Height() - MOVED_CHECK_DEPTH) break;
+                // What the mainchain had done before this block is what it had done after its parent.
+                drivechain::BlockUndo undo;
+                if (!chainman.m_blockman.m_drivechain_db->ReadBlockUndo(pindex->GetBlockHash(), undo)) break;
+                main_height = undo.side.main_height;
+            }
+        }
+    }
+    if (lowest) {
+        LogInfo("Block %s and the blocks after it have no commitment on the mainchain", lowest->GetBlockHash().ToString());
+        BlockValidationState state;
+        chainman.ActiveChainstate().InvalidateBlock(state, lowest);
+    } else if (moved) {
+        LogInfo("The commitment of block %s moved on the mainchain; checking it and the blocks after it again", moved->GetBlockHash().ToString());
+        BlockValidationState state;
+        chainman.ActiveChainstate().InvalidateBlock(state, moved);
+        {
+            LOCK(::cs_main);
+            chainman.ActiveChainstate().ResetBlockFailureFlags(moved);
+            chainman.RecalculateBestHeader();
+        }
+        chainman.ActiveChainstate().ActivateBestChain(state);
+    }
+    LOCK(m_mutex);
+    m_chain_checked = true;
+}
+
 void Follower::SendBundle()
 {
     ChainstateManager& chainman{*m_node.chainman};
@@ -269,12 +381,42 @@ void Follower::SendBundle()
         hash = side.Bundle()->hash;
         tx = side.BundleTx();
     }
-    if (!tx || WITH_LOCK(m_mutex, return m_bundle_sent == hash)) return;
-    // The mainchain node proposes the bundle in the blocks it mines; others learn its hash from those.
-    m_client.Call("receivewithdrawalbundle", Params({static_cast<uint64_t>(chainman.GetConsensus().sidechain.slot), EncodeHexTx(CTransaction{*tx})}));
-    LogInfo("Gave the mainchain node the withdrawal bundle %s", hash.ToString());
+    if (!tx) return;
+    const uint64_t slot{chainman.GetConsensus().sidechain.slot};
+    if (WITH_LOCK(m_mutex, return m_bundle_sent != hash)) {
+        // The mainchain node proposes the bundle in the blocks it mines; others learn its hash from those.
+        // That it refuses the bundle is no reason to stop following the mainchain: it is logged, and tried
+        // again with the next block.
+        try {
+            m_client.Call("receivewithdrawalbundle", Params({slot, EncodeHexTx(CTransaction{*tx})}));
+        } catch (const std::exception& e) {
+            if (WITH_LOCK(m_mutex, return m_bundle_refused != hash)) {
+                LogWarning("The mainchain node did not take the withdrawal bundle %s: %s", hash.ToString(), e.what());
+                LOCK(m_mutex);
+                m_bundle_refused = hash;
+            }
+            return;
+        }
+        LogInfo("Gave the mainchain node the withdrawal bundle %s", hash.ToString());
+        LOCK(m_mutex);
+        m_bundle_sent = hash;
+    }
+    // Once the bundle has the work score, the mainchain node broadcasts the
+    // withdrawal that pays it out, and any miner can mine it: one try per
+    // mainchain block, since the treasury output it spends can change.
+    const int main_height{Assert(chainman.m_mainchain)->Height()};
+    if (WITH_LOCK(m_mutex, return m_payout_tried == std::make_pair(hash, main_height))) return;
+    try {
+        const UniValue sent{m_client.Call("sendwithdrawalbundle", Params({slot, hash.GetHex()}))};
+        if (sent.isObject() && sent.find_value("sent").isTrue() && sent.find_value("txid").isStr()) {
+            LogInfo("The mainchain node broadcast the withdrawal %s paying out the bundle %s", sent.find_value("txid").get_str(), hash.ToString());
+        }
+    } catch (const std::exception& e) {
+        // A mainchain node too old to broadcast withdrawals pays them out in the blocks it mines.
+        LogDebug(BCLog::NET, "The mainchain node did not broadcast the withdrawal of bundle %s: %s", hash.ToString(), e.what());
+    }
     LOCK(m_mutex);
-    m_bundle_sent = hash;
+    m_payout_tried = {hash, main_height};
 }
 
 std::optional<Follower::Candidate> Follower::CreateCandidate(const CScript& coinbase_script, std::string& error)
@@ -333,16 +475,25 @@ std::optional<std::string> Follower::RequestCommitment(const Candidate& candidat
     }
 }
 
-void Follower::SetMining(bool enabled, const CScript& coinbase_script, CAmount amount)
+void Follower::SetMining(bool enabled, const CScript& coinbase_script, bool always, CAmount amount)
 {
     LOCK(m_mutex);
     m_mining.enabled = enabled;
     m_mining.coinbase_script = coinbase_script;
+    m_mining.always = always;
     m_mining.amount = amount;
+    m_mining.idle = false;
     m_mining.error.clear();
     m_mining_requested_for.SetNull();
+    ++m_mining_settings;
     m_woken = true;
     m_wake.notify_all();
+}
+
+void Follower::DropCandidate(const uint256& hash)
+{
+    LOCK(m_mutex);
+    m_candidates.erase(hash);
 }
 
 Follower::Mining Follower::GetMining() const
@@ -354,19 +505,59 @@ Follower::Mining Follower::GetMining() const
 void Follower::Mine()
 {
     Mining mining;
+    uint64_t settings;
     {
         LOCK(m_mutex);
         mining = m_mining;
+        settings = m_mining_settings;
         if (!mining.enabled) return;
         // One request per mainchain block.
         if (m_mining_requested_for == m_node.chainman->m_mainchain->TipHash() && !m_mining_requested_for.IsNull()) return;
     }
+    // Mining may be set otherwise while this runs; what was decided for the old settings then says nothing.
+    const auto wait{[this, settings] {
+        LOCK(m_mutex);
+        if (m_mining_settings == settings) m_mining.idle = true;
+    }};
+    // Without transactions there are no fees, and a block without fees is not worth what the mainchain is paid for it.
+    if (!mining.always && (!m_node.mempool || m_node.mempool->size() == 0)) return wait();
+
     std::string error;
     const auto candidate{CreateCandidate(mining.coinbase_script, error)};
-    if (candidate && RequestCommitment(*candidate, mining.amount, error)) {
+    CAmount offer{mining.amount};
+    CAmount fees{0};
+    if (candidate) {
+        // The first output of the coinbase is the fees of the block; the others pay deposits and the like.
+        fees = candidate->block->vtx[0]->vout[0].nValue;
+        if (!mining.always) {
+            offer = Offer(fees);
+            if (offer < MIN_OFFER) {
+                DropCandidate(candidate->block->GetHash());
+                return wait();
+            }
+        }
+    }
+    const auto request{candidate ? RequestCommitment(*candidate, offer, error) : std::nullopt};
+    if (candidate && !request && error.starts_with("Outbid:")) {
+        // Another node of this chain bid more for its own block: the auction working, not a failure.
+        // Nothing more is asked for until the next mainchain block.
+        DropCandidate(candidate->block->GetHash());
         LOCK(m_mutex);
+        if (m_mining_settings != settings) return;
+        ++m_mining.outbid;
         m_mining_requested_for = candidate->main_prev_hash;
+        m_mining.error.clear();
+        LogDebug(BCLog::NET, "Merged mining: %s\n", error);
+        return;
+    }
+    if (candidate && request) {
+        LOCK(m_mutex);
         ++m_mining.requests;
+        if (m_mining_settings != settings) return;
+        m_mining_requested_for = candidate->main_prev_hash;
+        m_mining.idle = false;
+        m_mining.last_fees = fees;
+        m_mining.last_offer = offer;
         m_mining.error.clear();
         return;
     }

@@ -33,12 +33,12 @@ from test_framework.segwit_addr import (
 
 # The human-readable part of the addresses of each network of this chain (bech32_hrp in src/kernel/chainparams.cpp).
 # contrib/sidechain/rename-hrp.py keeps it up to date.
-HRP_BY_CHAIN = {"main": "sc", "test": "tsc", "regtest": "rchn"}
+HRP_BY_CHAIN = {"main": "zs", "test": "tzs", "regtest": "rsc"}
 
-ADDRESS_RCHN1_UNSPENDABLE = 'rchn1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq5xs6ph'
-ADDRESS_RCHN1_UNSPENDABLE_DESCRIPTOR = 'addr(rchn1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq5xs6ph)#vre4l4yd'
+ADDRESS_RCHN1_UNSPENDABLE = 'rsc1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq7r4vx7'
+ADDRESS_RCHN1_UNSPENDABLE_DESCRIPTOR = 'addr(rsc1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq7r4vx7)#r5hewd9k'
 # Coins sent to this address can be spent with a witness stack of just OP_TRUE
-ADDRESS_RCHN1_P2WSH_OP_TRUE = 'rchn1qft5p2uhsdcdc3l2ua4ap5qqfg4pjaqlp250x7us7a8qqhrxrxfsq4e3mz3'
+ADDRESS_RCHN1_P2WSH_OP_TRUE = 'rsc1qft5p2uhsdcdc3l2ua4ap5qqfg4pjaqlp250x7us7a8qqhrxrxfsqlu5d9c'
 
 b58chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 
@@ -55,7 +55,7 @@ def create_deterministic_address_rchn1_p2tr_op_true(explicit_internal_key=None):
     taproot_info = taproot_construct(internal_key, [("only-path", CScript([OP_TRUE]))])
     address = output_key_to_p2tr(taproot_info.output_pubkey)
     if explicit_internal_key is None:
-        assert_equal(address, 'rchn1p9yfmy5h72durp7zrhlw9lf7jpwjgvwdg0jr0lqmmjtgg83266lqsuk3rnc')
+        assert_equal(address, 'rsc1p9yfmy5h72durp7zrhlw9lf7jpwjgvwdg0jr0lqmmjtgg83266lqskn5453')
     return (address, taproot_info)
 
 

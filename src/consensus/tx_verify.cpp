@@ -4,6 +4,8 @@
 
 #include <consensus/tx_verify.h>
 
+#include <zside/shielded.h>
+
 #include <chain.h>
 #include <coins.h>
 #include <consensus/amount.h>
@@ -175,7 +177,8 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
                          strprintf("%s: inputs missing/spent", __func__));
     }
 
-    CAmount nValueIn = 0;
+    // zSide: what the transaction takes out of the shielded pool counts as an input.
+    CAmount nValueIn = zside::ShieldedValueIn(tx);
     for (unsigned int i = 0; i < tx.vin.size(); ++i) {
         const COutPoint &prevout = tx.vin[i].prevout;
         const Coin& coin = inputs.AccessCoin(prevout);

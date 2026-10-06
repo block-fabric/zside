@@ -1,0 +1,145 @@
+// Copyright (c) 2026 The Chains developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#ifndef BITCOIN_WALLET_SHIELDED_H
+#define BITCOIN_WALLET_SHIELDED_H
+
+#include <consensus/amount.h>
+#include <primitives/transaction.h>
+#include <uint256.h>
+#include <wallet/meltcast.h>
+#include <zside/orchard.h>
+
+#include <array>
+#include <cstdint>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+class CChainParams;
+
+/**
+ * zSide: the shielded account of a wallet.
+ *
+ * Its spending key is derived from the extended private key of the wallet's active bech32
+ * descriptor, so it needs nothing more to back up, and is only at hand when the wallet is
+ * unlocked. Its full viewing key is kept in the wallet, so that a locked wallet still sees
+ * what it receives. The notes are found by decrypting the shielded transactions the wallet
+ * keeps: they come back with a rescan, and need no records of their own.
+ */
+namespace wallet {
+class CWallet;
+class CWalletTx;
+
+using OrchardAddress = std::array<uint8_t, zside::ADDRESS_SIZE>;
+using OrchardFvk = std::array<uint8_t, zside::FVK_SIZE>;
+using OrchardNoteBytes = std::array<uint8_t, zside::NOTE_SIZE>;
+using OrchardMemo = std::array<uint8_t, zside::MEMO_SIZE>;
+
+/** A note of the wallet. */
+struct ShieldedNote {
+    Txid txid;
+    uint32_t action{0};
+    OrchardNoteBytes note{};
+    OrchardMemo memo{};
+    //! Change: to an internal address.
+    bool internal{false};
+    uint256 nullifier;
+    uint256 cmx;
+    CAmount value{0};
+};
+
+/** A payment the wallet made out of its shielded account, recovered from the chain. */
+struct ShieldedPayment {
+    Txid txid;
+    uint32_t action{0};
+    OrchardAddress recipient{};
+    CAmount value{0};
+    OrchardMemo memo{};
+};
+
+/** The shielded account of a wallet, as the wallet holds it. */
+struct ShieldedAccount {
+    std::optional<OrchardFvk> fvk;
+    //! The notes the wallet received, by nullifier.
+    std::map<uint256, ShieldedNote> notes;
+    //! What the wallet's transactions spent: nullifier -> the transactions that reveal it.
+    std::multimap<uint256, Txid> spends;
+    //! The payments the wallet's transactions made to others (and to itself), by (txid, action).
+    std::map<std::pair<Txid, uint32_t>, ShieldedPayment> payments;
+    //! Melt/cast: the plan, by id (kept in the wallet's database).
+    std::map<uint64_t, MeltCastJob> jobs;
+};
+
+/** Shielded addresses: Bech32m, "zo" on the main network ("tzo" on the test networks, "rzo" on regtest). */
+std::string EncodeShieldedAddress(const OrchardAddress& address);
+std::optional<OrchardAddress> DecodeShieldedAddress(const std::string& text);
+/** A memo as text: UTF-8 up to the first zero byte; empty for the "no memo" memo. */
+std::string MemoText(const OrchardMemo& memo);
+/** A memo from text (at most 512 bytes); the "no memo" memo (0xF6) for empty text. */
+std::optional<OrchardMemo> MemoFromText(const std::string& text);
+
+/** The spending key of the wallet's shielded account: nullopt if the wallet is locked or has no private keys. */
+std::optional<std::array<uint8_t, 32>> ShieldedSpendingKey(const CWallet& wallet);
+/** Make the viewing key known (from the spending key) and keep it, if it is not yet. */
+bool SetupShieldedAccount(CWallet& wallet);
+/** An address of the account: `index` 0 is the default one; others look unrelated to it. */
+std::optional<OrchardAddress> ShieldedAddress(const CWallet& wallet, uint64_t index, bool internal = false);
+
+/** Take in a transaction the wallet keeps: the notes it pays the wallet, what it spends, what it paid. */
+void ShieldedTxAdded(CWallet& wallet, const CWalletTx& wtx);
+/** Whether a transaction concerns the shielded account: pays it, spends its notes, or was made by it. */
+bool IsShieldedMine(const CWallet& wallet, const CTransaction& tx);
+
+/** A note with where it stands. */
+struct NoteStatus {
+    const ShieldedNote* note{nullptr};
+    int confirmations{0};
+    //! The transaction that spends it, if any (in a block or waiting).
+    std::optional<Txid> spent_by;
+};
+std::vector<NoteStatus> ShieldedNotes(const CWallet& wallet);
+
+struct ShieldedBalance {
+    //! In notes in blocks, not spent.
+    CAmount available{0};
+    //! In notes waiting for a block (change and incoming), not spent.
+    CAmount pending{0};
+    int notes{0};
+};
+ShieldedBalance GetShieldedBalance(const CWallet& wallet);
+
+/** A payment to make: to a shielded address (with a memo) or to a transparent script. */
+struct ShieldedRecipient {
+    std::optional<OrchardAddress> shielded;
+    CScript script;
+    CAmount amount{0};
+    OrchardMemo memo{};
+};
+
+/**
+ * Pay out of the shielded account: no transparent inputs; the change goes back to the account.
+ * @param[in] fee  the fee, or none for the wallet's fee rate
+ * @param[in] subtract_fee  take the fee out of the one transparent recipient's amount (unshielding all of it)
+ * @return the transaction, or the error
+ */
+std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fee = std::nullopt, bool subtract_fee = false);
+/** Move transparent coins of the wallet into its shielded account (or to another shielded address). */
+std::variant<CTransactionRef, std::string> ShieldCoins(CWallet& wallet, CAmount amount, const OrchardAddress& to, const OrchardMemo& memo);
+
+/**
+ * Move one transparent coin of the wallet, whole, into its shielded account: that coin as the only
+ * input, the fee out of it, no change. Melting shields each coin so, linking no two coins.
+ */
+std::variant<CTransactionRef, std::string> ShieldCoin(CWallet& wallet, const COutPoint& coin, const OrchardAddress& to);
+
+/** Bytes of a bundle of `actions` actions, as a marker carries it. */
+size_t BundleSize(size_t actions);
+/** Actions a bundle gets for so many spends and outputs (two at least, for privacy). */
+size_t ActionCount(size_t spends, size_t outputs);
+
+} // namespace wallet
+
+#endif // BITCOIN_WALLET_SHIELDED_H

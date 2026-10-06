@@ -14,6 +14,7 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <set>
 
 namespace sidechain {
 namespace {
@@ -24,21 +25,21 @@ namespace {
  * The mainchain never votes twice on the same transaction. A bundle that pays
  * the withdrawals of one that failed has to differ from it, which the height
  * of the block that commits to it, put in the lock time, sees to. The lock
- * time has no other effect, as the input of the transaction is final.
+ * time has no other effect, as the mainchain spends the treasury with a final input.
  */
-CMutableTransaction BuildBundle(const std::vector<const Withdrawal*>& withdrawals, int height)
+CMutableTransaction BuildBundle(const std::vector<const Withdrawal*>& withdrawals, int height, const uint256& nonce)
 {
+    // The blind form of BIP300: no inputs, the fee in place of the treasury output, then the payouts.
     CMutableTransaction tx;
     tx.version = 2;
     tx.nLockTime = static_cast<uint32_t>(height);
-    tx.vin.resize(1);
-    tx.vin[0].prevout.SetNull();
-    tx.vin[0].scriptSig = CScript() << OP_0;
     CAmount fee{0};
     for (const Withdrawal* withdrawal : withdrawals) fee += withdrawal->main_fee;
-    tx.vout.emplace_back(0, drivechain::DestinationScript(drivechain::WITHDRAWAL_RETURN_DEST));
     tx.vout.emplace_back(0, drivechain::WithdrawalFeeScript(fee));
     for (const Withdrawal* withdrawal : withdrawals) tx.vout.emplace_back(withdrawal->amount, withdrawal->main_script);
+    // The hash of the block before the one that commits to the bundle: nobody can know the
+    // bundle's hash, and get the mainchain to close it, before the sidechain commits to it.
+    tx.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>(nonce.begin(), nonce.end()));
     return tx;
 }
 
@@ -57,8 +58,8 @@ bool State::InBundle(const COutPoint& withdrawal) const
     return m_bundle && std::find(m_bundle->withdrawals.begin(), m_bundle->withdrawals.end(), withdrawal) != m_bundle->withdrawals.end();
 }
 
-bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int height, StateUndo& undo,
-                            std::vector<CTxOut>& payouts, std::string& reject_reason)
+bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int height, const Consensus::SidechainParams& params,
+                            StateUndo& undo, std::vector<CTxOut>& payouts, std::string& reject_reason)
 {
     if (main_height < m_main_height) {
         reject_reason = "bad-sc-main-height";
@@ -70,8 +71,11 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
             reject_reason = "bad-sc-main-unknown";
             return false;
         }
+        // The bundles of this chain that the block closed.
+        std::set<uint256> ours;
         for (const MainBundleEvent& event : main_block->bundles) {
             if (!m_bundle || event.hash != m_bundle->hash) continue;
+            ours.insert(event.hash);
             if (event.paid) {
                 for (const COutPoint& outpoint : m_bundle->withdrawals) Remove(outpoint, undo);
             } else {
@@ -81,20 +85,40 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
             m_bundle.reset();
         }
         for (const MainDeposit& deposit : main_block->deposits) {
-            // The change of a withdrawal is an escrow change too, but no deposit.
-            if (deposit.amount <= 0 || deposit.destination == drivechain::WITHDRAWAL_RETURN_DEST) continue;
+            if (deposit.destination == drivechain::WITHDRAWAL_RETURN_DEST) {
+                // The change of a withdrawal is an escrow change too, but no deposit. If it paid a
+                // bundle this chain does not have -- one committed on another branch of it -- the
+                // withdrawals it paid are paid all the same: those that pay the same output with
+                // the same amount, the oldest first. Without this, a branch that does not know the
+                // bundle would pay its withdrawals a second time.
+                if (deposit.bundle.IsNull() || ours.contains(deposit.bundle)) continue;
+                for (const CTxOut& paid : deposit.payouts) {
+                    // The oldest by height, then by outpoint, so that every node takes the same one.
+                    auto it{m_withdrawals.end()};
+                    for (auto w{m_withdrawals.begin()}; w != m_withdrawals.end(); ++w) {
+                        if (w->second.main_script != paid.scriptPubKey || w->second.amount != paid.nValue) continue;
+                        if (it == m_withdrawals.end() || w->second.height < it->second.height) it = w;
+                    }
+                    if (it == m_withdrawals.end()) continue;
+                    // A bundle of ours that pays it can no longer be paid as it is.
+                    if (InBundle(it->first)) m_bundle.reset();
+                    Remove(it->first, undo);
+                }
+                continue;
+            }
+            if (deposit.amount <= 0) continue;
             if (!MoneyRange(deposit.amount)) {
                 reject_reason = "bad-sc-deposit-amount";
                 return false;
             }
-            payouts.emplace_back(deposit.amount, DepositScript(deposit.destination));
+            payouts.emplace_back(deposit.amount, DepositScript(deposit.destination, params.slot));
         }
     }
     m_main_height = main_height;
     return true;
 }
 
-std::optional<CMutableTransaction> State::NextBundle(int height, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals) const
+std::optional<CMutableTransaction> State::NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals) const
 {
     if (m_bundle || m_withdrawals.empty()) return std::nullopt;
     if (m_last_failure_height >= 0 && height - m_last_failure_height < params.bundle_retry_delay) return std::nullopt;
@@ -112,7 +136,7 @@ std::optional<CMutableTransaction> State::NextBundle(int height, const Consensus
         withdrawals->clear();
         for (const Withdrawal* withdrawal : chosen) withdrawals->push_back(withdrawal->outpoint);
     }
-    return BuildBundle(chosen, height);
+    return BuildBundle(chosen, height, prev);
 }
 
 std::optional<CMutableTransaction> State::BundleTx() const
@@ -124,13 +148,13 @@ std::optional<CMutableTransaction> State::BundleTx() const
         if (it == m_withdrawals.end()) return std::nullopt;
         withdrawals.push_back(&it->second);
     }
-    return BuildBundle(withdrawals, m_bundle->height);
+    return BuildBundle(withdrawals, m_bundle->height, m_bundle->nonce);
 }
 
-bool State::StartBundle(const uint256& hash, int height, const Consensus::SidechainParams& params, StateUndo& undo, std::string& reject_reason)
+bool State::StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, StateUndo& undo, std::string& reject_reason)
 {
     std::vector<COutPoint> withdrawals;
-    const auto bundle{NextBundle(height, params, &withdrawals)};
+    const auto bundle{NextBundle(height, prev, params, &withdrawals)};
     if (!bundle) {
         reject_reason = "bad-sc-bundle-not-allowed";
         return false;
@@ -139,7 +163,7 @@ bool State::StartBundle(const uint256& hash, int height, const Consensus::Sidech
         reject_reason = "bad-sc-bundle-hash";
         return false;
     }
-    m_bundle = PendingBundle{hash, std::move(withdrawals), height};
+    m_bundle = PendingBundle{hash, std::move(withdrawals), height, prev};
     return true;
 }
 
@@ -166,6 +190,9 @@ bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason
 bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
                     std::vector<CTxOut>& payouts, std::string& reject_reason)
 {
+    // The shielded pool: a transaction that breaks its rules is invalid, so it comes first, and
+    // changes nothing if it fails.
+    if (!m_shielded.ApplyTx(tx, undo.shielded, reject_reason)) return false;
     for (uint32_t n{0}; n < tx.vout.size(); ++n) {
         const CTxOut& out{tx.vout[n]};
         if (IsWithdrawalScript(out.scriptPubKey)) {
@@ -206,8 +233,8 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
         reject_reason = "bmm-unknown";
         return false;
     }
-    std::vector<CTxOut> payouts;
-    if (!ApplyMainEvents(*bmm_height - 1, mainchain, height, undo, payouts, reject_reason)) return false;
+    std::vector<CTxOut> payouts, tx_payouts;
+    if (!ApplyMainEvents(*bmm_height - 1, mainchain, height, params, undo, payouts, reject_reason)) return false;
 
     // A new bundle takes the withdrawals that were waiting before this block.
     std::optional<uint256> commitment;
@@ -220,13 +247,29 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
         }
         commitment = hash;
     }
-    if (commitment && !StartBundle(*commitment, height, params, undo, reject_reason)) return false;
-
-    for (size_t i{1}; i < block.vtx.size(); ++i) {
-        if (!ApplyTx(*block.vtx[i], height, params, undo, payouts, reject_reason)) return false;
+    if (commitment) {
+        // A bundle the mainchain closed already, before this block was committed, would stay pending for ever.
+        if (const auto closed{mainchain.ClosedHeight(*commitment)}; closed && *closed < *bmm_height) {
+            reject_reason = "bad-sc-bundle-closed";
+            return false;
+        }
+        if (!StartBundle(*commitment, height, block.hashPrevBlock, params, undo, reject_reason)) return false;
     }
 
-    // The coinbase pays the deposits and the refunds, right after its first output.
+    // The coinbase has no part in the shielded pool (its transactions are checked one by one below).
+    if (zside::HasShieldedMarker(*block.vtx[0])) {
+        reject_reason = "bad-zs-coinbase";
+        return false;
+    }
+    for (size_t i{1}; i < block.vtx.size(); ++i) {
+        if (!ApplyTx(*block.vtx[i], height, params, undo, tx_payouts, reject_reason)) return false;
+    }
+
+    // The root the block leaves the shielded tree with is an anchor for the next blocks.
+    m_shielded.EndBlock(undo.shielded);
+
+    // The coinbase pays the deposits and the refunds, right after its first output, as many as a block can.
+    payouts = TakePayouts(std::move(payouts), std::move(tx_payouts), undo);
     const std::vector<CTxOut>& coinbase{block.vtx[0]->vout};
     if (coinbase.size() < 1 + payouts.size()) {
         reject_reason = "bad-sc-payouts-missing";
@@ -247,14 +290,42 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
     return true;
 }
 
+std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, StateUndo& undo)
+{
+    undo.queued = owed.size();
+    undo.queued_tx = owed_tx.size();
+    m_queue.insert(m_queue.end(), std::make_move_iterator(owed.begin()), std::make_move_iterator(owed.end()));
+    m_queue_tx.insert(m_queue_tx.end(), std::make_move_iterator(owed_tx.begin()), std::make_move_iterator(owed_tx.end()));
+    const size_t count{std::min(m_queue.size(), MAX_PAYOUTS_PER_BLOCK)};
+    const size_t count_tx{std::min(m_queue_tx.size(), MAX_PAYOUTS_PER_BLOCK - count)};
+    undo.paid.assign(m_queue.begin(), m_queue.begin() + count);
+    undo.paid_tx.assign(m_queue_tx.begin(), m_queue_tx.begin() + count_tx);
+    m_queue.erase(m_queue.begin(), m_queue.begin() + count);
+    m_queue_tx.erase(m_queue_tx.begin(), m_queue_tx.begin() + count_tx);
+    std::vector<CTxOut> paid{undo.paid};
+    paid.insert(paid.end(), undo.paid_tx.begin(), undo.paid_tx.end());
+    return paid;
+}
+
 void State::DisconnectBlock(const StateUndo& undo)
 {
+    // The queue was what it was before the block, with what the block owed at its end, less what
+    // the block paid from its front: put the paid ones back in front, and drop the block's own.
+    std::vector<CTxOut> queue{undo.paid};
+    queue.insert(queue.end(), m_queue.begin(), m_queue.end());
+    queue.resize(queue.size() - undo.queued);
+    m_queue = std::move(queue);
+    std::vector<CTxOut> queue_tx{undo.paid_tx};
+    queue_tx.insert(queue_tx.end(), m_queue_tx.begin(), m_queue_tx.end());
+    queue_tx.resize(queue_tx.size() - undo.queued_tx);
+    m_queue_tx = std::move(queue_tx);
     // A withdrawal that the block both added and removed ends up removed.
     for (const Withdrawal& withdrawal : undo.removed) m_withdrawals.emplace(withdrawal.outpoint, withdrawal);
     for (const COutPoint& outpoint : undo.added) m_withdrawals.erase(outpoint);
     m_main_height = undo.main_height;
     m_bundle = undo.bundle;
     m_last_failure_height = undo.last_failure_height;
+    m_shielded.Revert(undo.shielded);
 }
 
 } // namespace sidechain

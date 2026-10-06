@@ -8,7 +8,6 @@
 
 #include <qt/blockexplorer.h>
 #include <qt/cryptotoolsdialog.h>
-#include <qt/graffitidialog.h>
 #include <qt/miningdialog.h>
 #include <qt/multisigdialog.h>
 #include <qt/proofoffundsdialog.h>
@@ -30,7 +29,9 @@
 
 #ifdef ENABLE_WALLET
 #include <qt/walletcontroller.h>
+#include <qt/sidebarmining.h>
 #include <qt/theme.h>
+#include <qt/themedframe.h>
 #include <qt/walletframe.h>
 #include <qt/walletmodel.h>
 #include <qt/walletview.h>
@@ -53,6 +54,9 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QComboBox>
+#include <QPushButton>
+#include <QSignalBlocker>
+#include <QHBoxLayout>
 #include <QCursor>
 #include <QDateTime>
 #include <QDragEnterEvent>
@@ -129,7 +133,6 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
     m_mining_dialog = new MiningDialog(wallet_name, nullptr);
     m_block_explorer = new BlockExplorer(nullptr);
     m_crypto_tools = new CryptoToolsDialog(nullptr);
-    m_graffiti_dialog = new GraffitiDialog(wallet_name, nullptr);
     m_timestamp_dialog = new TimestampDialog(wallet_name, nullptr);
     m_proof_dialog = new ProofOfFundsDialog(wallet_name, nullptr);
     m_multisig_dialog = new MultisigDialog(wallet_name, nullptr);
@@ -273,7 +276,6 @@ BitcoinGUI::~BitcoinGUI()
     delete m_mining_dialog;
     delete m_block_explorer;
     delete m_crypto_tools;
-    delete m_graffiti_dialog;
     delete m_timestamp_dialog;
     delete m_proof_dialog;
     delete m_multisig_dialog;
@@ -332,6 +334,15 @@ void BitcoinGUI::createActions()
     connect(historyAction, &QAction::triggered, this, &BitcoinGUI::gotoHistoryPage);
     connect(sidechainAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(sidechainAction, &QAction::triggered, this, &BitcoinGUI::gotoSidechainPage);
+
+    shieldedAction = new QAction(platformStyle->SingleColorIcon(":/icons/lock_closed"), tr("&Private"), this);
+    shieldedAction->setStatusTip(tr("Private payments: shield coins, pay and get paid without showing who or how much"));
+    shieldedAction->setToolTip(shieldedAction->statusTip());
+    shieldedAction->setCheckable(true);
+    shieldedAction->setShortcut(QKeySequence(QStringLiteral("Alt+6")));
+    tabGroup->addAction(shieldedAction);
+    connect(shieldedAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
+    connect(shieldedAction, &QAction::triggered, this, &BitcoinGUI::gotoShieldedPage);
 #endif // ENABLE_WALLET
 
     quitAction = new QAction(tr("E&xit"), this);
@@ -591,7 +602,13 @@ void BitcoinGUI::createActions()
 
 void BitcoinGUI::createMenuBar()
 {
+#ifdef Q_OS_MACOS
     appMenuBar = menuBar();
+#else
+    // The menus are in a bar that is also the title bar of the window where the theme frames it.
+    m_themed_frame = new ThemedFrame(this);
+    appMenuBar = m_themed_frame->menuBar();
+#endif
 
     // The menus are arranged by what the user wants to do, as in the Drivechain wallets.
     const auto window_action{[this](QMenu* menu, const QString& text, const QString& tip, QWidget* window) {
@@ -637,18 +654,13 @@ void BitcoinGUI::createMenuBar()
 
     QMenu* use{appMenuBar->addMenu(tr("&Use %1").arg(CLIENT_NAME))};
     window_action(use, tr("Timestamp &File"), tr("Prove that a file existed, by publishing its fingerprint on the chain"), m_timestamp_dialog);
-    window_action(use, tr("OP_RETURN &Graffiti"), tr("Read the messages written on the chain, and write one"), m_graffiti_dialog);
     if (walletFrame) {
         use->addSeparator();
         use->addAction(signMessageAction);
         use->addAction(verifyMessageAction);
         use->addSeparator();
         use->addAction(sidechainAction);
-    }
-
-    QMenu* work{appMenuBar->addMenu(tr("W&ork for %1").arg(CLIENT_NAME))};
-    if (walletFrame) {
-        QAction* merged_mining{work->addAction(tr("&Merged Mining"))};
+        QAction* merged_mining{use->addAction(tr("Merged M&ining"))};
         merged_mining->setStatusTip(tr("Have the miners of the mainchain mine the blocks of this chain"));
         connect(merged_mining, &QAction::triggered, this, [this] { showNormalIfMinimized(); gotoSidechainPage(); });
     }
@@ -715,17 +727,19 @@ void BitcoinGUI::createMenuBar()
     QMenu* theme_menu{node_menu->addMenu(tr("&Theme"))};
     theme_menu->setObjectName("themeMenu");
     auto* theme_group{new QActionGroup(this)};
-    for (const auto& theme : Theme::Available()) {
-        QAction* action{theme_menu->addAction(theme.name)};
+    for (const auto& look : Theme::Looks()) {
+        QAction* action{theme_menu->addAction(look.name)};
         action->setCheckable(true);
-        action->setData(theme.id);
-        action->setChecked(theme.id == Theme::Saved());
+        action->setData(look.id);
+        action->setChecked(look.id == Theme::SavedLook());
         theme_group->addAction(action);
     }
-    connect(theme_group, &QActionGroup::triggered, this, [](QAction* action) { Theme::Save(action->data().toString()); });
+    connect(theme_group, &QActionGroup::triggered, this, [](QAction* action) { Theme::SaveLook(action->data().toString()); });
     connect(theme_menu, &QMenu::aboutToShow, this, [theme_group] {
-        for (QAction* action : theme_group->actions()) action->setChecked(action->data().toString() == Theme::Saved());
+        for (QAction* action : theme_group->actions()) action->setChecked(action->data().toString() == Theme::SavedLook());
     });
+    theme_menu->addSeparator();
+    connect(theme_menu->addAction(tr("Custom…")), &QAction::triggered, this, [this] { openOptionsDialogWithTab(OptionsDialog::TAB_DISPLAY); });
     QAction* larger{node_menu->addAction(tr("Increase font size"))};
     larger->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Plus));
     connect(larger, &QAction::triggered, this, [] { Theme::SaveFont(Theme::SavedFontFamily(), Theme::SavedFontSizeAdjustment() + 1); });
@@ -763,17 +777,37 @@ void BitcoinGUI::createToolBars()
             font.setBold(true);
             font.setPointSizeF(font.pointSizeF() * 0.85);
             label->setFont(font);
-            label->setContentsMargins(8, 12, 8, 2);
+            label->setContentsMargins(6, 10, 4, 2);
             label->setEnabled(false);
             toolbar->addWidget(label);
         }};
-        const auto entry{[&](QAction* action) {
-            toolbar->addAction(action);
-            // Entries are as wide as the bar, so that they line up.
-            if (auto* button{qobject_cast<QToolButton*>(toolbar->widgetForAction(action))}) {
-                button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-                button->setMinimumWidth(176);
-            }
+        // An entry is a button as wide as the bar, with its icon and its text at the left. The button of
+        // a tool bar puts them in the middle, so the entries are buttons of their own that stand for the actions.
+        const auto entry{[this, toolbar](QAction* action) {
+            auto* button{new QPushButton(toolbar)};
+            button->setObjectName("sidebarEntry");
+            button->setFlat(true);
+            button->setFocusPolicy(Qt::NoFocus);
+            button->setIconSize(toolbar->iconSize());
+            button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            button->setCheckable(action->isCheckable());
+            QAction* placed{toolbar->addWidget(button)};
+            const auto follow{[button, action, placed] {
+                button->setIcon(action->icon());
+                button->setText(action->text().remove(QLatin1Char('&')));
+                button->setToolTip(action->toolTip());
+                button->setStatusTip(action->statusTip());
+                button->setEnabled(action->isEnabled());
+                button->setChecked(action->isChecked());
+                placed->setVisible(action->isVisible());
+            }};
+            follow();
+            connect(action, &QAction::changed, button, follow);
+            connect(button, &QPushButton::clicked, action, [button, action] {
+                action->trigger();
+                // The page that is shown stays ticked when it is clicked again.
+                button->setChecked(action->isChecked());
+            });
         }};
         const auto window_entry{[&](const char* icon, const QString& text, const QString& tip, QWidget* window) {
             QAction* action{new QAction(platformStyle->SingleColorIcon(icon), text, this)};
@@ -790,21 +824,11 @@ void BitcoinGUI::createToolBars()
         entry(sendCoinsAction);
         entry(receiveCoinsAction);
         entry(historyAction);
+        entry(shieldedAction);
 
         section(tr("Chain"));
         entry(sidechainAction);
         window_entry(":/icons/eye", tr("Block Explorer"), tr("Browse blocks and the transactions waiting to be mined"), m_block_explorer);
-
-        section(tr("Tools"));
-        window_entry(":/icons/lock_closed", tr("Multisig Lounge"), tr("Share coins with partners, in addresses that need several signatures"), m_multisig_dialog);
-        window_entry(":/icons/synced", tr("Proof of Funds"), tr("Prove that this wallet holds funds, or check such a proof"), m_proof_dialog);
-        window_entry(":/icons/transaction_confirmed", tr("Timestamp File"), tr("Prove that a file existed, by publishing its fingerprint on the chain"), m_timestamp_dialog);
-        window_entry(":/icons/edit", tr("Graffiti"), tr("Read the messages written on the chain, and write one"), m_graffiti_dialog);
-        QAction* crypto_tools{new QAction(platformStyle->SingleColorIcon(":/icons/export"), tr("Crypto Tools"), this)};
-        crypto_tools->setStatusTip(tr("Hash calculator, merkle tree and address decoder"));
-        connect(crypto_tools, &QAction::triggered, [this] { m_crypto_tools->showTab(CryptoToolsDialog::HASH); });
-        m_sidebar_icons.emplace_back(crypto_tools, ":/icons/export");
-        entry(crypto_tools);
 
         section(tr("Node"));
         QAction* node_window{new QAction(platformStyle->SingleColorIcon(":/icons/connect_4"), tr("Node Window"), this)};
@@ -817,6 +841,70 @@ void BitcoinGUI::createToolBars()
         connect(settings, &QAction::triggered, optionsAction, &QAction::trigger);
         m_sidebar_icons.emplace_back(settings, ":/icons/fontbigger");
         entry(settings);
+
+        // Mining of this chain, which the miners of the mainchain do for a fee.
+        section(tr("Mining"));
+        m_sidebar_mining = new SidebarMining([this]() -> std::optional<QString> {
+#ifdef ENABLE_WALLET
+            if (walletFrame && walletFrame->currentWalletModel()) return walletFrame->currentWalletModel()->getWalletName();
+#endif
+            return std::nullopt;
+        }, toolbar);
+        toolbar->addWidget(m_sidebar_mining);
+
+        // The look: colours and a font that goes with them. A combination of one's own is made in the settings.
+        section(tr("Theme"));
+        auto* looks{new QComboBox(toolbar)};
+        // As wide as the bar is for its other entries, and no wider.
+        looks->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        looks->setObjectName("lookSelector");
+        looks->setToolTip(tr("Colours and font of the wallet. \"Custom\" opens the settings, to combine any colours with any font."));
+        looks->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        looks->setMinimumContentsLength(1);
+        for (const auto& look : Theme::Looks()) looks->addItem(look.name, look.id);
+        looks->addItem(tr("Custom…"), QString{});
+        const auto show_look{[looks] {
+            const QSignalBlocker blocker{looks};
+            // A combination that is no look is the last entry.
+            const int index{Theme::SavedLook().isEmpty() ? -1 : looks->findData(Theme::SavedLook())};
+            looks->setCurrentIndex(index >= 0 ? index : looks->count() - 1);
+        }};
+        show_look();
+        connect(Theme::Changes(), &Theme::Signals::changed, looks, show_look);
+        connect(looks, qOverload<int>(&QComboBox::activated), this, [this, looks, show_look](int index) {
+            const QString id{looks->itemData(index).toString()};
+            if (!id.isEmpty()) {
+                Theme::SaveLook(id);
+                return;
+            }
+            show_look();
+            openOptionsDialogWithTab(OptionsDialog::TAB_DISPLAY);
+        });
+        auto* looks_box{new QWidget(toolbar)};
+        auto* looks_layout{new QHBoxLayout(looks_box)};
+        looks_layout->setContentsMargins(4, 2, 2, 6);
+        looks_layout->setSpacing(1);
+        looks_layout->addWidget(looks, 1);
+        toolbar->addWidget(looks_box);
+
+        // The size of the text.
+        auto* size_box{new QWidget(toolbar)};
+        auto* size_layout{new QHBoxLayout(size_box)};
+        size_layout->setContentsMargins(4, 0, 2, 6);
+        size_layout->setSpacing(1);
+        const auto size_button{[&](const QString& text, const QString& tip, int step) {
+            auto* b{new QToolButton(size_box)};
+            b->setObjectName(step > 0 ? "textLarger" : "textSmaller");
+            b->setText(text);
+            b->setToolTip(tip);
+            b->setAutoRaise(true);
+            connect(b, &QToolButton::clicked, this, [step] { Theme::SaveFont(Theme::SavedFontFamily(), Theme::SavedFontSizeAdjustment() + step); });
+            size_layout->addWidget(b);
+        }};
+        size_button(QStringLiteral("A\u2212"), tr("Smaller text (Ctrl+-)"), -1);
+        size_button(QStringLiteral("A+"), tr("Larger text (Ctrl++)"), 1);
+        size_layout->addStretch();
+        toolbar->addWidget(size_box);
 
         overviewAction->setChecked(true);
 
@@ -875,8 +963,8 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
         rpcConsole->setClientModel(_clientModel, tip_info->block_height, tip_info->block_time, tip_info->verification_progress);
         m_mining_dialog->setClientModel(_clientModel);
         m_block_explorer->setClientModel(_clientModel);
+        if (m_sidebar_mining) m_sidebar_mining->setClientModel(_clientModel);
         m_crypto_tools->setClientModel(_clientModel);
-        m_graffiti_dialog->setClientModel(_clientModel);
         m_timestamp_dialog->setClientModel(_clientModel);
         m_proof_dialog->setClientModel(_clientModel);
         m_multisig_dialog->setClientModel(_clientModel);
@@ -912,8 +1000,8 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
         rpcConsole->setClientModel(nullptr);
         m_mining_dialog->setClientModel(nullptr);
         m_block_explorer->setClientModel(nullptr);
+        if (m_sidebar_mining) m_sidebar_mining->setClientModel(nullptr);
         m_crypto_tools->setClientModel(nullptr);
-        m_graffiti_dialog->setClientModel(nullptr);
         m_timestamp_dialog->setClientModel(nullptr);
         m_proof_dialog->setClientModel(nullptr);
         m_multisig_dialog->setClientModel(nullptr);
@@ -1058,6 +1146,7 @@ void BitcoinGUI::setWalletActionsEnabled(bool enabled)
     receiveCoinsAction->setEnabled(enabled);
     historyAction->setEnabled(enabled && !isPrivacyModeActivated());
     sidechainAction->setEnabled(enabled);
+    shieldedAction->setEnabled(enabled);
     encryptWalletAction->setEnabled(enabled);
     backupWalletAction->setEnabled(enabled);
     changePassphraseAction->setEnabled(enabled);
@@ -1224,6 +1313,12 @@ void BitcoinGUI::gotoReceiveCoinsPage()
 {
     receiveCoinsAction->setChecked(true);
     if (walletFrame) walletFrame->gotoReceiveCoinsPage();
+}
+
+void BitcoinGUI::gotoShieldedPage()
+{
+    shieldedAction->setChecked(true);
+    if (walletFrame) walletFrame->gotoShieldedPage();
 }
 
 void BitcoinGUI::gotoSidechainPage()

@@ -10,6 +10,7 @@
 #include <interfaces/chain.h>
 #include <interfaces/node.h>
 #include <interfaces/wallet.h>
+#include <chainparams.h>
 #include <key_io.h>
 #include <node/context.h>
 #include <policy/feerate.h>
@@ -19,7 +20,6 @@
 #include <qt/bitcoinamountfield.h>
 #include <qt/blockexplorer.h>
 #include <qt/cryptotoolsdialog.h>
-#include <qt/graffitidialog.h>
 #include <qt/miningdialog.h>
 #include <qt/multisigdialog.h>
 #include <qt/noderpc.h>
@@ -45,6 +45,7 @@
 #include <wallet/wallet.h>
 
 #include <QApplication>
+#include <QFontDatabase>
 #include <QCheckBox>
 #include <QCryptographicHash>
 #include <QLabel>
@@ -148,24 +149,16 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     Q_EMIT decode->returnPressed();
     const QString decoded{tools.findChild<QPlainTextEdit*>("decodeOutput")->toPlainText()};
     QVERIFY(decoded.contains("A valid address"));
-    QVERIFY(decoded.contains("prefix: rchn"));
+    QVERIFY(decoded.contains(QString::fromStdString("prefix: " + Params().Bech32HRP())));
     QVERIFY(decoded.contains(QString::fromStdString(HexStr(test.coinbaseKey.GetPubKey().GetID()))));
     SaveScreenshot(tools, "tools-address");
 
-    // Graffiti: publish a message, then find it on the chain
-    GraffitiDialog graffiti(wallet_name);
-    graffiti.setClientModel(&client_model);
-    graffiti.findChild<QLineEdit*>("graffitiMessage")->setText("hello chains");
-    const QStringList boxes{WithMessageBoxes(QMessageBox::Yes, [&] { graffiti.findChild<QPushButton*>("graffitiPublish")->click(); })};
-    QCOMPARE(boxes.size(), 2);
-    QVERIFY2(boxes.at(1).startsWith("Published in transaction"), qPrintable(boxes.at(1)));
+    // A transaction for the explorer to find
+    QString send_error;
+    const auto explorer_tx{NodeRpc::Call(&client_model, "sendtoaddress", NodeRpc::Args({address.toStdString(), 1}), send_error, QString{})};
+    QVERIFY2(explorer_tx, qPrintable(send_error));
+    const QString sent_txid{QString::fromStdString(explorer_tx->get_str())};
     MineBlock(test);
-    graffiti.refresh();
-    auto* messages{graffiti.findChild<QTableWidget*>("graffitiTable")};
-    QCOMPARE(messages->rowCount(), 1);
-    QCOMPARE(messages->item(0, 2)->text(), QString("hello chains"));
-    const QString graffiti_txid{messages->item(0, 3)->text()};
-    SaveScreenshot(graffiti, "graffiti");
 
     // Block explorer
     BlockExplorer explorer;
@@ -180,11 +173,11 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     explorer.search(QString::number(tip->nHeight));
     auto* block_txs{explorer.findChild<QListWidget*>("explorerBlockTxs")};
     QCOMPARE(block_txs->count(), 2);
-    QCOMPARE(block_txs->item(1)->text(), graffiti_txid);
+    QCOMPARE(block_txs->item(1)->text(), sent_txid);
     QVERIFY(explorer.findChild<QLabel*>("explorerTitle")->text().startsWith(QString("Block %1:").arg(tip->nHeight)));
     Q_EMIT block_txs->itemClicked(block_txs->item(1));
-    QCOMPARE(explorer.findChild<QLabel*>("explorerTitle")->text(), "Transaction " + graffiti_txid);
-    QVERIFY(explorer.findChild<QPlainTextEdit*>("explorerDetails")->toPlainText().contains("\"nulldata\""));
+    QCOMPARE(explorer.findChild<QLabel*>("explorerTitle")->text(), "Transaction " + sent_txid);
+    QVERIFY(explorer.findChild<QPlainTextEdit*>("explorerDetails")->toPlainText().contains("\"witness_v0_keyhash\""));
     explorer.search(blocks->item(3, 6)->text());
     QVERIFY(explorer.findChild<QLabel*>("explorerTitle")->text().startsWith(QString("Block %1:").arg(tip->nHeight - 3)));
     QCOMPARE(WithMessageBoxes(QMessageBox::Ok, [&] { explorer.search("not a block"); }).size(), 1);
@@ -251,7 +244,7 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     proof.findChild<QLineEdit*>("proofStatement")->setText("These coins are mine");
     WithMessageBoxes(QMessageBox::Ok, [&] { proof.prove(); });
     const QString proof_text{proof.findChild<QPlainTextEdit*>("proofOutput")->toPlainText()};
-    QVERIFY2(proof_text.startsWith("-----BEGIN CHAINS PROOF OF FUNDS-----\nThese coins are mine\n-----SIGNATURES-----\nrchn1"), qPrintable(proof_text));
+    QVERIFY2(proof_text.startsWith("-----BEGIN CHAINS PROOF OF FUNDS-----\nThese coins are mine\n-----SIGNATURES-----\n" + QString::fromStdString(Params().Bech32HRP()) + "1"), qPrintable(proof_text));
     auto* proof_input{proof.findChild<QPlainTextEdit*>("proofInput")};
     auto* verdict{proof.findChild<QPlainTextEdit*>("proofVerdict")};
     proof_input->setPlainText(proof_text);
@@ -290,7 +283,7 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     QCOMPARE(shared->rowCount(), 1);
     QCOMPARE(shared->item(0, 1)->text(), QString("2 of 2"));
     const QString shared_address{shared->item(0, 3)->text()};
-    QVERIFY(shared_address.startsWith("rchn1q") && shared_address.size() == 64);
+    QVERIFY(shared_address.startsWith(QString::fromStdString(Params().Bech32HRP() + "1q")) && shared_address.size() == qsizetype(60 + Params().Bech32HRP().size()));
 
     QString rpc_error;
     QVERIFY2(NodeRpc::Call(&client_model, "sendtoaddress", NodeRpc::Args({shared_address.toStdString(), 3}), rpc_error, QString{}), qPrintable(rpc_error));
@@ -317,6 +310,9 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     QSettings().remove("MultisigAddresses");
 
     // Themes
+    // By default the text is a little larger than on the desktop, which takes a style sheet.
+    QCOMPARE(Theme::SavedFontSizeAdjustment(), Theme::DEFAULT_FONT_SIZE_ADJUSTMENT);
+    Theme::SaveFont({}, 0);
     const QPalette original_palette{QApplication::palette()};
     QCOMPARE(Theme::Available().size(), 18);
     Theme::Apply("midnight");
@@ -330,6 +326,39 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     Theme::Apply("system");
     QCOMPARE(QApplication::palette().color(QPalette::Window), original_palette.color(QPalette::Window));
     QVERIFY(qApp->styleSheet().isEmpty());
+
+    // Looks: the colours of a theme with a font, picked together
+    const QList<Theme::Info> looks{Theme::Looks()};
+    QCOMPARE(looks.size(), 18);
+    QCOMPARE(looks.at(0).id, QString("system"));
+    int look_changes{0};
+    const auto counting{QObject::connect(Theme::Changes(), &Theme::Signals::changed, [&] { ++look_changes; })};
+    Theme::SaveLook("matrix");
+    QCOMPARE(look_changes, 1);
+    QCOMPARE(Theme::Saved(), QString("matrix"));
+    QCOMPARE(Theme::SavedLook(), QString("matrix"));
+    QCOMPARE(QApplication::palette().color(QPalette::Window).name(), QString("#000000"));
+    // The font of a look is one this computer has, or the one of the desktop.
+    QVERIFY(Theme::SavedFontFamily().isEmpty() || QFontDatabase::families().contains(Theme::SavedFontFamily()));
+    // Other colours with the same font are a combination of one's own, unless the fonts of both looks are the same here.
+    Theme::Save("rose");
+    QCOMPARE(look_changes, 2);
+    // The size of the text is set apart from the look, and a look leaves it as it is.
+    Theme::SaveLook("rose");
+    QCOMPARE(Theme::SavedLook(), QString("rose"));
+    Theme::SaveFont(Theme::SavedFontFamily(), 5);
+    QCOMPARE(Theme::SavedLook(), QString("rose"));
+    Theme::SaveLook("matrix");
+    QCOMPARE(Theme::SavedFontSizeAdjustment(), 5);
+    Theme::SaveFont(Theme::SavedFontFamily(), 0);
+    Theme::SaveLook("no such look");
+    QCOMPARE(look_changes, 6);
+    Theme::SaveLook("system");
+    QCOMPARE(Theme::SavedLook(), QString("system"));
+    QCOMPARE(Theme::SavedFontFamily(), QString{});
+    QCOMPARE(Theme::SavedFontSizeAdjustment(), 0);
+    QVERIFY(qApp->styleSheet().isEmpty());
+    QObject::disconnect(counting);
 }
 
 void TestSidechainPage(interfaces::Node& node)

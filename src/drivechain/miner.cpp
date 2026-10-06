@@ -14,7 +14,7 @@ namespace drivechain {
 
 namespace {
 //! Version of the file the state is kept in.
-constexpr uint32_t MINER_STATE_VERSION{1};
+constexpr uint32_t MINER_STATE_VERSION{2};
 } // namespace
 
 bool MinerState::Load(const fs::path& path)
@@ -36,7 +36,8 @@ bool MinerState::Load(const fs::path& path)
         for (uint64_t i{0}; i < bundle_count; ++i) {
             SidechainId slot;
             CMutableTransaction tx;
-            file >> slot >> TX_WITH_WITNESS(tx);
+            // A blind withdrawal has no inputs, and so no witness.
+            file >> slot >> TX_NO_WITNESS(tx);
             m_bundles.emplace(std::make_pair(slot, tx.GetHash().ToUint256()), std::move(tx));
         }
     } catch (const std::exception& e) {
@@ -64,7 +65,7 @@ void MinerState::Save() const
     try {
         file << MINER_STATE_VERSION << m_proposals << m_acks << m_votes << static_cast<uint8_t>(m_default_vote) << uint64_t{m_bundles.size()};
         for (const auto& [key, tx] : m_bundles) {
-            file << key.first << TX_WITH_WITNESS(tx);
+            file << key.first << TX_NO_WITNESS(tx);
         }
         if (!file.Commit()) throw std::runtime_error("commit failed");
         if (file.fclose() != 0) throw std::runtime_error("close failed");
@@ -123,29 +124,9 @@ std::set<uint256> MinerState::GetAcks() const
 
 std::optional<uint256> MinerState::AddBundle(SidechainId slot, const CMutableTransaction& blind_tx, std::string& error)
 {
-    // The blind form has a single placeholder input and no change output yet.
-    if (blind_tx.vin.size() != 1 || !blind_tx.vin[0].prevout.IsNull() || blind_tx.vin[0].scriptSig != (CScript() << OP_0) ||
-        !blind_tx.vin[0].scriptWitness.IsNull()) {
-        error = "a withdrawal bundle must have a single null input with OP_0 as its scriptSig and no witness";
+    if (!IsBlindWithdrawal(CTransaction{blind_tx})) {
+        error = "a withdrawal bundle must be the blind form of a withdrawal: no inputs, output 0 OP_RETURN with the fee (8 bytes, big endian) and no value, then the payouts";
         return std::nullopt;
-    }
-    if (blind_tx.vout.size() < 2) {
-        error = "a withdrawal bundle must have at least the return destination and fee outputs";
-        return std::nullopt;
-    }
-    if (ParseDestinationScript(blind_tx.vout[0].scriptPubKey) != WITHDRAWAL_RETURN_DEST) {
-        error = "the first output of a withdrawal bundle must be the return destination marker";
-        return std::nullopt;
-    }
-    if (!ParseWithdrawalFeeScript(blind_tx.vout[1].scriptPubKey)) {
-        error = "the second output of a withdrawal bundle must state its fee";
-        return std::nullopt;
-    }
-    for (const CTxOut& out : blind_tx.vout) {
-        if (ParseEscrowScript(out.scriptPubKey)) {
-            error = "a withdrawal bundle must not pay into an escrow";
-            return std::nullopt;
-        }
     }
     const uint256 hash{blind_tx.GetHash().ToUint256()};
     LOCK(m_mutex);
@@ -227,7 +208,7 @@ BlockAdditions MinerState::CreateBlockAdditions(const SidechainDB& scdb, const C
     // M1: one proposal per block.
     for (const Sidechain& sidechain : GetProposals()) {
         if (!sidechain.IsValid(params.max_sidechains)) continue;
-        if (scdb.GetProposal(sidechain.GetHash())) continue;
+        if (scdb.GetProposal(sidechain.slot, sidechain.GetHash())) continue;
         if (const Slot* slot{scdb.GetSlot(sidechain.slot)}; slot && slot->sidechain == sidechain) continue;
         add_message(ProposalScript(sidechain));
         break;
@@ -239,7 +220,7 @@ BlockAdditions MinerState::CreateBlockAdditions(const SidechainDB& scdb, const C
         const uint256 hash{proposal.sidechain.GetHash()};
         if (!IsAcked(hash)) continue;
         if (!acked_slots.insert(proposal.sidechain.slot).second) continue;
-        add_message(AckScript(hash));
+        add_message(AckScript(proposal.sidechain.slot, hash));
     }
 
     // M3: bundles this node knows about and the chain does not.
@@ -254,9 +235,9 @@ BlockAdditions MinerState::CreateBlockAdditions(const SidechainDB& scdb, const C
         proposed_slots.insert(slot);
     }
 
-    // M4: votes, one entry per sidechain with pending bundles.
+    // M4: votes, one entry per active sidechain.
     std::vector<uint16_t> votes;
-    size_t last_vote{0};
+    bool any_vote{false};
     for (const auto& [slot, bundles] : scdb.GetPendingBundles()) {
         const Vote vote{GetVote(slot)};
         uint16_t entry{VOTE_ABSTAIN};
@@ -268,11 +249,10 @@ BlockAdditions MinerState::CreateBlockAdditions(const SidechainDB& scdb, const C
             }
         }
         votes.push_back(entry);
-        if (entry != VOTE_ABSTAIN) last_vote = votes.size();
+        if (entry != VOTE_ABSTAIN) any_vote = true;
     }
-    // Sidechains at the end of the list that are abstained on can be left out.
-    votes.resize(last_vote);
-    if (!votes.empty()) add_message(VoteScript(votes));
+    // A block without a vote message abstains on every sidechain.
+    if (any_vote) add_message(VoteScript(MakeVoteMessage(votes)));
 
     // Follow the escrow outputs through the transactions of the block: a
     // withdrawal spends the escrow output as the deposits of the block leave it.
@@ -301,15 +281,15 @@ BlockAdditions MinerState::CreateBlockAdditions(const SidechainDB& scdb, const C
             const Slot* current{after.GetSlot(slot)};
             if (!current || !current->has_ctip) continue;
 
-            const auto fee{ParseWithdrawalFeeScript(blind_tx->vout[1].scriptPubKey)};
+            const auto fee{ParseWithdrawalFeeScript(blind_tx->vout[0].scriptPubKey)};
             CAmount paid_out{0};
             for (const CTxOut& out : blind_tx->vout) paid_out += out.nValue;
             if (!fee || paid_out + *fee > current->ctip.amount) continue;
 
+            // The treasury output is the only input, and the new one takes the place of the fee output.
             CMutableTransaction mtx{*blind_tx};
-            mtx.vin[0].prevout = current->ctip.outpoint;
-            mtx.vin[0].scriptSig.clear();
-            mtx.vout.emplace_back(current->ctip.amount - paid_out - *fee, EscrowScript(slot));
+            mtx.vin.assign(1, CTxIn{current->ctip.outpoint});
+            mtx.vout[0] = CTxOut{current->ctip.amount - paid_out - *fee, EscrowScript(slot)};
             const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
             if (!after.ConnectTx(*tx, params, escrow_outputs, /*allow_withdrawal=*/true, undo, nullptr, reject_reason)) continue;
             additions.withdrawals.push_back(tx);

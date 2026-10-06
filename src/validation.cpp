@@ -7,6 +7,8 @@
 
 #include <validation.h>
 
+#include <zside/shielded.h>
+
 #include <arith_uint256.h>
 #include <chain.h>
 #include <checkqueue.h>
@@ -801,6 +803,21 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
                 if (!side.CheckRefund(*refund, reject_reason)) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
                 if (const auto other{m_pool.m_refunds.find(refund->withdrawal)}; other != m_pool.m_refunds.end() && !ws.m_conflicts.contains(other->second)) {
                     return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "sc-refund-in-mempool");
+                }
+            }
+        }
+
+        // The shielded pool: the bundle against the pool as the chain leaves it, and against the
+        // other transactions of the mempool, which may not reveal the same nullifiers.
+        std::string reject_reason;
+        if (!side.Shielded().CheckTx(tx, reject_reason)) {
+            return ws.m_state.Invalid(TxValidationResult::TX_CONSENSUS, reject_reason);
+        }
+        std::string error;
+        if (const auto bundle{zside::Bundle::FromTx(tx, error)}) {
+            for (const uint256& nf : bundle->Nullifiers()) {
+                if (const auto other{m_pool.m_shielded_nullifiers.find(nf)}; other != m_pool.m_shielded_nullifiers.end() && !ws.m_conflicts.contains(other->second)) {
+                    return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "zs-nullifier-in-mempool");
                 }
             }
         }
@@ -4260,8 +4277,7 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         // Not a reason to remember the block as invalid: the commitment may still come.
         if (!bmm_height) {
             // Bounded, as anyone can send headers that will never be committed to.
-            if (chainman.m_bmm_waiting.size() >= 1000) chainman.m_bmm_waiting.erase(chainman.m_bmm_waiting.begin());
-            chainman.m_bmm_waiting.emplace(hash, block);
+            chainman.AddBmmWaiting(block, /*peer=*/-1);
             return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "bmm-unknown", "no mainchain block is known to commit to this block");
         }
         if (pindexPrev->pprev) {
@@ -4857,7 +4873,7 @@ void Chainstate::RemoveStaleDrivechainTxs()
     AssertLockHeld(::cs_main);
     if (!m_mempool) return;
     AssertLockHeld(m_mempool->cs);
-    if (m_mempool->m_bmm_requests.empty() && m_mempool->m_escrow_txs.empty() && m_mempool->m_refunds.empty()) return;
+    if (m_mempool->m_bmm_requests.empty() && m_mempool->m_escrow_txs.empty() && m_mempool->m_refunds.empty() && m_mempool->m_shielded_nullifiers.empty()) return;
     const CBlockIndex* tip{m_chain.Tip()};
     if (!tip) return;
 
@@ -4868,6 +4884,13 @@ void Chainstate::RemoveStaleDrivechainTxs()
         for (const auto& [withdrawal, txid] : m_mempool->m_refunds) {
             if (m_scdb.m_side.Withdrawals().contains(withdrawal) && !m_scdb.m_side.InBundle(withdrawal)) continue;
             if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
+        }
+        // Shielded transactions whose notes another spent in a block (they reveal a nullifier the chain has).
+        std::set<Txid> shielded;
+        for (const auto& [nf, txid] : m_mempool->m_shielded_nullifiers) {
+            if (m_scdb.m_side.Shielded().IsSpent(nf) && shielded.insert(txid).second) {
+                if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
+            }
         }
     }
 
@@ -6786,4 +6809,27 @@ util::Result<void> ChainstateManager::ActivateBestChains()
         }
     }
     return {};
+}
+
+void ChainstateManager::AddBmmWaiting(const CBlockHeader& header, int64_t peer) const
+{
+    AssertLockHeld(::cs_main);
+    static constexpr size_t MAX_BMM_WAITING{1000};
+    const uint256 hash{header.GetHash()};
+    if (const auto it{m_bmm_waiting.find(hash)}; it != m_bmm_waiting.end()) {
+        // A header without a peer was looked at by validation; the peer that sent it is the one to keep.
+        if (it->second.peer < 0) it->second.peer = peer;
+        return;
+    }
+    if (m_bmm_waiting.size() >= MAX_BMM_WAITING) {
+        std::map<int64_t, size_t> counts;
+        for (const auto& [_, waiting] : m_bmm_waiting) ++counts[waiting.peer];
+        const int64_t crowded{std::max_element(counts.begin(), counts.end(), [](const auto& a, const auto& b) { return a.second < b.second; })->first};
+        auto oldest{m_bmm_waiting.end()};
+        for (auto it{m_bmm_waiting.begin()}; it != m_bmm_waiting.end(); ++it) {
+            if (it->second.peer == crowded && (oldest == m_bmm_waiting.end() || it->second.sequence < oldest->second.sequence)) oldest = it;
+        }
+        m_bmm_waiting.erase(oldest);
+    }
+    m_bmm_waiting.emplace(hash, BmmWaiting{header, peer, m_bmm_waiting_sequence++});
 }

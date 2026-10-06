@@ -605,6 +605,12 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 // Marks the escrow output of a sidechain. What may spend such an
                 // output is decided by the drivechain rules, not by the script.
                 case OP_DRIVECHAIN:
+                {
+                    // In a treasury script, OP_DRIVECHAIN OP_PUSHBYTES_1 <slot> OP_TRUE (BIP300), the slot
+                    // names the sidechain and is no data for the stack: it is a one byte push whatever
+                    // its value, and spending leaves OP_TRUE alone on the stack.
+                    if (script.size() == 4 && script[1] == 1 && script[3] == OP_TRUE && pc == script.begin() + 1) pc += 2;
+                }
                 break;
 
                 case OP_NOP1: case OP_NOP4:

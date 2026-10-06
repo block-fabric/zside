@@ -89,10 +89,10 @@ TX_MIN_STANDARD_VERSION = 1
 TX_MAX_STANDARD_VERSION = 3
 
 MAGIC_BYTES = {
-    "mainnet": b"\x5c\x1d\xec\x01",
-    "testnet": b"\x5c\x1d\xec\x02",
-    "regtest": b"\x5c\x1d\xec\x04",
-    "signet": b"\x5c\x1d\xec\x03",
+    "mainnet": b"\x7a\x73\x64\x01",
+    "testnet": b"\x7a\x73\x64\x02",
+    "regtest": b"\x7a\x73\x64\x04",
+    "signet": b"\x7a\x73\x64\x03",
 }
 
 def sha256(s):
@@ -644,11 +644,14 @@ class CTransaction:
                 self.vout = deser_vector(f, CTxOut)
         else:
             self.vout = deser_vector(f, CTxOut)
-        if flags != 0:
+        if flags & 1:
             self.wit.vtxinwit = [CTxInWitness() for _ in range(len(self.vin))]
             self.wit.deserialize(f)
         else:
             self.wit = CTxWitness()
+        # zSide: flag 2 announces a transaction without transparent inputs.
+        if flags & 2:
+            assert len(self.vin) == 0
         self.nLockTime = int.from_bytes(f.read(4), "little")
 
     def serialize_without_witness(self):
@@ -664,6 +667,9 @@ class CTransaction:
         flags = 0
         if not self.wit.is_null():
             flags |= 1
+        # zSide: a shielded transaction without transparent inputs says so (its marker starts "ZORC").
+        if len(self.vin) == 0 and any(o.scriptPubKey[:1] == b"\x6a" and b"ZORC" in o.scriptPubKey[:10] for o in self.vout):
+            flags |= 2
         r = b""
         r += self.version.to_bytes(4, "little")
         if flags:

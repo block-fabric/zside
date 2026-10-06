@@ -12,6 +12,7 @@
 #include <script/script.h>
 #include <serialize.h>
 #include <uint256.h>
+#include <zside/shielded.h>
 
 #include <cstdint>
 #include <map>
@@ -49,6 +50,17 @@ inline constexpr unsigned char BUNDLE_COMMIT_TAG[4]{0xDA, 0x42, 0x4E, 0x44};
 
 /** Largest mainchain output script a withdrawal can pay to, in bytes. */
 inline constexpr size_t MAX_MAIN_SCRIPT_SIZE{80};
+/**
+ * Most outputs a coinbase pays for deposits, refunds and the like; what is owed
+ * beyond waits, in order, for the next blocks. Without a limit, enough deposits
+ * at once would make every block too large to be valid.
+ */
+inline constexpr size_t MAX_PAYOUTS_PER_BLOCK{1000};
+/**
+ * Blocks during which a new withdrawal can still be taken back ahead of a bundle that would take it
+ * (block assembly policy, not a rule): after that, a bundle goes before refund requests.
+ */
+inline constexpr int REFUND_GRACE_BLOCKS{6};
 
 /** Coins burned on this chain, to be paid out on the mainchain. */
 struct Withdrawal {
@@ -80,8 +92,10 @@ struct PendingBundle {
     std::vector<COutPoint> withdrawals;
     //! Height of the block that committed to the bundle.
     int32_t height{0};
+    //! Hash of the block before that one, which the bundle carries so that its hash cannot be known in advance.
+    uint256 nonce;
 
-    SERIALIZE_METHODS(PendingBundle, obj) { READWRITE(obj.hash, obj.withdrawals, obj.height); }
+    SERIALIZE_METHODS(PendingBundle, obj) { READWRITE(obj.hash, obj.withdrawals, obj.height, obj.nonce); }
     friend bool operator==(const PendingBundle&, const PendingBundle&) = default;
 };
 
@@ -101,13 +115,20 @@ struct StateUndo {
     std::vector<COutPoint> added;
     //! Withdrawals the block removed, by paying or refunding them.
     std::vector<Withdrawal> removed;
+    //! Payouts the block took from the front of each queue, and how many it added at their ends.
+    std::vector<CTxOut> paid;
+    uint64_t queued{0};
+    std::vector<CTxOut> paid_tx;
+    uint64_t queued_tx{0};
+    //! What the block changed in the shielded pool.
+    zside::ShieldedUndo shielded;
 
     template <typename Stream>
     void Serialize(Stream& s) const
     {
         s << main_height << bundle.has_value();
         if (bundle) s << *bundle;
-        s << last_failure_height << added << removed;
+        s << last_failure_height << added << removed << paid << queued << paid_tx << queued_tx << shielded;
     }
     template <typename Stream>
     void Unserialize(Stream& s)
@@ -116,7 +137,7 @@ struct StateUndo {
         s >> main_height >> has_bundle;
         bundle.reset();
         if (has_bundle) s >> bundle.emplace();
-        s >> last_failure_height >> added >> removed;
+        s >> last_failure_height >> added >> removed >> paid >> queued >> paid_tx >> queued_tx >> shielded;
     }
 };
 
@@ -151,12 +172,23 @@ public:
      * pending bundle, and collect the outputs that pay the deposits.
      * @param[in,out] payouts  outputs the coinbase must have, in order, after its first output
      */
-    [[nodiscard]] bool ApplyMainEvents(int main_height, const Mainchain& mainchain, int height, StateUndo& undo,
-                                       std::vector<CTxOut>& payouts, std::string& reject_reason);
-    /** The bundle a block at `height` may commit to: empty if no bundle can be made now. */
-    std::optional<CMutableTransaction> NextBundle(int height, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals = nullptr) const;
+    [[nodiscard]] bool ApplyMainEvents(int main_height, const Mainchain& mainchain, int height, const Consensus::SidechainParams& params,
+                                       StateUndo& undo, std::vector<CTxOut>& payouts, std::string& reject_reason);
+    /** The bundle a block at `height`, on top of the block `prev`, may commit to: empty if no bundle can be made now. */
+    std::optional<CMutableTransaction> NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals = nullptr) const;
     /** Make the bundle with the hash `hash` the pending one. */
-    [[nodiscard]] bool StartBundle(const uint256& hash, int height, const Consensus::SidechainParams& params, StateUndo& undo, std::string& reject_reason);
+    [[nodiscard]] bool StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, StateUndo& undo, std::string& reject_reason);
+    /**
+     * The payouts a block pays: at most MAX_PAYOUTS_PER_BLOCK, of what was owed
+     * before it and of what it gave rise to, oldest first. What the mainchain
+     * gave rise to (`owed`: deposits) goes before what transactions did
+     * (`owed_tx`: refunds and the like), so that transactions, however many,
+     * cannot hold deposits back. The rest is queued for the next blocks.
+     */
+    std::vector<CTxOut> TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, StateUndo& undo);
+    /** Payouts owed and not paid yet, oldest first: from the mainchain, and from transactions. */
+    const std::vector<CTxOut>& Queue() const { return m_queue; }
+    const std::vector<CTxOut>& TxQueue() const { return m_queue_tx; }
     /** Take in the withdrawals and the refund requests of a transaction that is not a coinbase. */
     [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
                                std::vector<CTxOut>& payouts, std::string& reject_reason);
@@ -172,13 +204,15 @@ public:
     std::optional<CMutableTransaction> BundleTx() const;
     bool InBundle(const COutPoint& withdrawal) const;
     int32_t LastFailureHeight() const { return m_last_failure_height; }
+    /** The shielded pool. */
+    const zside::ShieldedState& Shielded() const { return m_shielded; }
 
     template <typename Stream>
     void Serialize(Stream& s) const
     {
         s << m_main_height << m_withdrawals << m_bundle.has_value();
         if (m_bundle) s << *m_bundle;
-        s << m_last_failure_height;
+        s << m_last_failure_height << m_queue << m_queue_tx << m_shielded;
     }
     template <typename Stream>
     void Unserialize(Stream& s)
@@ -187,7 +221,7 @@ public:
         s >> m_main_height >> m_withdrawals >> has_bundle;
         m_bundle.reset();
         if (has_bundle) s >> m_bundle.emplace();
-        s >> m_last_failure_height;
+        s >> m_last_failure_height >> m_queue >> m_queue_tx >> m_shielded;
     }
     friend bool operator==(const State&, const State&) = default;
 
@@ -200,6 +234,10 @@ private:
     std::optional<PendingBundle> m_bundle;
     //! Height of the block that learned that a bundle failed, -1 if none did.
     int32_t m_last_failure_height{-1};
+    //! Payouts owed beyond what earlier blocks could pay, oldest first: from the mainchain, and from transactions.
+    std::vector<CTxOut> m_queue;
+    std::vector<CTxOut> m_queue_tx;
+    zside::ShieldedState m_shielded;
 };
 
 //
@@ -228,8 +266,13 @@ std::string RefundMessage(const COutPoint& withdrawal);
 CScript BundleCommitScript(const uint256& hash);
 std::optional<uint256> ParseBundleCommitScript(const CScript& script);
 
-/** Script that pays a deposit: that of the address the depositor named, or one that burns the coins if it named none of this chain. */
-CScript DepositScript(const std::string& destination);
+/**
+ * Script that pays a deposit. The depositor names a deposit address of this
+ * sidechain, s<slot>_<address>_<checksum>, or an address of this chain as it
+ * is. Anything else, a deposit address for another sidechain or one with a
+ * wrong checksum included, burns the coins.
+ */
+CScript DepositScript(const std::string& destination, uint32_t slot);
 
 } // namespace sidechain
 

@@ -55,6 +55,9 @@ private Q_SLOTS:
     void withdraw();
     void refund();
     void setMining(bool mine);
+    void mineOnce();
+    /** The address the fees of blocks go to: the one entered, or a new one of the wallet. Empty if there is none to be had. */
+    QString miningAddress();
 
 private:
     /**
@@ -88,6 +91,8 @@ private:
     QPushButton* m_mining_start{nullptr};
     QPushButton* m_mining_stop{nullptr};
     QLabel* m_mining_status{nullptr};
+    //! What became of the last block asked for by hand.
+    QString m_mining_once;
 
     int m_slot{0};
 };

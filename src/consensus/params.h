@@ -107,7 +107,7 @@ struct SidechainParams {
  */
 struct DrivechainParams {
     /** Number of sidechain slots. Slots at or above this number are not subject to any drivechain rule. */
-    uint32_t max_sidechains{512};
+    uint32_t max_sidechains{256};
     /** Age at which a proposal for an empty slot activates. */
     int activation_period{7200};
     /** A proposal is rejected once it has gone this many blocks without an ack. */

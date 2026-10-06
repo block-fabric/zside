@@ -19,9 +19,27 @@ A sidechain has no miners and no coins of its own.
   sidechain block per mainchain block. The proof of work field of the header
   is kept as a formality that takes a couple of hashes.
 - **Deposits.** Coins sent to the escrow of the sidechain on the mainchain,
-  with an address of the sidechain as the destination, are created on the
-  sidechain by the coinbase of its next block. There is no block subsidy: the
-  miner of a block earns the transaction fees.
+  with a deposit address of the sidechain as the destination, are created on
+  the sidechain by the coinbase of its next block. There is no block subsidy:
+  the miner of a block earns the transaction fees.
+- **Mining pays for itself.** A node that mines automatically (`setbmm true
+  <address>`) asks for a block when there are transactions whose fees pay for
+  one, and offers the miners of the mainchain 99% of those fees. The fees go
+  to the address, so a hundredth is what the operator of the node earns. With
+  no fees it asks for nothing and pays nothing. A block can be mined by hand
+  for a fee of one's choosing (`requestbmmblock <address> <amount>`), empty
+  or not: that is how a deposit gets paid, or a withdrawal bundle started,
+  on a chain without transactions.
+- **No waiting period.** What a block pays, deposits and fees alike, can be
+  spent in the next block.
+- **Deposit addresses.** A deposit address is `s<slot>_<address>_<checksum>`:
+  the slot of the sidechain, an address of it, and the first six hexadecimal
+  digits of the SHA-256 hash of what comes before. The wallet gives one with
+  `getdepositaddress`. The mainchain wallet refuses one that is mistyped or
+  for another slot than the deposit; the sidechain burns a deposit that names
+  one anyway. A bare address of the sidechain is accepted too, unchecked.
+  Every sidechain has address prefixes of its own on every network, regtest
+  included, so that an address of one chain is not an address of another.
 - **Withdrawals.** A transaction burns coins in a withdrawal output that names
   a mainchain address and a fee for mainchain miners. Blocks commit to
   withdrawal *bundles*: the mainchain transaction that pays the waiting
@@ -32,6 +50,25 @@ A sidechain has no miners and no coins of its own.
 - **Refunds.** A withdrawal that is not in the bundle being voted on can be
   taken back by whoever made it. The withdrawals of a failed bundle go in a
   later one, or can be taken back.
+- **Payouts per block.** A coinbase pays at most 1000 outputs for deposits,
+  refunds and the like; what is owed beyond waits, in order, for the next
+  blocks. Without a limit, enough deposits at once would make every block too
+  large to be valid.
+- **Bundles carry the hash of the block before the one that commits to them**,
+  in an OP_RETURN output, so that nobody can know a bundle's hash, and get the
+  mainchain to close it, before the sidechain commits to it. A withdrawal has
+  to pay a standard output (P2PKH, P2SH, P2WPKH, P2WSH, P2TR): the mainchain
+  relays nothing else.
+- **Bundles paid on another branch.** The mainchain says what a withdrawal
+  bundle it paid out paid (`getsidechainevents`). A branch of the sidechain
+  that never had that bundle takes the withdrawals it paid as paid: for every
+  payout, the oldest withdrawal paying the same output with the same amount.
+  Without this, the branch would pay them again. A withdrawal that the branch
+  refunded before, or a competing bundle that is voted through as well, can
+  still be paid twice: that is for the mainchain miners not to let happen.
+- **Committed twice.** A mainchain miner can commit to a sidechain block again
+  later. The block keeps its first commitment; losing the second, in a reorg
+  of the mainchain, changes nothing for it.
 
 A node validates all of this itself. It does so against a record of the
 mainchain that it keeps by following a mainchain node, so **a sidechain node
@@ -70,7 +107,7 @@ takes note of the outcome of the bundle.
 Node: `getmainchaininfo`, `syncmainchain`, `createbmmblock`, `setbmm`,
 `getbmminfo`, `listwithdrawals`, `getwithdrawalbundle`.
 
-Wallet: `createwithdrawal`, `refundwithdrawal`.
+Wallet: `getdepositaddress`, `createwithdrawal`, `refundwithdrawal`.
 
 On the mainchain node, for the sidechain: `createsidechaindeposit`,
 `createbmmrequest`, `listwithdrawalbundles`, `setwithdrawalvote`,
@@ -100,10 +137,12 @@ sidechaind -regtest -daemon -sidechainslot=3 -fallbackfee=0.0002
 sidechain-cli -regtest getmainchaininfo
 sidechain-cli -regtest createwallet side
 SIDE=$(sidechain-cli -regtest getnewaddress)
+# A deposit address for it: s3_<address>_<checksum>
+DEPOSIT=$(sidechain-cli -regtest getdepositaddress $SIDE | jq -r .depositaddress)
 
 # Deposit, and mine: one sidechain block per mainchain block.
-chains-cli -regtest createsidechaindeposit 3 $SIDE 10
-sidechain-cli -regtest setbmm true $SIDE 0.001
+chains-cli -regtest createsidechaindeposit 3 $DEPOSIT 10
+sidechain-cli -regtest setbmm true $SIDE true 0.001
 chains-cli -regtest generatetoaddress 5 $MAIN
 sidechain-cli -regtest getbalance
 
@@ -155,6 +194,8 @@ or `MAINCHAIN_BIN_DIR` set to the directory of its programs.
   them can vote through a bundle that the sidechain did not make. That is the
   drivechain security model; the long voting period is what gives users and
   honest miners time to object.
-- Deposits to something that is not an address of the sidechain are burned.
+- Deposits to something that is not an address of the sidechain are burned,
+  and so are deposits to a deposit address with a wrong checksum or the slot
+  of another sidechain.
 - A withdrawal refund pays a P2WPKH address of the wallet that made the
   withdrawal, and needs that wallet to sign the request.

@@ -66,6 +66,23 @@ def main():
         with open(constants, "w", encoding="utf8") as f:
             f.write(text)
 
+    # The expected output of the tool that prints the parameters of a chain.
+    util_data = os.path.join("test", "functional", "data", "util")
+    for name in os.listdir(util_data):
+        if not name.startswith("getchainparams-"):
+            continue
+        with open(os.path.join(util_data, name), encoding="utf8") as f:
+            text = f.read()
+        with open(os.path.join(util_data, name), "w", encoding="utf8") as f:
+            f.write(text.replace(f'"bech32_hrp": "{old}"', f'"bech32_hrp": "{new}"'))
+
+    # A test of the framework itself names the prefix of regtest.
+    own_test = os.path.join("test", "functional", "test_framework", "segwit_addr.py")
+    with open(own_test, encoding="utf8") as f:
+        text = f.read()
+    with open(own_test, "w", encoding="utf8") as f:
+        f.write(text.replace(f'self.assertEqual(hrp, "{old}")', f'self.assertEqual(hrp, "{new}")'))
+
     print(f"re-encoded {changed} addresses in {len(files)} files")
     for path, address in skipped:
         print(f"left alone, not a valid address: {path}: {address}")

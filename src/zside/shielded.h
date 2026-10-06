@@ -1,0 +1,189 @@
+// Copyright (c) 2026 The Chains developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#ifndef BITCOIN_ZSIDE_SHIELDED_H
+#define BITCOIN_ZSIDE_SHIELDED_H
+
+#include <consensus/amount.h>
+#include <primitives/transaction.h>
+#include <script/script.h>
+#include <serialize.h>
+#include <uint256.h>
+#include <zside/marker.h>
+
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <vector>
+
+struct ZoBundle;
+
+/**
+ * Private payments (zSide): the Orchard shielded pool of Zcash, on a sidechain.
+ *
+ *  - A transaction carries an Orchard **bundle** — encoded as in a Zcash v5 transaction —
+ *    in a **marker** output: OP_RETURN, then a push of SHIELDED_TAG, a version byte and the
+ *    bundle. A bundle spends notes of the pool (revealing their nullifiers, proving in zero
+ *    knowledge that they are in the note commitment tree at the root it names, its anchor)
+ *    and creates notes (their commitments join the tree).
+ *  - Its **value balance** is what it takes out of the pool. Taken out, it counts as an input
+ *    of the transaction: transparent outputs and the fee can come from the pool, and a
+ *    transaction may have no transparent input at all. Put in (negative), the marker output
+ *    carries it: the transaction pays it like any output, and it leaves circulation.
+ *  - The anchor is the root of the tree at the end of an earlier block. A nullifier is
+ *    revealed once: a note is spent once. The pool never holds less than nothing.
+ *  - The bundle's signatures and proof are made over the **sighash** of the transaction:
+ *    everything in it except their own bytes and the transparent signatures (the marker is
+ *    taken with the commitment to the bundle's effects, ZIP 244, in place of the bundle).
+ *    The transparent inputs sign the whole transaction, the bundle included.
+ */
+namespace zside {
+
+/** The marker: OP_RETURN, then a push of SHIELDED_TAG (zside/marker.h), a version, and the bundle. */
+inline constexpr uint8_t SHIELDED_VERSION{0};
+/** Most actions one bundle may have (beyond that, policy and the block size limit before it). */
+inline constexpr size_t MAX_ACTIONS{256};
+
+/** The script of the marker of a bundle. */
+CScript ShieldedMarkerScript(std::span<const uint8_t> bundle);
+
+/** A bundle read from a transaction. */
+class Bundle
+{
+public:
+    /** The bundle of a transaction: none if it has no marker; `error` set if it has a bad one. */
+    static std::optional<Bundle> FromTx(const CTransaction& tx, std::string& error);
+    static std::optional<Bundle> FromBytes(std::span<const uint8_t> bytes);
+
+    const ZoBundle* get() const { return m_bundle.get(); }
+    size_t NumActions() const;
+    /** What the bundle takes out of the pool (negative: what it puts in). */
+    CAmount ValueBalance() const;
+    uint256 Anchor() const;
+    std::vector<uint256> Nullifiers() const;
+    std::vector<uint256> Commitments() const;
+    /** The commitment to its effects (ZIP 244), which the sighash takes in its place. */
+    uint256 Commitment() const;
+    /** The index of the marker output in its transaction. */
+    uint32_t marker_index{0};
+
+private:
+    struct Free {
+        void operator()(ZoBundle* bundle) const;
+    };
+    std::shared_ptr<ZoBundle> m_bundle;
+};
+
+/**
+ * What a transaction takes out of the pool, read from its marker without checking the bundle
+ * (the shielded rules do that): the value it adds to the inputs of the transaction. Zero if
+ * it has no marker, or puts value in.
+ */
+CAmount ShieldedValueIn(const CTransaction& tx);
+
+/** The hash the bundle of a transaction signs. */
+uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uint256& bundle_commitment);
+
+/**
+ * Check what depends on the transaction alone: one well-formed marker at most, not in a
+ * coinbase, the value put in carried by the marker, the proof and signatures valid.
+ */
+[[nodiscard]] bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason);
+
+/** The right edge of the note commitment tree: enough to append to it and compute its root. */
+class Frontier
+{
+public:
+    uint64_t Size() const { return m_size; }
+    void Append(const uint256& cmx);
+    uint256 Root() const;
+
+    SERIALIZE_METHODS(Frontier, obj) { READWRITE(obj.m_size, obj.m_ommers); }
+    friend bool operator==(const Frontier&, const Frontier&) = default;
+
+private:
+    uint64_t m_size{0};
+    //! For each level, the left node waiting for its right sibling, when the size has that bit set.
+    std::vector<uint256> m_ommers;
+};
+
+/** The root of an empty subtree of the given height (0: an empty leaf). */
+uint256 EmptyRoot(unsigned level);
+/** The parent of two nodes at `level`. */
+uint256 Combine(unsigned level, const uint256& left, const uint256& right);
+
+/** What a block changed in the ShieldedState, to revert it. */
+struct ShieldedUndo {
+    std::optional<Frontier> tree;
+    std::vector<uint256> nullifiers;
+    std::optional<uint256> root;
+    std::optional<CAmount> pool;
+
+    bool empty() const { return !tree && nullifiers.empty() && !root && !pool; }
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        s << tree.has_value();
+        if (tree) s << *tree;
+        s << nullifiers << root.has_value();
+        if (root) s << *root;
+        s << pool.has_value();
+        if (pool) s << *pool;
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        bool has;
+        s >> has;
+        tree.reset();
+        if (has) s >> tree.emplace();
+        s >> nullifiers >> has;
+        root.reset();
+        if (has) s >> root.emplace();
+        s >> has;
+        pool.reset();
+        if (has) s >> pool.emplace();
+    }
+};
+
+/** The shielded pool, as the chain leaves it. */
+class ShieldedState
+{
+public:
+    ShieldedState();
+
+    /** Check a transaction against the pool, and apply it. A transaction that fails changes nothing. */
+    [[nodiscard]] bool ApplyTx(const CTransaction& tx, ShieldedUndo& undo, std::string& reject_reason);
+    /** Whether ApplyTx would accept the transaction now. */
+    [[nodiscard]] bool CheckTx(const CTransaction& tx, std::string& reject_reason) const;
+    /** End a block: its final root becomes an anchor later bundles may use. */
+    void EndBlock(ShieldedUndo& undo);
+    void Revert(const ShieldedUndo& undo);
+
+    const Frontier& Tree() const { return m_tree; }
+    bool IsSpent(const uint256& nullifier) const { return m_nullifiers.contains(nullifier); }
+    bool IsAnchor(const uint256& root) const { return m_roots.contains(root); }
+    /** What the pool holds. */
+    CAmount Pool() const { return m_pool; }
+    size_t NullifierCount() const { return m_nullifiers.size(); }
+
+    SERIALIZE_METHODS(ShieldedState, obj) { READWRITE(obj.m_tree, obj.m_nullifiers, obj.m_roots, obj.m_pool); }
+    friend bool operator==(const ShieldedState&, const ShieldedState&) = default;
+
+private:
+    [[nodiscard]] bool Check(const CTransaction& tx, const Bundle& bundle, std::string& reject_reason) const;
+
+    Frontier m_tree;
+    std::set<uint256> m_nullifiers;
+    //! Roots of the tree at the end of every block: what anchors may be.
+    std::set<uint256> m_roots;
+    CAmount m_pool{0};
+};
+
+} // namespace zside
+
+#endif // BITCOIN_ZSIDE_SHIELDED_H

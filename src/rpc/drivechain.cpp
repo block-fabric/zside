@@ -255,7 +255,7 @@ RPCMethod listsidechainproposals()
 
     UniValue queued(UniValue::VARR);
     for (const Sidechain& sidechain : chainman.m_drivechain_miner.GetProposals()) {
-        if (scdb.GetProposal(sidechain.GetHash())) continue;
+        if (scdb.GetProposal(sidechain.slot, sidechain.GetHash())) continue;
         if (const Slot* slot{scdb.GetSlot(sidechain.slot)}; slot && slot->sidechain == sidechain) continue;
         queued.push_back(SidechainToJSON(sidechain));
     }
@@ -355,8 +355,8 @@ RPCMethod receivewithdrawalbundle()
 {
     return RPCMethod{
         "receivewithdrawalbundle",
-        "Hand a withdrawal bundle of a sidechain to this node, as the sidechain built it: a transaction with a single null input,\n"
-        "whose first output is the return destination marker and whose second output states the fee.\n"
+        "Hand a withdrawal bundle of a sidechain to this node, as the sidechain built it, in the blind form of BIP300:\n"
+        "a transaction with no inputs whose output 0 is OP_RETURN and the fee (8 bytes, big endian), followed by the payouts.\n"
         "The node proposes the bundle in the next block it builds, and pays it out once it has the work score.",
         {
             {"slot", RPCArg::Type::NUM, RPCArg::Optional::NO, "The sidechain slot number"},
@@ -364,7 +364,7 @@ RPCMethod receivewithdrawalbundle()
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
-            {RPCResult::Type::STR_HEX, "hash", "The hash miners vote on"},
+            {RPCResult::Type::STR_HEX, "hash", "The hash miners vote on (the M6 id)"},
         }},
         RPCExamples{HelpExampleCli("receivewithdrawalbundle", "0 \"hexstring\"")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -372,7 +372,8 @@ RPCMethod receivewithdrawalbundle()
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const SidechainId id{ParseSlot(request.params[0], chainman)};
     CMutableTransaction mtx;
-    if (!DecodeHexTx(mtx, request.params[1].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
+    // A transaction without inputs only decodes without the witness flag.
+    if (!DecodeHexTx(mtx, request.params[1].get_str(), /*try_no_witness=*/true, /*try_witness=*/false)) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
     if (!WITH_LOCK(::cs_main, return chainman.ActiveChainstate().m_scdb.IsActive(id))) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "No active sidechain in this slot");
     }

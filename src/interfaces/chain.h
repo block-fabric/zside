@@ -6,6 +6,7 @@
 #define BITCOIN_INTERFACES_CHAIN_H
 
 #include <blockfilter.h>
+#include <zside/witness.h>
 #include <common/settings.h>
 #include <consensus/amount.h>
 #include <kernel/chain.h> // IWYU pragma: export
@@ -190,6 +191,10 @@ public:
     //! Check if transaction is in mempool.
     virtual bool isInMempool(const Txid& txid) = 0;
 
+    //! zSide: where shielded notes are in the tree, with their paths to the same root (the tree
+    //! of the tip); nullopt if one is not in it, or the node keeps no -orchardindex.
+    virtual std::optional<OrchardWitnesses> getOrchardWitnesses(const std::vector<uint256>& cmxs) = 0;
+
     //! The escrow of a sidechain as the deposits in the mempool leave it.
     struct SidechainEscrow {
         //! Whether the slot holds a sidechain.
@@ -205,6 +210,9 @@ public:
     //! node tells it. Fails if this chain is not a sidechain, if the mainchain
     //! node cannot be asked, or if it does not know the address.
     virtual util::Result<CScript> getMainchainScript(const std::string& address) = 0;
+
+    //! The slot this chain has on its mainchain, if it is a sidechain.
+    virtual std::optional<uint32_t> getSidechainSlot() = 0;
 
     //! Check if transaction has descendants in mempool.
     virtual bool hasDescendantsInMempool(const Txid& txid) = 0;

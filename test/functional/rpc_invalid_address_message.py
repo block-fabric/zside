@@ -4,6 +4,8 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test error messages for 'getaddressinfo' and 'validateaddress' RPC commands."""
 
+from test_framework.address import HRP_BY_CHAIN
+from test_framework.segwit_addr import Encoding, bech32_encode, convertbits
 from test_framework.test_framework import BitcoinTestFramework
 
 from test_framework.util import (
@@ -11,25 +13,53 @@ from test_framework.util import (
     assert_raises_rpc_error,
 )
 
-BECH32_VALID = 'rchn1qtmp74ayg7p24uslctssvjm06q5phz4yru34yep'
-BECH32_VALID_UNKNOWN_WITNESS = 'rchn1p424qazscux'
-BECH32_VALID_CAPITALS = 'RCHN1QPLMTZKC2XHARPPZDLNPAQL78RSHJ68U3TWSM5W'
-BECH32_VALID_MULTISIG = 'rchn1qdg3myrgvzw7ml9q0ejxhlkyxm7vl9r56yzkfgvzclrf4hkpx9yfqjpuln4'
+# The Bech32 addresses are made here, so that they follow the address prefix of the chain.
+HRP = HRP_BY_CHAIN["regtest"]
+L = len(HRP)
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+KEYHASH = bytes.fromhex("5ec3eaf488f0555e43f85c20c96dfa0503715483")
+SCRIPTHASH = bytes.fromhex("6a23b20d0c13bdbf9c0fcc8d7fd8869f99f28e9a20ac940b18f8d35bd8262920")
 
-BECH32_INVALID_BECH32 = 'rchn1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqgm55aa'
-BECH32_INVALID_BECH32M = 'rchn1qw508d6qejxtdg4y5r3zarvary0c5xw7ktek0gq'
-BECH32_INVALID_VERSION = 'rchn130xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqpn76dn'
-BECH32_INVALID_SIZE = 'rchn1s0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7v8n0nx0muaewav255q99nv'
-BECH32_INVALID_V0_SIZE = 'rchn1qw508d6qejxtdg4y5r3zarvary0c5xw7kqq6g40ll'
+
+def encode(version, program, encoding):
+    return bech32_encode(encoding, HRP, [version] + convertbits(program, 8, 5))
+
+
+def spoil(address, positions):
+    """Replace the characters at the given positions by others."""
+    chars = list(address)
+    for position in positions:
+        other = CHARSET[(CHARSET.index(chars[position].lower()) + 1) % len(CHARSET)]
+        chars[position] = other.upper() if address.isupper() else other
+    return "".join(chars)
+
+
+BECH32_VALID = encode(0, KEYHASH, Encoding.BECH32)
+BECH32_VALID_UNKNOWN_WITNESS = encode(1, bytes.fromhex("aa55"), Encoding.BECH32M)
+BECH32_VALID_CAPITALS = BECH32_VALID.upper()
+BECH32_VALID_MULTISIG = encode(0, SCRIPTHASH, Encoding.BECH32)
+
+BECH32_INVALID_BECH32 = encode(1, SCRIPTHASH, Encoding.BECH32)
+BECH32_INVALID_BECH32M = encode(0, KEYHASH, Encoding.BECH32M)
+BECH32_INVALID_VERSION = encode(17, SCRIPTHASH, Encoding.BECH32M)
+BECH32_INVALID_SIZE = encode(16, bytes(41), Encoding.BECH32M)
+BECH32_INVALID_V0_SIZE = encode(0, bytes(21), Encoding.BECH32)
 BECH32_INVALID_PREFIX = 'bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kw508d6qejxtdg4y5r3zarvary0c5xw7k7grplx'
-BECH32_TOO_LONG = 'rchn1q049edschfnwystcqnsvyfpj23mpsg3jcedq9xv049edschfnwystcqnsvyfpj23mpsg3jcedq9xv049edschfnwystcqnsvyfpj23m'
-BECH32_ONE_ERROR = 'rchn1q049edschfnwystcqnsvyfpj23mpsg3jcrqdfvp'
-BECH32_ONE_ERROR_CAPITALS = 'RCHN1QPLMTZKC2XHARPPZDLNPAQL78RSHJ68U32WSM5W'
-BECH32_TWO_ERRORS = 'rchn1qax9suht3qv95sw33xavx8crpxduefdrsk9a64u' # should be rchn1qax9suht3qv95sw33wavx8crpxduefdrsk9a64t
-BECH32_NO_SEPARATOR = 'rchnq049ldschfnwystcqnsvyfpj23mpsg3jcedq9xv'
-BECH32_INVALID_CHAR = 'rchn1q04oldschfnwystcqnsvyfpj23mpsg3jcedq9xv'
-BECH32_MULTISIG_TWO_ERRORS = 'rchn1qdg3myrgvzw7ml8q0ejxhlkyxn7vl9r56yzkfgvzclrf4hkpx9yfqjpuln4'
-BECH32_WRONG_VERSION = 'rchn1ptmp74ayg7p24uslctssvjm06q5phz4yru34yep'
+BECH32_TOO_LONG = HRP + '1q049edschfnwystcqnsvyfpj23mpsg3jcedq9xv049edschfnwystcqnsvyfpj23mpsg3jcedq9xv049edschfnwystcqnsvyfpj23m'
+ONE_ERROR_AT = [L + 5]
+BECH32_ONE_ERROR = spoil(BECH32_VALID, ONE_ERROR_AT)
+ONE_ERROR_CAPITALS_AT = [L + 34]
+BECH32_ONE_ERROR_CAPITALS = spoil(BECH32_VALID_CAPITALS, ONE_ERROR_CAPITALS_AT)
+TWO_ERRORS_AT = [L + 18, len(BECH32_VALID) - 1]
+BECH32_TWO_ERRORS = spoil(BECH32_VALID, TWO_ERRORS_AT)
+BECH32_NO_SEPARATOR = HRP + BECH32_VALID[L + 1:]
+INVALID_CHAR_AT = [L + 4]
+BECH32_INVALID_CHAR = BECH32_VALID[:L + 4] + 'o' + BECH32_VALID[L + 5:]
+MULTISIG_TWO_ERRORS_AT = [L + 15, L + 26]
+BECH32_MULTISIG_TWO_ERRORS = spoil(BECH32_VALID_MULTISIG, MULTISIG_TWO_ERRORS_AT)
+# The same address with the witness version of another.
+WRONG_VERSION_AT = [L + 1]
+BECH32_WRONG_VERSION = BECH32_VALID[:L + 1] + 'p' + BECH32_VALID[L + 2:]
 
 BASE58_VALID = 'mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn'
 BASE58_INVALID_PREFIX = '17VZNX1SN5NtKa8UQFxwQbFeFc3iqRYhem'
@@ -69,13 +99,13 @@ class InvalidAddressErrorMessageTest(BitcoinTestFramework):
         self.check_invalid(BECH32_INVALID_VERSION, 'Invalid Bech32 address witness version')
         self.check_invalid(BECH32_INVALID_V0_SIZE, "Invalid Bech32 v0 address program size (21 bytes), per BIP141")
         self.check_invalid(BECH32_TOO_LONG, 'Bech32 string too long', [90])
-        self.check_invalid(BECH32_ONE_ERROR, 'Invalid Bech32 checksum', [9])
-        self.check_invalid(BECH32_TWO_ERRORS, 'Invalid Bech32 checksum', [22, 43])
-        self.check_invalid(BECH32_ONE_ERROR_CAPITALS, 'Invalid Bech32 checksum', [38])
+        self.check_invalid(BECH32_ONE_ERROR, 'Invalid Bech32 checksum', ONE_ERROR_AT)
+        self.check_invalid(BECH32_TWO_ERRORS, 'Invalid Bech32 checksum', TWO_ERRORS_AT)
+        self.check_invalid(BECH32_ONE_ERROR_CAPITALS, 'Invalid Bech32 checksum', ONE_ERROR_CAPITALS_AT)
         self.check_invalid(BECH32_NO_SEPARATOR, 'Missing separator')
-        self.check_invalid(BECH32_INVALID_CHAR, 'Invalid Base 32 character', [8])
-        self.check_invalid(BECH32_MULTISIG_TWO_ERRORS, 'Invalid Bech32 checksum', [19, 30])
-        self.check_invalid(BECH32_WRONG_VERSION, 'Invalid Bech32 checksum', [5])
+        self.check_invalid(BECH32_INVALID_CHAR, 'Invalid Base 32 character', INVALID_CHAR_AT)
+        self.check_invalid(BECH32_MULTISIG_TWO_ERRORS, 'Invalid Bech32 checksum', MULTISIG_TWO_ERRORS_AT)
+        self.check_invalid(BECH32_WRONG_VERSION, 'Invalid Bech32 checksum', WRONG_VERSION_AT)
 
         # Valid Bech32
         self.check_valid(BECH32_VALID)

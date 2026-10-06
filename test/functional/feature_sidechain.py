@@ -36,9 +36,16 @@ ACTIVATION_PERIOD = 20
 WITHDRAWAL_PERIOD = 60
 WITHDRAWAL_MIN_SCORE = 30
 # Regtest parameters of this chain as a sidechain.
-COINBASE_MATURITY = 2
+# What a block pays can be spent in the next.
+COINBASE_MATURITY = 0
 BUNDLE_RETRY_DELAY = 5
 
+
+
+def fresh_connections(proxy):
+    """A connection per call: a node closes a connection left idle for a while, which a busy test can do."""
+    proxy.reuse_http_connections = False
+    return proxy
 
 class SidechainTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -75,7 +82,7 @@ class SidechainTest(BitcoinTestFramework):
         url = f"http://main:secret@127.0.0.1:{self.main_rpc_port}"
         for _ in range(240):
             try:
-                node = AuthServiceProxy(url, timeout=120)
+                node = fresh_connections(AuthServiceProxy(url, timeout=120))
                 node.getblockcount()
                 break
             except (OSError, HTTPException, JSONRPCException):
@@ -87,7 +94,7 @@ class SidechainTest(BitcoinTestFramework):
                 node.loadwallet("miner")
             else:
                 node.createwallet("miner")
-        self.main = AuthServiceProxy(url + "/wallet/miner", timeout=120)
+        self.main = fresh_connections(AuthServiceProxy(url + "/wallet/miner", timeout=120))
 
     @staticmethod
     def kill_mainchain(process):
@@ -184,9 +191,19 @@ class SidechainTest(BitcoinTestFramework):
         assert_equal(side.gettxoutsetinfo()["total_amount"], 0)
 
         self.log.info("Deposit from the mainchain")
-        deposit_address = side.getnewaddress()
-        main.createsidechaindeposit(SLOT, deposit_address, 50)
+        # The wallet of the sidechain gives a deposit address, which names the sidechain and has a checksum.
+        deposit = side.getdepositaddress()
+        deposit_address = deposit["address"]
+        assert_equal(deposit["slot"], SLOT)
+        assert deposit["depositaddress"].startswith(f"s{SLOT}_{deposit_address}_")
+        assert_equal(side.getaddressinfo(deposit_address)["ismine"], True)
+        assert_raises_rpc_error(-5, "Not an address of this chain", side.getdepositaddress, "nonsense")
+        # The mainchain wallet refuses it for another sidechain, or with a typing error.
+        assert_raises_rpc_error(-5, f"is for the sidechain in slot {SLOT}", main.createsidechaindeposit, SLOT + 1, deposit["depositaddress"], 50)
+        assert_raises_rpc_error(-5, "check it for typing errors", main.createsidechaindeposit, SLOT, deposit["depositaddress"][:-1] + ("0" if deposit["depositaddress"][-1] != "0" else "1"), 50)
+        main.createsidechaindeposit(SLOT, deposit["depositaddress"], 50)
         main.createsidechaindeposit(SLOT, "not an address of the sidechain", 1)
+        # An address as it is works too, unchecked.
         main.createsidechaindeposit(SLOT, other.getnewaddress(), 7)
         self.mine_main()
         assert_equal(side.getbalances()["mine"]["immature"], 0)
@@ -196,9 +213,8 @@ class SidechainTest(BitcoinTestFramework):
         assert_equal(coinbase["vout"][1]["scriptPubKey"]["address"], deposit_address)
         # The deposit that names no address of this chain is burned.
         assert_equal(coinbase["vout"][2]["scriptPubKey"]["type"], "nulldata")
-        assert_equal(side.getbalances()["mine"]["immature"], 50)
-        for _ in range(COINBASE_MATURITY):
-            self.bmm()
+        # What the block pays can be spent in the next.
+        assert_equal(side.getbalances()["mine"]["immature"], 0)
         assert_equal(side.getbalance(), 50)
         assert_equal(other.getbalance(), 7)
         assert_equal(side.gettxoutsetinfo()["total_amount"], 57)
@@ -252,9 +268,9 @@ class SidechainTest(BitcoinTestFramework):
         assert_equal(block["tx"][0]["vout"][1]["scriptPubKey"]["address"], small["refundaddress"])
         assert_equal(len(side.listwithdrawals()), 1)
         assert_equal(side.getwithdrawalbundle()["status"], "next")
-        for _ in range(COINBASE_MATURITY):
-            self.bmm()
         assert_greater_than(other.getbalance(), balance + 1)
+        # The next block starts the bundle.
+        self.bmm()
 
         self.log.info("The withdrawal goes in a bundle, which the mainchain votes through and pays")
         bundle = side.getwithdrawalbundle()
@@ -268,10 +284,14 @@ class SidechainTest(BitcoinTestFramework):
         pending = main.listwithdrawalbundles(SLOT)
         assert_equal([b["hash"] for b in pending], [bundle["hash"]])
         assert_equal(pending[0]["known"], True)
-        main.setwithdrawalvote(SLOT, "upvote", bundle["hash"])
-        # The block that proposed the bundle gave it its first point.
-        self.mine_main(WITHDRAWAL_MIN_SCORE - 1)
-        assert_equal(main.getreceivedbyaddress(payout_address, 0), 0)
+        # A mainchain node upvotes the bundle its sidechain node gave it, unless it is told otherwise.
+        assert_equal(pending[0]["vote"], "upvote")
+        # The block that proposed the bundle gave it its first point, the votes of the blocks since the others.
+        self.mine_main(WITHDRAWAL_MIN_SCORE - pending[0]["score"])
+        # With the work score, the sidechain node has its mainchain node broadcast the withdrawal (BIP300 M6),
+        # so any miner can mine it, one that does not run the sidechain too.
+        self.wait_until(lambda: main.getreceivedbyaddress(payout_address, 0) == 3)
+        assert_equal(main.getreceivedbyaddress(payout_address, 1), 0)
         self.mine_main()
         assert_equal(main.getreceivedbyaddress(payout_address), 3)
         assert_equal(main.getwithdrawalbundle(SLOT, bundle["hash"]), {"status": "paid"})
@@ -284,7 +304,7 @@ class SidechainTest(BitcoinTestFramework):
         self.check_in_sync()
 
         self.log.info("A bundle the mainchain does not vote for fails, and its withdrawals go in a later one")
-        main.setwithdrawalvote(SLOT, "default")
+        main.setwithdrawalvote(SLOT, "abstain")
         again = side.createwithdrawal(payout_address, 2)
         self.bmm()
         self.bmm()
@@ -349,7 +369,8 @@ class SidechainTest(BitcoinTestFramework):
         self.log.info("Mine continuously")
         assert_equal(side.getbmminfo()["mining"], False)
         assert_raises_rpc_error(-8, "An address is required", side.setbmm, True)
-        side.setbmm(True, self.side_address, Decimal("0.0005"))
+        # For tests: a block for every block of the mainchain, with or without fees, at a set price.
+        side.setbmm(True, self.side_address, True, Decimal("0.0005"))
         count = side.getblockcount()
         for i in range(3):
             self.wait_until(lambda: len(main.getrawmempool()) > 0)
@@ -360,7 +381,66 @@ class SidechainTest(BitcoinTestFramework):
         assert_equal(mining["address"], self.side_address)
         assert_greater_than(mining["requests"], 2)
         assert_equal(mining["blocks"], 3)
+        assert_equal(mining["always"], True)
+        assert_equal(mining["amount"], Decimal("0.0005"))
         side.setbmm(False)
+
+        self.log.info("Mining by itself, the node asks for a block when fees pay for it, and offers 99% of them")
+        # Start from nothing to mine. The last request of the mining before may still be taken.
+        self.mine_main()
+        if side.getrawmempool():
+            self.bmm()
+        assert_equal(side.getrawmempool(), [])
+        side.setbmm(True, self.side_address)
+        self.wait_until(lambda: side.getbmminfo()["idle"])
+        count = side.getblockcount()
+        requests = side.getbmminfo()["requests"]
+        # Neither blocks of the mainchain nor a deposit make it ask for one: there are no fees in that.
+        deposit = side.getdepositaddress()
+        main.createsidechaindeposit(SLOT, deposit["depositaddress"], 4)
+        main.generatetoaddress(3, self.main_address)
+        time.sleep(3)
+        assert_equal(main.getrawmempool(), [])
+        assert_equal(side.getblockcount(), count)
+        assert_equal(side.getbmminfo()["requests"], requests)
+        assert_equal(side.getbmminfo()["always"], False)
+        assert_equal(side.getreceivedbyaddress(deposit["address"]), 0)
+        # A transaction with a fee does.
+        txid = side.sendtoaddress(side.getnewaddress(), 1)
+        fee = -side.gettransaction(txid)["fee"]
+        self.wait_until(lambda: len(main.getrawmempool()) == 1)
+        mining = side.getbmminfo()
+        assert_equal(mining["idle"], False)
+        assert_equal(mining["lastfees"], fee)
+        offer = fee - (fee * 100000000 // 100) / Decimal(100000000)
+        assert_equal(mining["lastoffer"], offer)
+        # The mainchain wallet pays about that for the request.
+        paid = main.getmempoolentry(main.getrawmempool()[0])["fees"]["base"]
+        assert_greater_than(paid, offer * Decimal("0.9"))
+        assert_greater_than(offer * Decimal("1.1"), paid)
+        main.generatetoaddress(1, self.main_address)
+        self.wait_until(lambda: side.getblockcount() == count + 1)
+        assert_equal(side.gettransaction(txid)["confirmations"], 1)
+        # The block paid the deposit as well, and what it paid can be spent at once.
+        assert_equal(side.getreceivedbyaddress(deposit["address"]), 4)
+        self.wait_until(lambda: side.getbmminfo()["idle"])
+        side.setbmm(False)
+
+        self.log.info("A block is mined by hand for a fee, empty or not")
+        deposit = side.getdepositaddress()
+        main.createsidechaindeposit(SLOT, deposit["depositaddress"], 6)
+        main.generatetoaddress(1, self.main_address)
+        assert_raises_rpc_error(-8, "The amount must be positive", side.requestbmmblock, self.side_address, 0)
+        asked = side.requestbmmblock(self.side_address, Decimal("0.0003"))
+        assert_equal(asked["transactions"], 1)
+        assert_equal(asked["fees"], 0)
+        assert_equal(asked["amount"], Decimal("0.0003"))
+        assert asked["mainchaintxid"] in main.getrawmempool()
+        main.generatetoaddress(1, self.main_address)
+        self.wait_until(lambda: side.getbestblockhash() == asked["hash"])
+        assert_equal(side.getreceivedbyaddress(deposit["address"]), 6)
+        # Spendable in the next block.
+        assert_equal(side.getbalances()["mine"]["immature"], 0)
         self.sync_blocks()
         self.check_in_sync()
 

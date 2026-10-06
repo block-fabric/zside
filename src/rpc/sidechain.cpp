@@ -132,35 +132,89 @@ RPCMethod createbmmblock()
     };
 }
 
+RPCMethod requestbmmblock()
+{
+    return RPCMethod{
+        "requestbmmblock",
+        "Mine one block of this chain by hand: build it, and have the wallet of the mainchain node offer the miners of the\n"
+        "mainchain a fee to commit to it in their next block. The block can be empty: this is how a deposit gets paid, or a\n"
+        "withdrawal bundle started, when there are no transactions whose fees would pay for a block.",
+        {
+            {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The address that receives the transaction fees of the block"},
+            {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "What to offer the miners of the mainchain, in coins of the mainchain"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR_HEX, "hash", "The hash of the block"},
+            {RPCResult::Type::NUM, "mainchainheight", "The height of the mainchain block the block was built on; the next one can commit to it"},
+            {RPCResult::Type::NUM, "transactions", "Number of transactions in the block, the coinbase included"},
+            {RPCResult::Type::STR_AMOUNT, "fees", "The transaction fees of the block, which go to the address"},
+            {RPCResult::Type::STR_AMOUNT, "amount", "What was offered"},
+            {RPCResult::Type::STR_HEX, "mainchaintxid", "The transaction of the mainchain wallet that makes the offer"},
+        }},
+        RPCExamples{HelpExampleCli("requestbmmblock", "\"address\" 0.0001")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    NodeContext& node{EnsureAnyNodeContext(request.context)};
+    Follower& follower{EnsureFollower(node)};
+    const CTxDestination destination{DecodeDestination(request.params[0].get_str())};
+    if (!IsValidDestination(destination)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid address");
+    const CAmount amount{AmountFromValue(request.params[1])};
+    if (amount <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "The amount must be positive");
+    std::string error;
+    const auto candidate{follower.CreateCandidate(GetScriptForDestination(destination), error)};
+    if (!candidate) throw JSONRPCError(RPC_MISC_ERROR, error);
+    const auto txid{follower.RequestCommitment(*candidate, amount, error)};
+    if (!txid) {
+        follower.DropCandidate(candidate->block->GetHash());
+        throw JSONRPCError(RPC_MISC_ERROR, error);
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("hash", candidate->block->GetHash().GetHex());
+    result.pushKV("mainchainheight", candidate->main_prev_height);
+    result.pushKV("transactions", candidate->block->vtx.size());
+    result.pushKV("fees", ValueFromAmount(candidate->block->vtx[0]->vout[0].nValue));
+    result.pushKV("amount", ValueFromAmount(amount));
+    result.pushKV("mainchaintxid", *txid);
+    return result;
+},
+    };
+}
+
 RPCMethod setbmm()
 {
     return RPCMethod{
         "setbmm",
-        "Turn continuous blind merged mining on or off. When it is on, this node builds a block of this chain for every\n"
-        "block of the mainchain, and has the wallet of the mainchain node pay mainchain miners to commit to it.",
+        "Turn continuous blind merged mining on or off. When it is on, this node builds a block of this chain whenever\n"
+        "there are transactions whose fees pay for one, and has the wallet of the mainchain node offer the miners of the\n"
+        "mainchain 99% of those fees to commit to it. The fees go to the address; the hundredth that is left is what the\n"
+        "operator of this node earns. A block without fees is not asked for: see requestbmmblock to mine one by hand.",
         {
             {"mine", RPCArg::Type::BOOL, RPCArg::Optional::NO, "Whether to mine"},
             {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The address that receives the transaction fees of the blocks. Required to turn mining on."},
-            {"amount", RPCArg::Type::AMOUNT, RPCArg::Default{"0.0001"}, "What to pay mainchain miners for each block, in coins of the mainchain"},
+            {"always", RPCArg::Type::BOOL, RPCArg::Default{false}, "For tests: ask for a block for every block of the mainchain, with or without fees, and offer `amount` for each"},
+            {"amount", RPCArg::Type::AMOUNT, RPCArg::Default{"0.0001"}, "What to offer for each block if `always` is set, in coins of the mainchain"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::BOOL, "mining", "Whether mining is on"}}},
-        RPCExamples{HelpExampleCli("setbmm", "true \"address\" 0.0001") + HelpExampleCli("setbmm", "false")},
+        RPCExamples{HelpExampleCli("setbmm", "true \"address\"") + HelpExampleCli("setbmm", "false")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
     NodeContext& node{EnsureAnyNodeContext(request.context)};
     Follower& follower{EnsureFollower(node)};
     const bool mine{request.params[0].get_bool()};
     CScript script;
+    bool always{false};
     CAmount amount{10000};
     if (mine) {
         if (request.params[1].isNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "An address is required to mine");
         const CTxDestination destination{DecodeDestination(request.params[1].get_str())};
         if (!IsValidDestination(destination)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid address");
         script = GetScriptForDestination(destination);
-        if (!request.params[2].isNull()) amount = AmountFromValue(request.params[2]);
+        always = !request.params[2].isNull() && request.params[2].get_bool();
+        if (!request.params[3].isNull()) amount = AmountFromValue(request.params[3]);
         if (amount <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "The amount must be positive");
     }
-    follower.SetMining(mine, script, amount);
+    follower.SetMining(mine, script, always, amount);
     UniValue result(UniValue::VOBJ);
     result.pushKV("mining", mine);
     return result;
@@ -178,9 +232,14 @@ RPCMethod getbmminfo()
         {
             {RPCResult::Type::BOOL, "mining", "Whether mining is on"},
             {RPCResult::Type::STR, "address", /*optional=*/true, "The address that receives the transaction fees"},
-            {RPCResult::Type::STR_AMOUNT, "amount", /*optional=*/true, "What mainchain miners are paid for each block"},
+            {RPCResult::Type::BOOL, "always", /*optional=*/true, "Whether a block is asked for with every block of the mainchain, with or without fees"},
+            {RPCResult::Type::STR_AMOUNT, "amount", /*optional=*/true, "What is offered for each block, if always"},
+            {RPCResult::Type::BOOL, "idle", /*optional=*/true, "Whether mining waits for transactions whose fees pay for a block"},
+            {RPCResult::Type::STR_AMOUNT, "lastfees", /*optional=*/true, "The fees of the block last asked for"},
+            {RPCResult::Type::STR_AMOUNT, "lastoffer", /*optional=*/true, "What was offered to the miners of the mainchain for it"},
             {RPCResult::Type::NUM, "requests", "Number of commitments asked for since mining was first turned on"},
             {RPCResult::Type::NUM, "blocks", "Number of blocks of this node that the mainchain committed to"},
+            {RPCResult::Type::NUM, "outbid", "Number of mainchain blocks for which another node bid more, for another block of this chain"},
             {RPCResult::Type::STR, "error", /*optional=*/true, "Why the last attempt to mine failed"},
         }},
         RPCExamples{HelpExampleCli("getbmminfo", "")},
@@ -193,10 +252,17 @@ RPCMethod getbmminfo()
     if (mining.enabled) {
         CTxDestination destination;
         if (ExtractDestination(mining.coinbase_script, destination)) result.pushKV("address", EncodeDestination(destination));
-        result.pushKV("amount", ValueFromAmount(mining.amount));
+        result.pushKV("always", mining.always);
+        if (mining.always) result.pushKV("amount", ValueFromAmount(mining.amount));
+        result.pushKV("idle", mining.idle);
+        if (mining.requests > 0) {
+            result.pushKV("lastfees", ValueFromAmount(mining.last_fees));
+            result.pushKV("lastoffer", ValueFromAmount(mining.last_offer));
+        }
     }
     result.pushKV("requests", mining.requests);
     result.pushKV("blocks", mining.blocks);
+    result.pushKV("outbid", mining.outbid);
     if (!mining.error.empty()) result.pushKV("error", mining.error);
     return result;
 },
@@ -269,7 +335,7 @@ RPCMethod getwithdrawalbundle()
         tx = side.BundleTx();
         withdrawals = side.Bundle()->withdrawals;
         result.pushKV("height", side.Bundle()->height);
-    } else if ((tx = side.NextBundle(chainman.ActiveHeight() + 1, chainman.GetConsensus().sidechain, &withdrawals))) {
+    } else if ((tx = side.NextBundle(chainman.ActiveHeight() + 1, chainman.ActiveChain().Tip()->GetBlockHash(), chainman.GetConsensus().sidechain, &withdrawals))) {
         result.pushKV("status", "next");
     } else {
         result.pushKV("status", "none");
@@ -302,6 +368,7 @@ void RegisterSidechainRPCCommands(CRPCTable& t)
         {"sidechain", &syncmainchain},
         {"sidechain", &createbmmblock},
         {"sidechain", &setbmm},
+        {"sidechain", &requestbmmblock},
         {"sidechain", &getbmminfo},
         {"sidechain", &listwithdrawals},
         {"sidechain", &getwithdrawalbundle},

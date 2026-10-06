@@ -3346,7 +3346,18 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
             }
             // On a sidechain, a header can come before the mainchain block that commits to it
             // is on record. It is tried again then; remember that this peer has the block.
-            if (state.GetRejectReason() == "bmm-unknown") WITH_LOCK(::cs_main, UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash()));
+            if (state.GetRejectReason() == "bmm-unknown") {
+                LOCK(::cs_main);
+                // The headers after the first one without a commitment were not looked at. Keep them
+                // too, to be taken in when the mainchain commits to them: the peer sends them only once,
+                // and a node that has only the first would not know the rest of the chain to fetch.
+                for (const CBlockHeader& header : headers) {
+                    const uint256 hash{header.GetHash()};
+                    if (m_chainman.m_blockman.LookupBlockIndex(hash)) continue;
+                    m_chainman.AddBmmWaiting(header, pfrom.GetId());
+                }
+                UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash());
+            }
             MaybePunishNodeForBlock(pfrom.GetId(), state, via_compact_block, "invalid header received");
             return;
         }

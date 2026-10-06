@@ -303,6 +303,8 @@ public:
     std::map<drivechain::SidechainId, Txid> m_bmm_requests GUARDED_BY(cs);
     //! The transaction that asks to take a withdrawal back; there is at most one per withdrawal.
     std::map<COutPoint, Txid> m_refunds GUARDED_BY(cs);
+    //! On zSide: the nullifiers the shielded transactions reveal, by transaction.
+    std::map<uint256, Txid> m_shielded_nullifiers GUARDED_BY(cs);
     std::map<Txid, CAmount> mapDeltas GUARDED_BY(cs);
 
     using Options = kernel::MemPoolOptions;

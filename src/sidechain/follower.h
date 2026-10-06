@@ -11,6 +11,7 @@
 #include <sidechain/mainclient.h>
 #include <sync.h>
 #include <uint256.h>
+#include <util/time.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -89,14 +90,37 @@ public:
     struct Mining {
         bool enabled{false};
         CScript coinbase_script;
-        //! What to offer mainchain miners for each commitment.
+        //! Mine a block for every block of the mainchain, with or without fees, and offer `amount` for each. For tests.
+        bool always{false};
         CAmount amount{0};
+        //! Whether mining is on but waits, because a block would not have the fees to pay for itself.
+        bool idle{false};
+        //! The fees of the block last asked for, and what was offered for it.
+        CAmount last_fees{0};
+        CAmount last_offer{0};
         uint64_t requests{0};
         uint64_t blocks{0};
+        //! Mainchain blocks for which another node's bid, for another block of this chain, paid more.
+        uint64_t outbid{0};
         std::string error;
     };
+    /**
+     * What is offered to the miners of the mainchain for a block with these
+     * fees, when mining continuously: all but the share of the operator of
+     * this node, one hundredth.
+     */
+    static CAmount Offer(CAmount fees) { return fees - fees / 100; }
+    //! The least that is offered: below it, the request would not pay for its own place in a block of the mainchain.
+    static constexpr CAmount MIN_OFFER{500};
     /** Turn continuous merged mining on or off. */
-    void SetMining(bool enabled, const CScript& coinbase_script, CAmount amount) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Turn continuous merged mining on or off. It asks for a block when the
+     * block has fees, and offers the miners of the mainchain those fees less
+     * the share of the operator; a block without fees is not asked for.
+     */
+    void SetMining(bool enabled, const CScript& coinbase_script, bool always = false, CAmount amount = 0) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Give up a candidate that no commitment will be asked for. */
+    void DropCandidate(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     Mining GetMining() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     const MainClient& Client() const { return m_client; }
@@ -104,11 +128,21 @@ public:
 private:
     void Run() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
     /** Update the record. @return whether it changed */
-    bool UpdateRecord() EXCLUSIVE_LOCKS_REQUIRED(m_sync_mutex, !m_mutex);
+    /**
+     * @param[in] may_drop  whether to follow the mainchain back when it dropped blocks on record;
+     *                      Poll, called with the main lock held, leaves that to the thread of the follower
+     */
+    bool UpdateRecord(bool may_drop = true) EXCLUSIVE_LOCKS_REQUIRED(m_sync_mutex, !m_mutex);
     /** Do what the changes of the record call for. */
     void Act() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void Mine() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
     void SendBundle() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Once, when the record has caught up: drop from the active chain the blocks the mainchain does not commit to. */
+    void CheckActiveChain() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    //! How far below the tip of the mainchain record commitments are checked at start (CheckActiveChain).
+    static constexpr int MOVED_CHECK_DEPTH{100};
+    //! Least time between two calls to the mainchain node on behalf of block headers (Poll).
+    static constexpr auto POLL_SPACING{std::chrono::seconds{2}};
 
     node::NodeContext& m_node;
     const MainClient m_client;
@@ -128,10 +162,20 @@ private:
     std::vector<uint256> m_committed GUARDED_BY(m_mutex);
     std::map<uint256, Candidate> m_candidates GUARDED_BY(m_mutex);
     Mining m_mining GUARDED_BY(m_mutex);
+    //! Counts the calls of SetMining, for the thread to tell that the settings changed under it.
+    uint64_t m_mining_settings GUARDED_BY(m_mutex){0};
     //! The mainchain block for which a commitment was last asked.
     uint256 m_mining_requested_for GUARDED_BY(m_mutex);
     //! The bundle the mainchain node was last given.
     uint256 m_bundle_sent GUARDED_BY(m_mutex);
+    //! The bundle the mainchain node last refused, so that it is said once.
+    uint256 m_bundle_refused GUARDED_BY(m_mutex);
+    //! Held while acting on changes of the record, which Sync callers on several threads do.
+    Mutex m_act_mutex;
+    NodeClock::time_point m_last_poll GUARDED_BY(m_mutex){};
+    bool m_chain_checked GUARDED_BY(m_mutex){false};
+    //! The bundle whose payout was last asked of the mainchain node, and at which mainchain height.
+    std::pair<uint256, int> m_payout_tried GUARDED_BY(m_mutex){uint256{}, -1};
 };
 
 } // namespace sidechain

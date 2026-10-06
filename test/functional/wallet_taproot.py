@@ -8,7 +8,7 @@ import random
 import uuid
 
 from decimal import Decimal
-from test_framework.address import output_key_to_p2tr
+from test_framework.address import HRP_BY_CHAIN, output_key_to_p2tr
 from test_framework.key import H_POINT, compute_xonly_pubkey
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
@@ -48,7 +48,7 @@ def compute_taproot_address(pubkey, scripts):
     return output_key_to_p2tr(taproot_construct(pubkey, scripts).output_pubkey)
 
 def compute_raw_taproot_address(pubkey):
-    return encode_segwit_address("rchn", 1, pubkey)
+    return encode_segwit_address(HRP_BY_CHAIN["regtest"], 1, pubkey)
 
 class WalletTaprootTest(BitcoinTestFramework):
     """Test generation and spending of P2TR address outputs."""

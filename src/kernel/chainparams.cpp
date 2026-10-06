@@ -234,10 +234,9 @@ public:
         };
 
         // This chain is a sidechain of the Chains mainchain.
-        // TODO for a new sidechain: its slot, its own message, magic bytes, port and address prefix.
-        MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, main network", .genesis_time = 1790900000,
-                       .message_start = {0x5c, 0x1d, 0xec, 0x01}, .default_port = 9655, .bech32_hrp = "sc"});
-        consensus.coinbase_maturity = 6; // deposits and fees can be spent after six blocks
+        MakeSidechain({.slot = 6, .genesis_message = "zSide: private payments with Zcash Orchard, on a sidechain", .genesis_time = 1791302400,
+                       .message_start = {0x7a, 0x73, 0x64, 0x01}, .default_port = 9455, .bech32_hrp = "zs"});
+        consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
 
@@ -334,9 +333,11 @@ public:
         };
 
         // This chain is a sidechain of the Chains testnet.
-        MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, test network", .genesis_time = 1790900000,
-                       .message_start = {0x5c, 0x1d, 0xec, 0x02}, .default_port = 19655, .bech32_hrp = "tsc"});
-        consensus.coinbase_maturity = 6;
+        MakeSidechain({.slot = 6, .genesis_message = "zSide testnet", .genesis_time = 1791302400,
+                       .message_start = {0x7a, 0x73, 0x64, 0x02}, .default_port = 19455, .bech32_hrp = "tzs"});
+        // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
+        consensus.sidechain.bundle_retry_delay = 20;
+        consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
 
@@ -442,9 +443,9 @@ public:
         };
 
         // This chain is a sidechain of the Chains signet. Its own blocks are not signed.
-        MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, signet", .genesis_time = 1790900000,
-                       .message_start = {0x5c, 0x1d, 0xec, 0x03}, .default_port = 39655, .bech32_hrp = "tsc"});
-        consensus.coinbase_maturity = 6;
+        MakeSidechain({.slot = 6, .genesis_message = "zSide signet", .genesis_time = 1791302400,
+                       .message_start = {0x7a, 0x73, 0x64, 0x03}, .default_port = 39455, .bech32_hrp = "tzs"});
+        consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
 
@@ -491,11 +492,11 @@ public:
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
 
-        pchMessageStart[0] = 0x5c;
-        pchMessageStart[1] = 0x1d;
-        pchMessageStart[2] = 0xec;
+        pchMessageStart[0] = 0x7a;
+        pchMessageStart[1] = 0x73;
+        pchMessageStart[2] = 0x64;
         pchMessageStart[3] = 0x04;
-        nDefaultPort = 29655;
+        nDefaultPort = 29455;
         nPruneAfterHeight = opts.fastprune ? 100 : 1000;
 
         // On request this chain is a sidechain, with what tests need to be quick.
@@ -505,7 +506,7 @@ public:
             consensus.sidechain.bundle_retry_delay = 5;
             // A sidechain has no sidechains of its own.
             consensus.drivechain.max_sidechains = 0;
-            consensus.coinbase_maturity = 2;
+            consensus.coinbase_maturity = 0;
         }
         m_assumed_blockchain_size = 0;
         m_assumed_chain_state_size = 0;
@@ -559,7 +560,8 @@ public:
         base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x35, 0x87, 0xCF};
         base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x35, 0x83, 0x94};
 
-        bech32_hrp = "rchn";
+        // Its own, so that an address of another chain is not taken for one of this chain.
+        bech32_hrp = "rsc";
 
         // Copied from Testnet4.
         m_headers_sync_params = HeadersSyncParams{

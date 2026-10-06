@@ -1,0 +1,27 @@
+[package]
+name = "zside_orchard"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "zSide: the Orchard shielded pool of Zcash, for the C++ node, behind a C interface"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# Pinned: consensus depends on it. 0.15 is the line zcash_primitives ships with; bundles use
+# BundleVersion::orchard_v2 and the FixedPostNu6_2 circuit (the original circuit was unsound).
+orchard = "=0.15.5"
+incrementalmerkletree = "0.8.1"
+nonempty = { version = "0.11", default-features = false }
+rand_core = { version = "0.6", features = ["getrandom"] }
+subtle = "2.6"
+zip32 = "0.2.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+debug = false

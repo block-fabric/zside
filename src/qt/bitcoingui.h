@@ -29,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+class SidebarMining;
+class ThemedFrame;
 class NetworkStyle;
 class Notificator;
 class OptionsModel;
@@ -40,7 +42,6 @@ class WalletController;
 class WalletFrame;
 class BlockExplorer;
 class CryptoToolsDialog;
-class GraffitiDialog;
 class MiningDialog;
 class MultisigDialog;
 class ProofOfFundsDialog;
@@ -142,12 +143,15 @@ private:
     QProgressDialog* progressDialog = nullptr;
 
     QMenuBar* appMenuBar = nullptr;
+    ThemedFrame* m_themed_frame{nullptr};
+    SidebarMining* m_sidebar_mining{nullptr};
     QToolBar* appToolBar = nullptr;
     //! Entries of the navigation bar that are not pages, with the icon each has; the icons follow the theme.
     std::vector<std::pair<QAction*, const char*>> m_sidebar_icons;
     QAction* overviewAction = nullptr;
     QAction* historyAction = nullptr;
     QAction* sidechainAction = nullptr;
+    QAction* shieldedAction = nullptr;
     QAction* quitAction = nullptr;
     QAction* sendCoinsAction = nullptr;
     QAction* usedSendingAddressesAction = nullptr;
@@ -191,7 +195,6 @@ private:
     MiningDialog* m_mining_dialog{nullptr};
     BlockExplorer* m_block_explorer{nullptr};
     CryptoToolsDialog* m_crypto_tools{nullptr};
-    GraffitiDialog* m_graffiti_dialog{nullptr};
     TimestampDialog* m_timestamp_dialog{nullptr};
     ProofOfFundsDialog* m_proof_dialog{nullptr};
     MultisigDialog* m_multisig_dialog{nullptr};
@@ -307,6 +310,8 @@ public Q_SLOTS:
     void gotoReceiveCoinsPage();
     /** Switch to sidechain page */
     void gotoSidechainPage();
+    /** Switch to the shielded account */
+    void gotoShieldedPage();
     /** Switch to send coins page */
     void gotoSendCoinsPage(QString addr = "");
 
