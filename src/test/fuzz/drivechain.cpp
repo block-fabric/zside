@@ -54,11 +54,15 @@ FUZZ_TARGET(drivechain_messages)
         assert(ParseWithdrawalFeeScript(WithdrawalFeeScript(*fee)) == fee);
     }
 
-    // Deposit addresses: a valid one formats back to itself; a formatted one is valid.
+    // Deposit addresses: what a valid one names formats to an address that names the same (the slot
+    // may be written with leading zeros, which its checksum covers: another spelling, the same
+    // deposit); a formatted one is valid.
     const std::string text{fdp.ConsumeRandomLengthString(200)};
     DepositAddress parsed;
     if (ParseDepositAddress(text, parsed) == DepositAddressKind::VALID) {
-        assert(FormatDepositAddress(parsed) == text);
+        DepositAddress again;
+        assert(ParseDepositAddress(FormatDepositAddress(parsed), again) == DepositAddressKind::VALID);
+        assert(again.slot == parsed.slot && again.address == parsed.address);
     }
     DepositAddress made;
     made.slot = fdp.ConsumeIntegralInRange<SidechainId>(0, MAX_SLOTS - 1);

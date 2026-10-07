@@ -74,7 +74,9 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
     params.single_bundle_height = fdp.ConsumeIntegralInRange<int>(0, 30);
 
     CKey key;
-    key.Set(std::vector<unsigned char>(32, 0x42).begin(), std::vector<unsigned char>(32, 0x42).end(), /*fCompressedIn=*/true);
+    const std::vector<unsigned char> secret(32, 0x42);
+    key.Set(secret.begin(), secret.end(), /*fCompressedIn=*/true);
+    assert(key.IsValid());
     const uint160 keyhash{key.GetPubKey().GetID()};
     const CScript pay{CScript() << OP_0 << std::vector<unsigned char>(20, 7)};
 
