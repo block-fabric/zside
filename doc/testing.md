@@ -97,3 +97,26 @@ database taken beforehand, which the in-place rollback must give back exactly.
 
 The mainchain targets `drivechain_messages` and `drivechain_scdb` are here too
 (`src/test/fuzz/drivechain.cpp`).
+
+## zSide
+
+`src/test/zside_tests.cpp`:
+
+| Test | What it checks |
+|---|---|
+| `frontier_matches_the_tree` | The note commitment tree's frontier matches the full tree. |
+| `no_transparent_inputs_round_trip` | A shielded transaction without transparent inputs serializes and reads back. |
+| `blind_bundle_keeps_its_format` | A BIP300 blind bundle keeps its format, whatever its payouts. |
+| `value_in_from_marker` | The value a bundle takes out of the pool is read from its marker. |
+| `bundle_through_the_interface` | A bundle proved and signed through the Rust interface verifies. |
+
+`feature_zside.py`:
+
+- addresses; shielding; private payments with memos; unshielding (to new
+  addresses, all of it, fee out of it);
+- overspending and double spends refused; a changed byte of a bundle refused;
+- undoing blocks undoes the pool;
+- a spend whose anchor a reorg takes away leaves the mempool, and blocks can
+  still be made;
+- melt and cast: coins shielded one by one, bills cast in their windows, the
+  plan surviving a restart, cancelling.
