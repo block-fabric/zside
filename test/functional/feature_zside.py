@@ -8,6 +8,7 @@ from decimal import Decimal
 
 from feature_sidechain import ACTIVATION_PERIOD, SLOT, SidechainTest
 from test_framework.messages import tx_from_hex
+from test_framework.authproxy import JSONRPCException
 from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error
 
 # Melt/cast on regtest: a bill's window opens every CAST_PERIOD blocks, at (bill * 7) % CAST_PERIOD, for WINDOW blocks.
@@ -125,9 +126,10 @@ class ZSideTest(SidechainTest):
         assert_equal(side.getshieldedbalance(), balance)
         self.check_in_sync()
 
+        # Before melt and unshield, which leave the wallet without coins on either side.
+        self.run_anchor_reorg_test()
         self.run_meltcast_test()
         self.run_unshield_test()
-        self.run_anchor_reorg_test()
 
     def run_anchor_reorg_test(self):
         side, other = self.nodes
@@ -139,11 +141,21 @@ class ZSideTest(SidechainTest):
         assert spend in side.getrawmempool()
         side.invalidateblock(anchored)
         assert spend not in side.getrawmempool()
-        # The next block is built (the template would fail on the stale spend).
-        self.bmm()
+        # The next block is built (the template would fail on the stale spend). The other node keeps
+        # the anchored block, as high as this one, until this branch grows longer.
+        replacement = self.bmm(expect=False)
+        assert_equal(side.getbestblockhash(), replacement)
+        # Back, the anchored block is the one seen first: the node may go back to it. Either way the
+        # next block makes one branch longer, and both nodes take it.
         side.reconsiderblock(anchored)
         self.bmm()
         self.sync_blocks()
+        # The spend is still the wallet's: sent again if its anchor is on the chain again, given up if not.
+        try:
+            side.sendrawtransaction(side.gettransaction(spend)["hex"])
+            self.mine_txs()
+        except JSONRPCException:
+            side.abandontransaction(spend)
         self.check_in_sync()
 
     def run_unshield_test(self):

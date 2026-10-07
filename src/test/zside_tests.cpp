@@ -98,7 +98,8 @@ BOOST_AUTO_TEST_CASE(blind_bundle_keeps_its_format)
     blind.version = 2;
     blind.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{0, 0, 0, 0, 0, 0, 3, 0xe8});
     CScript lookalike{CScript() << OP_RETURN << OP_0};
-    lookalike.insert(lookalike.end(), {'Z', 'O', 'R', 'C', 0});
+    const std::vector<unsigned char> tag{'Z', 'O', 'R', 'C', 0};
+    lookalike.insert(lookalike.end(), tag.begin(), tag.end());
     blind.vout.emplace_back(COIN, lookalike);
     BOOST_CHECK(!IsShieldedMarker(lookalike));
     BOOST_CHECK(!CarriesShieldedBundle(blind));
