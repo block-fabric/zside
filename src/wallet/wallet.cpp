@@ -235,8 +235,15 @@ std::unique_ptr<interfaces::Handler> HandleLoadWallet(WalletContext& context, Lo
 
 void NotifyWalletLoaded(WalletContext& context, const std::shared_ptr<CWallet>& wallet)
 {
-    LOCK(context.wallets_mutex);
-    for (auto& load_wallet : context.wallet_load_fns) {
+    // The handlers are called without the lock: the GUI's waits for its own thread, which may be
+    // waiting for the lock itself (to count the wallets for a notice of an incoming transaction).
+    // Holding it there deadlocked a node whose wallets received payments while one was loaded.
+    std::vector<LoadWalletFn> load_fns;
+    {
+        LOCK(context.wallets_mutex);
+        load_fns.assign(context.wallet_load_fns.begin(), context.wallet_load_fns.end());
+    }
+    for (auto& load_wallet : load_fns) {
         load_wallet(interfaces::MakeWallet(context, wallet));
     }
 }
