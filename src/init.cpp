@@ -16,6 +16,7 @@
 #include <chainparamsbase.h>
 #include <clientversion.h>
 #include <common/args.h>
+#include <key_io.h>
 #include <common/messages.h>
 #include <common/system.h>
 #include <compat/compat.h>
@@ -2199,9 +2200,21 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
         node.follower = std::make_unique<sidechain::Follower>(node, std::move(options));
         chainman.m_mainchain_poll = [&node] { node.follower->Poll(); };
-        std::string error;
-        // If the mainchain node cannot be reached, the node says so in its warnings and keeps trying.
-        node.follower->Sync(error);
+        // Merged mining as setbmm left it (in the settings), so that a restart does not stop it.
+        if (const common::SettingsValue saved{args.GetSetting("bmm")}; saved.isObject()) {
+            const CTxDestination destination{DecodeDestination(saved["address"].isStr() ? saved["address"].get_str() : "")};
+            if (IsValidDestination(destination)) {
+                const bool always{saved["always"].isBool() && saved["always"].get_bool()};
+                const CAmount amount{saved["amount"].isNum() ? saved["amount"].getInt<int64_t>() : 10000};
+                node.follower->SetMining(true, GetScriptForDestination(destination), always, amount);
+                LogInfo("Merged mining on, as it was set last (to %s)", saved["address"].get_str());
+            } else {
+                LogWarning("Merged mining not turned on: the address kept in the settings is not valid here");
+            }
+        }
+        // The thread of the follower brings the record up to date at once, and keeps trying if the
+        // mainchain node cannot be reached (the node says so in its warnings). Not here: a mainchain
+        // node that takes the connection and never answers would hold startup for a minute.
         node.follower->Start();
     }
 

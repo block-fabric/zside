@@ -383,7 +383,15 @@ class SidechainTest(BitcoinTestFramework):
         assert_equal(mining["blocks"], 3)
         assert_equal(mining["always"], True)
         assert_equal(mining["amount"], Decimal("0.0005"))
+        # A restart (after a crash, say) does not stop it: it is kept in the settings.
+        self.restart_node(0)
+        self.connect_nodes(0, 1)
+        mining = side.getbmminfo()
+        assert_equal((mining["mining"], mining["address"], mining["always"], mining["amount"]), (True, self.side_address, True, Decimal("0.0005")))
         side.setbmm(False)
+        self.restart_node(0)
+        self.connect_nodes(0, 1)
+        assert_equal(side.getbmminfo()["mining"], False)
 
         self.log.info("Mining by itself, the node asks for a block when fees pay for it, and offers 99% of them")
         # Start from nothing to mine. The last request of the mining before may still be taken.

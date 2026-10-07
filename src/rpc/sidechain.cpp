@@ -4,6 +4,8 @@
 
 #include <addresstype.h>
 #include <chain.h>
+#include <common/args.h>
+#include <common/settings.h>
 #include <core_io.h>
 #include <key_io.h>
 #include <node/context.h>
@@ -217,6 +219,24 @@ RPCMethod setbmm()
         if (amount <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "The amount must be positive");
     }
     follower.SetMining(mine, script, always, amount);
+    // Kept in the settings, as wallets to load are: a node restarted (after a crash, say) mines again.
+    if (node.args) {
+        UniValue saved{UniValue::VNULL};
+        if (mine) {
+            saved.setObject();
+            saved.pushKV("address", request.params[1].get_str());
+            saved.pushKV("always", always);
+            saved.pushKV("amount", amount);
+        }
+        node.args->LockSettings([&](common::Settings& settings) {
+            if (saved.isNull()) {
+                settings.rw_settings.erase("bmm");
+            } else {
+                settings.rw_settings["bmm"] = saved;
+            }
+        });
+        if (node.args->GetSettingsPath()) node.args->WriteSettingsFile();
+    }
     UniValue result(UniValue::VOBJ);
     result.pushKV("mining", mine);
     return result;
