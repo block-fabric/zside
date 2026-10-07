@@ -4911,12 +4911,22 @@ void Chainstate::RemoveStaleDrivechainTxs()
             if (m_scdb.m_side.Withdrawals().contains(withdrawal) && !m_scdb.m_side.InBundle(withdrawal)) continue;
             if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
         }
-        // Shielded transactions whose notes another spent in a block (they reveal a nullifier the chain has).
-        std::set<Txid> shielded;
+        // Shielded transactions whose notes another spent in a block (they reveal a nullifier the chain
+        // has), or whose anchor a reorg took away: a block with them would be invalid, and no block
+        // could be built.
+        std::set<Txid> shielded, checked;
         for (const auto& [nf, txid] : m_mempool->m_shielded_nullifiers) {
             if (m_scdb.m_side.Shielded().IsSpent(nf) && shielded.insert(txid).second) {
                 if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
             }
+        }
+        for (const auto& [nf, txid] : m_mempool->m_shielded_nullifiers) {
+            if (shielded.contains(txid) || !checked.insert(txid).second) continue;
+            const CTransactionRef tx{m_mempool->get(txid)};
+            if (!tx) continue;
+            std::string error;
+            const auto bundle{zside::Bundle::FromTx(*tx, error)};
+            if (bundle && !m_scdb.m_side.Shielded().IsAnchor(bundle->Anchor()) && shielded.insert(txid).second) stale.push_back(tx);
         }
     }
 

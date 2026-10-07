@@ -127,6 +127,24 @@ class ZSideTest(SidechainTest):
 
         self.run_meltcast_test()
         self.run_unshield_test()
+        self.run_anchor_reorg_test()
+
+    def run_anchor_reorg_test(self):
+        side, other = self.nodes
+        self.log.info("A spend whose anchor a reorg takes away leaves the mempool, and blocks can still be made")
+        side.shieldcoins(1)
+        self.mine_txs()
+        anchored = side.getbestblockhash()
+        spend = side.sendshielded({other.getshieldedaddress(): Decimal("0.1")})["txid"]
+        assert spend in side.getrawmempool()
+        side.invalidateblock(anchored)
+        assert spend not in side.getrawmempool()
+        # The next block is built (the template would fail on the stale spend).
+        self.bmm()
+        side.reconsiderblock(anchored)
+        self.bmm()
+        self.sync_blocks()
+        self.check_in_sync()
 
     def run_unshield_test(self):
         side, other = self.nodes

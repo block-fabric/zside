@@ -5,6 +5,7 @@
 #include <primitives/transaction.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
+#include <zside/marker.h>
 #include <zside/orchard.h>
 #include <zside/shielded.h>
 
@@ -87,6 +88,29 @@ BOOST_AUTO_TEST_CASE(no_transparent_inputs_round_trip)
     DataStream forged{bytes};
     CMutableTransaction out;
     BOOST_CHECK_THROW(forged >> TX_WITH_WITNESS(out), std::ios_base::failure);
+}
+
+BOOST_AUTO_TEST_CASE(blind_bundle_keeps_its_format)
+{
+    // A BIP300 blind bundle has no inputs either. Whatever its payouts, it keeps the format the
+    // mainchain reads: a payout that looks a little like a marker (OP_RETURN OP_0 "ZORC") is no marker.
+    CMutableTransaction blind;
+    blind.version = 2;
+    blind.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{0, 0, 0, 0, 0, 0, 3, 0xe8});
+    CScript lookalike{CScript() << OP_RETURN << OP_0};
+    lookalike.insert(lookalike.end(), {'Z', 'O', 'R', 'C', 0});
+    blind.vout.emplace_back(COIN, lookalike);
+    BOOST_CHECK(!IsShieldedMarker(lookalike));
+    BOOST_CHECK(!CarriesShieldedBundle(blind));
+    DataStream with{}, without{};
+    with << TX_WITH_WITNESS(blind);
+    without << TX_NO_WITNESS(blind);
+    BOOST_CHECK(std::equal(with.begin(), with.end(), without.begin(), without.end()));
+    // A marker too short to hold the tag is none either; a real one is.
+    BOOST_CHECK(!CarriesShieldedBundle(CMutableTransaction{}));
+    CMutableTransaction shielded;
+    shielded.vout.emplace_back(0, ShieldedMarkerScript(std::vector<uint8_t>(3, 1)));
+    BOOST_CHECK(IsShieldedMarker(shielded.vout[0].scriptPubKey) == CarriesShieldedBundle(shielded));
 }
 
 BOOST_AUTO_TEST_CASE(value_in_from_marker)

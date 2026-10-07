@@ -252,22 +252,18 @@ void UnserializeTransaction(TxType& tx, Stream& s, const TransactionSerParams& p
 template<typename TxType>
 bool CarriesShieldedBundle(const TxType& tx)
 {
+    // Exactly what zside::IsShieldedMarker takes: OP_RETURN, then a push of at least four bytes that
+    // starts with the tag. Anything looser would give a blind withdrawal bundle, which has no inputs
+    // either, the format of shielded transactions if one of its payouts looked a little like a marker
+    // -- a format the mainchain cannot read.
     for (const auto& out : tx.vout) {
         const auto& script{out.scriptPubKey};
-        if (script.size() < 2 || script[0] != 0x6a) continue;
-        size_t at;
-        if (script[1] < 0x4c) {
-            at = 2;
-        } else if (script[1] == 0x4c) {
-            at = 3;
-        } else if (script[1] == 0x4d) {
-            at = 4;
-        } else if (script[1] == 0x4e) {
-            at = 6;
-        } else {
-            continue;
-        }
-        if (script.size() >= at + 4 && script[at] == 'Z' && script[at + 1] == 'O' && script[at + 2] == 'R' && script[at + 3] == 'C') return true;
+        if (script.size() < 2 || script[0] != OP_RETURN) continue;
+        CScript::const_iterator pc{script.begin() + 1};
+        opcodetype opcode;
+        std::vector<unsigned char> data;
+        if (!script.GetOp(pc, opcode, data) || opcode > OP_PUSHDATA4) continue;
+        if (data.size() >= 4 && data[0] == 'Z' && data[1] == 'O' && data[2] == 'R' && data[3] == 'C') return true;
     }
     return false;
 }
