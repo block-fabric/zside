@@ -820,6 +820,8 @@ public:
      * escrow output of their sidechain.
      */
     void RemoveStaleDrivechainTxs() EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_mempool->cs);
+    //! zSide: blocks were disconnected since RemoveStaleDrivechainTxs last ran (anchors may have gone).
+    bool m_blocks_disconnected GUARDED_BY(::cs_main){false};
 
     /**
      * The sidechain database as the deposits in the mempool leave it, for the

@@ -167,6 +167,8 @@ public:
     const Frontier& Tree() const { return m_tree; }
     bool IsSpent(const uint256& nullifier) const { return m_nullifiers.contains(nullifier); }
     bool IsAnchor(const uint256& root) const { return m_roots.contains(root); }
+    /** How many roots are anchors: fewer than before means blocks were undone. */
+    size_t AnchorCount() const { return m_roots.size(); }
     /** What the pool holds. */
     CAmount Pool() const { return m_pool; }
     size_t NullifierCount() const { return m_nullifiers.size(); }

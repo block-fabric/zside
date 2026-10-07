@@ -4,6 +4,8 @@
 
 #include <consensus/tx_verify.h>
 
+#include <chainparams.h>
+
 #include <zside/shielded.h>
 
 #include <chain.h>
@@ -178,7 +180,9 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
     }
 
     // zSide: what the transaction takes out of the shielded pool counts as an input.
-    CAmount nValueIn = zside::ShieldedValueIn(tx);
+    // What a bundle takes out of the shielded pool: only where the pool's rules apply (a sidechain), or
+    // a marker could create coins on a chain that checks no bundle.
+    CAmount nValueIn = Params().GetConsensus().sidechain.enabled ? zside::ShieldedValueIn(tx) : 0;
     for (unsigned int i = 0; i < tx.vin.size(); ++i) {
         const COutPoint &prevout = tx.vin[i].prevout;
         const Coin& coin = inputs.AccessCoin(prevout);

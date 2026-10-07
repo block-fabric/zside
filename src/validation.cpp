@@ -7,6 +7,7 @@
 
 #include <validation.h>
 
+#include <zside/marker.h>
 #include <zside/shielded.h>
 
 #include <arith_uint256.h>
@@ -811,9 +812,7 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
         // The shielded pool: the bundle against the pool as the chain leaves it, and against the
         // other transactions of the mempool, which may not reveal the same nullifiers.
         std::string reject_reason;
-        if (!side.Shielded().CheckTx(tx, reject_reason)) {
-            return ws.m_state.Invalid(TxValidationResult::TX_CONSENSUS, reject_reason);
-        }
+        // The mempool's nullifiers before anything costly.
         std::string error;
         if (const auto bundle{zside::Bundle::FromTx(tx, error)}) {
             for (const uint256& nf : bundle->Nullifiers()) {
@@ -821,6 +820,9 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
                     return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "zs-nullifier-in-mempool");
                 }
             }
+        }
+        if (!side.Shielded().CheckTx(tx, reject_reason)) {
+            return ws.m_state.Invalid(TxValidationResult::TX_CONSENSUS, reject_reason);
         }
     }
 
@@ -1548,7 +1550,8 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactionsInternal(con
     // transactions come one at a time, each paying its own way.
     if (txns.size() > 1) {
         for (const CTransactionRef& tx : txns) {
-            const bool drivechain_tx{drivechain::GetBmmRequest(*tx).has_value() ||
+            // Shielded transactions too: the nullifiers of a package are not checked against each other.
+            const bool drivechain_tx{drivechain::GetBmmRequest(*tx).has_value() || zside::HasShieldedMarker(*tx) ||
                                      std::any_of(tx->vout.begin(), tx->vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); })};
             if (drivechain_tx) {
                 package_state.Invalid(PackageValidationResult::PCKG_POLICY, "package-drivechain-tx");
@@ -3119,6 +3122,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
 
     CBlockIndex *pindexDelete = m_chain.Tip();
     assert(pindexDelete);
+    m_blocks_disconnected = true;
     assert(pindexDelete->pprev);
     // Read block from disk.
     std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
@@ -4924,7 +4928,11 @@ void Chainstate::RemoveStaleDrivechainTxs()
                 if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
             }
         }
+        // Anchors only go when blocks are undone: the transactions are looked at only then.
+        const bool anchors_went{m_blocks_disconnected};
+        m_blocks_disconnected = false;
         for (const auto& [nf, txid] : m_mempool->m_shielded_nullifiers) {
+            if (!anchors_went) break;
             if (shielded.contains(txid) || !checked.insert(txid).second) continue;
             const CTransactionRef tx{m_mempool->get(txid)};
             if (!tx) continue;

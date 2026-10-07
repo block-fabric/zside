@@ -3393,6 +3393,10 @@ std::optional<node::PackageToValidate> PeerManagerImpl::ProcessInvalidTx(NodeId 
 
     PeerRef peer{GetPeerRef(nodeid)};
 
+    // zSide: a shielded bundle whose proof does not verify is invalid whatever the state -- and its
+    // check is the costly one: the peer that sends one goes.
+    if (peer && first_time_failure && state.GetRejectReason() == "bad-zs-proof") Misbehaving(*peer, "shielded transaction with an invalid proof");
+
     LogDebug(BCLog::MEMPOOLREJ, "%s (wtxid=%s) from peer=%d was not accepted: %s\n",
         ptx->GetHash().ToString(),
         ptx->GetWitnessHash().ToString(),

@@ -28,6 +28,12 @@ std::optional<std::span<const uint8_t>> MarkerPayload(const CScript& script)
     if (opcode == OP_PUSHDATA2) header = 3;
     if (opcode == OP_PUSHDATA4) header = 5;
     std::span<const uint8_t> data{script.data() + 1 + header, script.size() - 1 - header};
+    // Only the minimal push, as ShieldedMarkerScript writes it: the sighash stands for the marker by
+    // the bundle's commitment, so another encoding of the same bundle would keep the signatures and
+    // change the transaction's id, leaving its notes on a transaction that is never mined.
+    const size_t n{data.size()};
+    const opcodetype minimal{n < OP_PUSHDATA1 ? static_cast<opcodetype>(n) : n <= 0xff ? OP_PUSHDATA1 : n <= 0xffff ? OP_PUSHDATA2 : OP_PUSHDATA4};
+    if (opcode != minimal) return std::nullopt;
     if (data.size() < sizeof(SHIELDED_TAG) + 1 || !std::equal(std::begin(SHIELDED_TAG), std::end(SHIELDED_TAG), data.begin())) return std::nullopt;
     if (data[sizeof(SHIELDED_TAG)] != SHIELDED_VERSION) return std::nullopt;
     return data.subspan(sizeof(SHIELDED_TAG) + 1);
@@ -281,10 +287,11 @@ bool ShieldedState::Check(const CTransaction& tx, const Bundle& bundle, std::str
 
 bool ShieldedState::CheckTx(const CTransaction& tx, std::string& reject_reason) const
 {
-    if (!CheckShieldedTx(tx, reject_reason)) return false;
+    // The cheap checks against the state first (anchor, nullifiers, pool): a bundle that fails them
+    // costs no proof verification -- one spent already, signed again, say.
     std::string error;
-    const auto bundle{Bundle::FromTx(tx, error)};
-    return !bundle || Check(tx, *bundle, reject_reason);
+    if (const auto bundle{Bundle::FromTx(tx, error)}; bundle && !Check(tx, *bundle, reject_reason)) return false;
+    return CheckShieldedTx(tx, reject_reason);
 }
 
 bool ShieldedState::ApplyTx(const CTransaction& tx, ShieldedUndo& undo, std::string& reject_reason)

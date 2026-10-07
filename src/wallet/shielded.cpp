@@ -295,6 +295,12 @@ std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const s
     const auto sk{ShieldedSpendingKey(wallet)};
     if (!sk) return std::string{"The wallet is locked"};
     const uint8_t* fvk{wallet.m_shielded.fvk->data()};
+    // The key comes from the wallet's active descriptor: if another was made active since the account
+    // was set up, it is not the account's key, and could spend none of its notes.
+    OrchardFvk derived;
+    if (zo_full_viewing_key(sk->data(), derived.data()) != ZO_OK || derived != *wallet.m_shielded.fvk) {
+        return std::string{"The active descriptor of the wallet is not the one the shielded account was made from: make that one active again to spend the account's notes"};
+    }
 
     CAmount to_pay{0};
     size_t shielded_outputs{0};

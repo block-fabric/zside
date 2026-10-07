@@ -323,7 +323,13 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
     }
 
     if (zside::HasShieldedMarker(it->GetTx())) {
-        std::erase_if(m_shielded_nullifiers, [&](const auto& entry) { return entry.second == it->GetTx().GetHash(); });
+        // By the transaction's own nullifiers, not a pass over all of them.
+        std::string error;
+        if (const auto bundle{zside::Bundle::FromTx(it->GetTx(), error)}) {
+            for (const uint256& nf : bundle->Nullifiers()) {
+                if (const auto entry{m_shielded_nullifiers.find(nf)}; entry != m_shielded_nullifiers.end() && entry->second == it->GetTx().GetHash()) m_shielded_nullifiers.erase(entry);
+            }
+        }
     }
 
     RemoveUnbroadcastTx(it->GetTx().GetHash(), true /* add logging because unchecked */);

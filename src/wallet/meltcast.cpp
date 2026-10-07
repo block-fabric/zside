@@ -162,7 +162,12 @@ bool CancelMeltCast(CWallet& wallet, uint64_t id)
 {
     LOCK(wallet.cs_wallet);
     const auto it{wallet.m_shielded.jobs.find(id)};
-    if (it == wallet.m_shielded.jobs.end() || it->second.Sent()) return false;
+    if (it == wallet.m_shielded.jobs.end()) return false;
+    if (it->second.Sent()) {
+        // A step sent can be dropped only if its transaction will never be mined: abandoned, or lost to a conflict.
+        const CWalletTx* wtx{wallet.GetWalletTx(Txid::FromUint256(it->second.txid))};
+        if (wtx && !wtx->isAbandoned() && wallet.GetTxDepthInMainChain(*wtx) >= 0) return false;
+    }
     if (it->second.kind == MeltCastJob::MELT) wallet.UnlockCoin(it->second.coin);
     WalletBatch{wallet.GetDatabase()}.EraseMeltCastJob(id);
     wallet.m_shielded.jobs.erase(it);
@@ -223,6 +228,8 @@ int RunMeltCast(CWallet& wallet)
         }
         if (const auto* tx{std::get_if<CTransactionRef>(&result)}) {
             job.txid = (*tx)->GetHash().ToUint256();
+            // The coin is spent now: no need to keep it from other uses.
+            if (job.kind == MeltCastJob::MELT) wallet.UnlockCoin(job.coin);
             job.error.clear();
             ++made;
             wallet.WalletLogPrintf("%s %s at height %d: %s\n", job.kind == MeltCastJob::MELT ? "Melted" : "Cast", FormatMoney(job.amount), height, job.txid.GetHex());
