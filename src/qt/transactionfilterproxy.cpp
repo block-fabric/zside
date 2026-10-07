@@ -20,25 +20,35 @@ bool TransactionFilterProxy::filterAcceptsRow(int sourceRow, const QModelIndex &
 {
     QModelIndex index = sourceModel()->index(sourceRow, 0, sourceParent);
 
-    int status = index.data(TransactionTableModel::StatusRole).toInt();
-    if (!showInactive && status == TransactionStatus::Conflicted)
-        return false;
+    // Every row is filtered again whenever the model changes (the confirmations of all rows change
+    // with each block), so only what a filter in use needs is asked for: the status costs a look in
+    // the wallet, a date a look at the time zone, a label one in the address book. With tens of
+    // thousands of transactions that kept the interface busy.
+    if (!showInactive) {
+        int status = index.data(TransactionTableModel::StatusRole).toInt();
+        if (status == TransactionStatus::Conflicted)
+            return false;
+    }
 
     int type = index.data(TransactionTableModel::TypeRole).toInt();
     if (!(TYPE(type) & typeFilter))
         return false;
 
-    QDateTime datetime = index.data(TransactionTableModel::DateRole).toDateTime();
-    if (dateFrom && datetime < *dateFrom) return false;
-    if (dateTo && datetime > *dateTo) return false;
+    if (dateFrom || dateTo) {
+        QDateTime datetime = index.data(TransactionTableModel::DateRole).toDateTime();
+        if (dateFrom && datetime < *dateFrom) return false;
+        if (dateTo && datetime > *dateTo) return false;
+    }
 
-    QString address = index.data(TransactionTableModel::AddressRole).toString();
-    QString label = index.data(TransactionTableModel::LabelRole).toString();
-    QString txid = index.data(TransactionTableModel::TxHashRole).toString();
-    if (!address.contains(m_search_string, Qt::CaseInsensitive) &&
-        !  label.contains(m_search_string, Qt::CaseInsensitive) &&
-        !   txid.contains(m_search_string, Qt::CaseInsensitive)) {
-        return false;
+    if (!m_search_string.isEmpty()) {
+        QString address = index.data(TransactionTableModel::AddressRole).toString();
+        QString label = index.data(TransactionTableModel::LabelRole).toString();
+        QString txid = index.data(TransactionTableModel::TxHashRole).toString();
+        if (!address.contains(m_search_string, Qt::CaseInsensitive) &&
+            !  label.contains(m_search_string, Qt::CaseInsensitive) &&
+            !   txid.contains(m_search_string, Qt::CaseInsensitive)) {
+            return false;
+        }
     }
 
     qint64 amount = llabs(index.data(TransactionTableModel::AmountRole).toLongLong());
