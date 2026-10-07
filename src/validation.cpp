@@ -2989,13 +2989,14 @@ bool Chainstate::FlushStateToDisk(
         bool fCacheLarge = mode == FlushStateMode::PERIODIC && cache_state >= CoinsCacheSizeState::LARGE;
         // The cache is over the limit, we have to write now.
         bool fCacheCritical = mode == FlushStateMode::IF_NEEDED && cache_state >= CoinsCacheSizeState::CRITICAL;
-        // So is the sidechain state's, whose changes are written with the coins.
-        if (m_side_cache && m_side_cache->Bytes() > SIDE_CACHE_MAX_BYTES && mode != FlushStateMode::NONE) fCacheCritical = true;
+        // So is the sidechain state's, whose changes are written with the coins: written, but the
+        // coins stay in their cache (synced, not emptied), which the sidechain state did not fill.
+        const bool side_cache_full{m_side_cache && m_side_cache->Bytes() > SIDE_CACHE_MAX_BYTES && mode != FlushStateMode::NONE};
         // It's been a while since we wrote the block index and chain state to disk. Do this frequently, so we don't need to redownload or reindex after a crash.
         bool fPeriodicWrite = mode == FlushStateMode::PERIODIC && nNow >= m_next_write;
         const auto empty_cache{(mode == FlushStateMode::FORCE_FLUSH) || fCacheLarge || fCacheCritical};
         // Combine all conditions that result in a write to disk.
-        bool should_write = (mode == FlushStateMode::FORCE_SYNC) || empty_cache || fPeriodicWrite || fFlushForPrune;
+        bool should_write = (mode == FlushStateMode::FORCE_SYNC) || empty_cache || fPeriodicWrite || fFlushForPrune || side_cache_full;
         // Write blocks, block index and best chain related state to disk.
         if (should_write) {
             LogDebug(BCLog::COINDB, "Writing chainstate to disk: flush mode=%s, prune=%d, large=%d, critical=%d, periodic=%d",
@@ -5054,6 +5055,15 @@ void Chainstate::WriteDrivechainState()
     sidechain::StoreOverlay& cache{SideCache()};
     m_blockman.m_drivechain_db->WriteState(DrivechainStateName(), m_scdb, m_side_db.get(), &cache.Changes());
     cache.Clear();
+}
+
+void Chainstate::ResetDrivechainState()
+{
+    AssertLockHeld(::cs_main);
+    SideCache();  // opens the store
+    m_blockman.m_drivechain_db->WipeState(DrivechainStateName(), *m_side_db);
+    m_side_cache->Clear();
+    m_scdb = drivechain::SidechainDB{};
 }
 
 bool Chainstate::LoadDrivechainState()

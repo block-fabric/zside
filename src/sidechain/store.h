@@ -150,6 +150,7 @@ public:
 
 private:
     void Note(std::span<const unsigned char> key);
+    void Set(std::span<const unsigned char> key, std::optional<StoreBytes> value);
 
     const StoreView* m_base;
     //! Value or erasure of each key changed here.

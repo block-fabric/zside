@@ -42,20 +42,24 @@ std::optional<StoreBytes> StoreOverlay::Get(std::span<const unsigned char> key) 
 std::optional<std::pair<StoreBytes, StoreBytes>> StoreOverlay::Next(std::span<const unsigned char> from, std::span<const unsigned char> prefix) const
 {
     StoreBytes at(from.begin(), from.end());
+    // Nothing before the prefix is under it.
+    if (std::lexicographical_compare(at.begin(), at.end(), prefix.begin(), prefix.end())) at.assign(prefix.begin(), prefix.end());
+    // The first change at or after `at`, and the first entry of the base: the smaller key wins, and a
+    // change hides the base's entry of the same key.
+    auto change{m_changes.lower_bound(at)};
+    auto base{m_base->Next(at, prefix)};
     while (true) {
-        // The first change at or after `at`, and the first entry of the base: the smaller key wins,
-        // and a change hides the base's entry of the same key.
-        auto change{m_changes.lower_bound(at)};
         if (change != m_changes.end() && !StartsWith(change->first, prefix)) change = m_changes.end();
-        auto base{m_base->Next(at, prefix)};
-        if (change == m_changes.end()) {
-            return base;
-        }
+        if (change == m_changes.end()) return base;
         if (base && base->first < change->first) return base;
         if (change->second) return std::make_pair(change->first, *change->second);
-        // Erased here: look past it.
-        at = change->first;
-        at.push_back(0);
+        // Erased here: look past it. The base is asked again only if this hid its entry.
+        if (base && base->first == change->first) {
+            StoreBytes past{change->first};
+            past.push_back(0);
+            base = m_base->Next(past, prefix);
+        }
+        ++change;
     }
 }
 
@@ -67,22 +71,25 @@ void StoreOverlay::Note(std::span<const unsigned char> key)
     m_undo.entries.emplace_back(std::move(k), Get(key));
 }
 
-void StoreOverlay::Put(std::span<const unsigned char> key, StoreBytes value)
+void StoreOverlay::Set(std::span<const unsigned char> key, std::optional<StoreBytes> value)
 {
     Note(key);
-    const size_t size{value.size()};
-    const auto [it, added]{m_changes.insert_or_assign(StoreBytes(key.begin(), key.end()), std::move(value))};
-    // A map node, the key, the value: not exact, a bound to flush by.
-    if (added) m_bytes += 96 + key.size();
+    // A map node, the key, the value: not exact, a bound to flush by. A value replaced no longer counts.
+    const size_t size{value ? value->size() : 0};
+    StoreBytes k(key.begin(), key.end());
+    if (const auto it{m_changes.find(k)}; it != m_changes.end()) {
+        m_bytes -= it->second ? it->second->size() : 0;
+        it->second = std::move(value);
+    } else {
+        m_bytes += 96 + k.size();
+        m_changes.emplace(std::move(k), std::move(value));
+    }
     m_bytes += size;
 }
 
-void StoreOverlay::Erase(std::span<const unsigned char> key)
-{
-    Note(key);
-    const auto [it, added]{m_changes.insert_or_assign(StoreBytes(key.begin(), key.end()), std::nullopt)};
-    if (added) m_bytes += 96 + key.size();
-}
+void StoreOverlay::Put(std::span<const unsigned char> key, StoreBytes value) { Set(key, std::move(value)); }
+
+void StoreOverlay::Erase(std::span<const unsigned char> key) { Set(key, std::nullopt); }
 
 void StoreOverlay::Revert(const StoreUndo& undo)
 {

@@ -126,6 +126,9 @@ static ChainstateLoadResult CompleteChainstateInitialization(
             if (!chainstate->LoadDrivechainState()) {
                 return {ChainstateLoadStatus::FAILURE, _("Error loading the sidechain database. You will need to rebuild the databases using -reindex.")};
             }
+        } else {
+            // The chain is connected again from genesis: so is the sidechain state.
+            chainstate->ResetDrivechainState();
         }
     }
 

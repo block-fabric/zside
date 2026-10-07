@@ -353,9 +353,16 @@ class SidechainTest(BitcoinTestFramework):
         expected = (side.listwithdrawals(), side.getwithdrawalbundle(), side.getbestblockhash(), side.gettxoutsetinfo()["total_amount"])
         self.restart_node(0)
         assert_equal((side.listwithdrawals(), side.getwithdrawalbundle(), side.getbestblockhash(), side.gettxoutsetinfo()["total_amount"]), expected)
+        state = side.getsidechainstate()
         self.restart_node(0, extra_args=self.extra_args[0] + ["-reindex"])
         self.wait_until(lambda: side.getbestblockhash() == expected[2])
         assert_equal((side.listwithdrawals(), side.getwithdrawalbundle(), side.gettxoutsetinfo()["total_amount"]), (expected[0], expected[1], expected[3]))
+        assert_equal(side.getsidechainstate(), state)
+        # Only the coins rebuilt, from genesis: the sidechain state with them, not read from the old tip.
+        self.restart_node(0, extra_args=self.extra_args[0] + ["-reindex-chainstate"])
+        self.wait_until(lambda: side.getbestblockhash() == expected[2])
+        assert_equal((side.listwithdrawals(), side.getwithdrawalbundle(), side.gettxoutsetinfo()["total_amount"]), (expected[0], expected[1], expected[3]))
+        assert_equal(side.getsidechainstate(), state)
 
         self.log.info("A node that was away catches up, with the mainchain and with this chain")
         self.stop_node(1)

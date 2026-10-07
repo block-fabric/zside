@@ -817,7 +817,7 @@ public:
      */
     sidechain::StoreOverlay& SideCache() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** The sidechain state as of the chain tip, read only. */
-    sidechain::State SideState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return sidechain::State{SideCache()}; }
+    sidechain::State SideState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return sidechain::State{static_cast<const sidechain::StoreView&>(SideCache())}; }
     /** Write the sidechain database and the store's changes, in one batch. */
     void WriteDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
@@ -827,6 +827,12 @@ public:
      * disk for the difference.
      */
     bool LoadDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Start the drivechain database over, for a chainstate that starts over: one whose coins are
+     * empty (-reindex-chainstate, a deleted chainstate directory) derives it again from genesis, and
+     * what the store held for the old tip must not be read as the state before block 1.
+     */
+    void ResetDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 private:
     std::unique_ptr<sidechain::DbStore> m_side_db GUARDED_BY(::cs_main);
     std::unique_ptr<sidechain::StoreOverlay> m_side_cache GUARDED_BY(::cs_main);

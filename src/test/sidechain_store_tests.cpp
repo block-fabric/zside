@@ -87,6 +87,28 @@ BOOST_AUTO_TEST_CASE(overlays_and_undo)
     BOOST_CHECK(StoreHash(cache) == StoreHash(base));
 }
 
+BOOST_AUTO_TEST_CASE(next_and_size)
+{
+    EmptyStore empty;
+    StoreOverlay base{empty};
+    base.Put(StoreBytes{1, 1}, {7});
+    base.Put(StoreBytes{2, 1}, {8});
+    base.Put(StoreBytes{2, 2}, {9});
+    StoreOverlay top{static_cast<const StoreView&>(base)};
+    top.Put(StoreBytes{0, 9}, {1});
+    top.Erase(StoreBytes{2, 1});
+    // From before the prefix: the first entry under it, not one of the changes before it.
+    const auto first{top.Next(StoreBytes{0}, StoreBytes{2})};
+    BOOST_REQUIRE(first);
+    BOOST_CHECK(first->first == (StoreBytes{2, 2}));
+    // A value written again counts once.
+    const size_t size{top.Bytes()};
+    for (int i{0}; i < 100; ++i) top.Put(StoreBytes{0, 9}, StoreBytes(10, 1));
+    BOOST_CHECK_EQUAL(top.Bytes(), size + 9);
+    top.Erase(StoreBytes{0, 9});
+    BOOST_CHECK_EQUAL(top.Bytes(), size - 1);
+}
+
 BOOST_AUTO_TEST_CASE(keys_keep_order)
 {
     // Encoded keys sort as the values do: integers big-endian, outpoints by txid then index.
