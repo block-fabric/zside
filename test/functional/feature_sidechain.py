@@ -137,6 +137,9 @@ class SidechainTest(BitcoinTestFramework):
 
     def check_in_sync(self):
         self.sync_blocks()
+        # The whole state of the sidechain, entry by entry.
+        states = [n.getsidechainstate() for n in self.nodes]
+        assert_equal(len({(st["bestblock"], st["hash"]) for st in states}), 1)
         assert_equal(self.nodes[0].listwithdrawals(), self.nodes[1].listwithdrawals())
         assert_equal(self.nodes[0].getwithdrawalbundle(), self.nodes[1].getwithdrawalbundle())
         assert_equal(self.nodes[0].gettxoutsetinfo()["total_amount"], self.nodes[1].gettxoutsetinfo()["total_amount"])

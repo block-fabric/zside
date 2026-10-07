@@ -14,6 +14,8 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <crypto/sha256.h>
+#include <util/check.h>
 #include <set>
 
 namespace sidechain {
@@ -43,29 +45,160 @@ CMutableTransaction BuildBundle(const std::vector<const Withdrawal*>& withdrawal
     return tx;
 }
 
+
+//
+// Tables of the state.
+//
+
+const Table<COutPoint, Withdrawal> WITHDRAWALS{'w'};
+constexpr uint8_t BY_FEE{'f'};
+constexpr uint8_t BY_PAYOUT{'p'};
+const Table<uint64_t, CTxOut> QUEUE{'q'};
+const Table<uint64_t, CTxOut> TX_QUEUE{'r'};
+
+struct QueueEnds {
+    uint64_t head{0};
+    uint64_t tail{0};
+    SERIALIZE_METHODS(QueueEnds, obj) { READWRITE(obj.head, obj.tail); }
+    friend bool operator==(const QueueEnds&, const QueueEnds&) = default;
+};
+const Cell<QueueEnds> QUEUE_ENDS{'Q', {}};
+const Cell<QueueEnds> TX_QUEUE_ENDS{'R', {}};
+
+struct BundleCell {
+    std::optional<PendingBundle> bundle;
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        s << bundle.has_value();
+        if (bundle) s << *bundle;
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        bool has;
+        s >> has;
+        bundle.reset();
+        if (has) s >> bundle.emplace();
+    }
+    friend bool operator==(const BundleCell&, const BundleCell&) = default;
+};
+const Cell<BundleCell> BUNDLE{'b', {}};
+const Cell<int32_t> MAIN_HEIGHT{'h', -1};
+const Cell<int32_t> LAST_FAILURE{'x', -1};
+
+/** Signed integers in key order. */
+void EncodeSigned(StoreBytes& out, int64_t v) { KeyCodec<uint64_t>::Encode(out, static_cast<uint64_t>(v) ^ (uint64_t{1} << 63)); }
+void EncodeSigned(StoreBytes& out, int32_t v) { KeyCodec<uint32_t>::Encode(out, static_cast<uint32_t>(v) ^ (uint32_t{1} << 31)); }
+
+/** Highest fee first, then by outpoint: the order bundles take withdrawals in. */
+StoreBytes FeeKey(const Withdrawal& w)
+{
+    StoreBytes key{BY_FEE};
+    KeyCodec<uint64_t>::Encode(key, ~(static_cast<uint64_t>(w.main_fee) ^ (uint64_t{1} << 63)));
+    KeyCodec<COutPoint>::Encode(key, w.outpoint);
+    return key;
+}
+
+/** What a withdrawal pays on the mainchain; within it, the oldest first, then by outpoint. */
+StoreBytes PayoutPrefix(const CScript& script, CAmount amount)
+{
+    StoreBytes key{BY_PAYOUT};
+    uint256 script_hash;
+    CSHA256().Write(script.data(), script.size()).Finalize(script_hash.begin());
+    KeyCodec<uint256>::Encode(key, script_hash);
+    EncodeSigned(key, int64_t{amount});
+    return key;
+}
+StoreBytes PayoutKey(const Withdrawal& w)
+{
+    StoreBytes key{PayoutPrefix(w.main_script, w.amount)};
+    EncodeSigned(key, w.height);
+    KeyCodec<COutPoint>::Encode(key, w.outpoint);
+    return key;
+}
+/** The outpoint at the end of an index key. */
+COutPoint OutpointOf(const StoreBytes& key)
+{
+    std::span<const unsigned char> rest{key};
+    rest = rest.subspan(key.size() - 36);
+    return KeyCodec<COutPoint>::Decode(rest);
+}
+
+std::vector<CTxOut> ReadQueue(const StoreView& view, const Table<uint64_t, CTxOut>& table, const Cell<QueueEnds>& ends)
+{
+    std::vector<CTxOut> out;
+    table.ForEach(view, [&](const uint64_t&, const CTxOut& o) {
+        out.push_back(o);
+        return true;
+    }, ends.Get(view).head);
+    return out;
+}
+
 } // namespace
 
-void State::Remove(const COutPoint& outpoint, StateUndo& undo)
+StoreOverlay& State::Writable() const
 {
-    const auto it{m_withdrawals.find(outpoint)};
-    if (it == m_withdrawals.end()) return;
-    undo.removed.push_back(it->second);
-    m_withdrawals.erase(it);
+    assert(m_overlay);
+    return *m_overlay;
+}
+
+int32_t State::MainHeight() const { return MAIN_HEIGHT.Get(*m_view); }
+int32_t State::MainHeightBefore(const StoreUndo& undo, int32_t after)
+{
+    const StoreBytes key{'h'};
+    for (const auto& [k, value] : undo.entries) {
+        if (k == key) return value ? DecodeValue<int32_t>(*value) : -1;
+    }
+    return after;
+}
+
+int32_t State::LastFailureHeight() const { return LAST_FAILURE.Get(*m_view); }
+std::optional<PendingBundle> State::Bundle() const { return BUNDLE.Get(*m_view).bundle; }
+std::optional<Withdrawal> State::GetWithdrawal(const COutPoint& outpoint) const { return WITHDRAWALS.Get(*m_view, outpoint); }
+std::vector<CTxOut> State::Queue() const { return ReadQueue(*m_view, QUEUE, QUEUE_ENDS); }
+std::vector<CTxOut> State::TxQueue() const { return ReadQueue(*m_view, TX_QUEUE, TX_QUEUE_ENDS); }
+
+void State::ForEachWithdrawal(const std::function<bool(const Withdrawal&)>& fn) const
+{
+    WITHDRAWALS.ForEach(*m_view, [&](const COutPoint&, const Withdrawal& w) { return fn(w); });
+}
+
+void State::SetBundle(const std::optional<PendingBundle>& bundle) { BUNDLE.Put(Writable(), BundleCell{bundle}); }
+
+void State::AddWithdrawal(const Withdrawal& withdrawal)
+{
+    StoreOverlay& out{Writable()};
+    WITHDRAWALS.Put(out, withdrawal.outpoint, withdrawal);
+    out.Put(FeeKey(withdrawal), {});
+    out.Put(PayoutKey(withdrawal), {});
+}
+
+void State::Remove(const COutPoint& outpoint)
+{
+    const auto withdrawal{GetWithdrawal(outpoint)};
+    if (!withdrawal) return;
+    StoreOverlay& out{Writable()};
+    WITHDRAWALS.Erase(out, outpoint);
+    out.Erase(FeeKey(*withdrawal));
+    out.Erase(PayoutKey(*withdrawal));
 }
 
 bool State::InBundle(const COutPoint& withdrawal) const
 {
-    return m_bundle && std::find(m_bundle->withdrawals.begin(), m_bundle->withdrawals.end(), withdrawal) != m_bundle->withdrawals.end();
+    const auto bundle{Bundle()};
+    return bundle && std::find(bundle->withdrawals.begin(), bundle->withdrawals.end(), withdrawal) != bundle->withdrawals.end();
 }
 
 bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int height, const Consensus::SidechainParams& params,
-                            StateUndo& undo, std::vector<CTxOut>& payouts, std::string& reject_reason)
+                            std::vector<CTxOut>& payouts, std::string& reject_reason)
 {
-    if (main_height < m_main_height) {
+    const int32_t from{MainHeight()};
+    if (main_height < from) {
         reject_reason = "bad-sc-main-height";
         return false;
     }
-    for (int h{m_main_height + 1}; h <= main_height; ++h) {
+    for (int h{from + 1}; h <= main_height; ++h) {
         const auto main_block{mainchain.GetBlock(h)};
         if (!main_block) {
             reject_reason = "bad-sc-main-unknown";
@@ -74,15 +207,16 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
         // The bundles of this chain that the block closed.
         std::set<uint256> ours;
         for (const MainBundleEvent& event : main_block->bundles) {
-            if (!m_bundle || event.hash != m_bundle->hash) continue;
+            const auto bundle{Bundle()};
+            if (!bundle || event.hash != bundle->hash) continue;
             ours.insert(event.hash);
             if (event.paid) {
-                for (const COutPoint& outpoint : m_bundle->withdrawals) Remove(outpoint, undo);
+                for (const COutPoint& outpoint : bundle->withdrawals) Remove(outpoint);
             } else {
                 // The withdrawals wait for the next bundle, or for their owners to take them back.
-                m_last_failure_height = height;
+                LAST_FAILURE.Put(Writable(), height);
             }
-            m_bundle.reset();
+            SetBundle(std::nullopt);
         }
         for (const MainDeposit& deposit : main_block->deposits) {
             if (deposit.destination == drivechain::WITHDRAWAL_RETURN_DEST) {
@@ -93,16 +227,15 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
                 // bundle would pay its withdrawals a second time.
                 if (deposit.bundle.IsNull() || ours.contains(deposit.bundle)) continue;
                 for (const CTxOut& paid : deposit.payouts) {
-                    // The oldest by height, then by outpoint, so that every node takes the same one.
-                    auto it{m_withdrawals.end()};
-                    for (auto w{m_withdrawals.begin()}; w != m_withdrawals.end(); ++w) {
-                        if (w->second.main_script != paid.scriptPubKey || w->second.amount != paid.nValue) continue;
-                        if (it == m_withdrawals.end() || w->second.height < it->second.height) it = w;
-                    }
-                    if (it == m_withdrawals.end()) continue;
+                    // The oldest by height, then by outpoint, so that every node takes the same one:
+                    // the first in the index of what withdrawals pay.
+                    const StoreBytes prefix{PayoutPrefix(paid.scriptPubKey, paid.nValue)};
+                    const auto first{m_view->Next(prefix, prefix)};
+                    if (!first) continue;
+                    const COutPoint outpoint{OutpointOf(first->first)};
                     // A bundle of ours that pays it can no longer be paid as it is.
-                    if (InBundle(it->first)) m_bundle.reset();
-                    Remove(it->first, undo);
+                    if (InBundle(outpoint)) SetBundle(std::nullopt);
+                    Remove(outpoint);
                 }
                 continue;
             }
@@ -114,56 +247,66 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
             payouts.emplace_back(deposit.amount, DepositScript(deposit.destination, params.slot));
         }
     }
-    m_main_height = main_height;
+    MAIN_HEIGHT.Put(Writable(), main_height);
     return true;
 }
 
 bool State::MainPending(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const
 {
-    return height >= params.single_bundle_height && mainchain.BundlePending(m_main_height);
+    return height >= params.single_bundle_height && mainchain.BundlePending(MainHeight());
 }
 
 bool State::MainPendingNext(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const
 {
     // A record not filled in yet may miss proposals: as if one were pending.
     return height >= params.single_bundle_height &&
-           (mainchain.NeedsBackfill() || mainchain.BundlePending(m_main_height) || mainchain.BundlePending(mainchain.Height()));
+           (mainchain.NeedsBackfill() || mainchain.BundlePending(MainHeight()) || mainchain.BundlePending(mainchain.Height()));
 }
 
 std::optional<CMutableTransaction> State::NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals, bool main_pending) const
 {
-    if (m_bundle || m_withdrawals.empty() || main_pending) return std::nullopt;
-    if (m_last_failure_height >= 0 && height - m_last_failure_height < params.bundle_retry_delay) return std::nullopt;
+    if (Bundle() || main_pending) return std::nullopt;
+    const int32_t last_failure{LastFailureHeight()};
+    if (last_failure >= 0 && height - last_failure < params.bundle_retry_delay) return std::nullopt;
 
-    // Those that offer mainchain miners the most go first; the rest wait for the next bundle.
-    std::vector<const Withdrawal*> chosen;
-    chosen.reserve(m_withdrawals.size());
-    for (const auto& [outpoint, withdrawal] : m_withdrawals) chosen.push_back(&withdrawal);
-    std::sort(chosen.begin(), chosen.end(), [](const Withdrawal* a, const Withdrawal* b) {
-        if (a->main_fee != b->main_fee) return a->main_fee > b->main_fee;
-        return a->outpoint < b->outpoint;
-    });
-    if (chosen.size() > params.max_bundle_withdrawals) chosen.resize(params.max_bundle_withdrawals);
+    // Those that offer mainchain miners the most go first; the rest wait for the next bundle. The
+    // fee index has them in that order (then by outpoint): its first entries are the bundle.
+    std::vector<Withdrawal> chosen;
+    const StoreBytes prefix{BY_FEE};
+    StoreBytes at{prefix};
+    while (chosen.size() < params.max_bundle_withdrawals) {
+        const auto entry{m_view->Next(at, prefix)};
+        if (!entry) break;
+        chosen.push_back(*Assert(GetWithdrawal(OutpointOf(entry->first))));
+        at = entry->first;
+        at.push_back(0);
+    }
+    if (chosen.empty()) return std::nullopt;
     if (withdrawals) {
         withdrawals->clear();
-        for (const Withdrawal* withdrawal : chosen) withdrawals->push_back(withdrawal->outpoint);
+        for (const Withdrawal& withdrawal : chosen) withdrawals->push_back(withdrawal.outpoint);
     }
-    return BuildBundle(chosen, height, prev);
+    std::vector<const Withdrawal*> pointers;
+    for (const Withdrawal& withdrawal : chosen) pointers.push_back(&withdrawal);
+    return BuildBundle(pointers, height, prev);
 }
 
 std::optional<CMutableTransaction> State::BundleTx() const
 {
-    if (!m_bundle) return std::nullopt;
-    std::vector<const Withdrawal*> withdrawals;
-    for (const COutPoint& outpoint : m_bundle->withdrawals) {
-        const auto it{m_withdrawals.find(outpoint)};
-        if (it == m_withdrawals.end()) return std::nullopt;
-        withdrawals.push_back(&it->second);
+    const auto bundle{Bundle()};
+    if (!bundle) return std::nullopt;
+    std::vector<Withdrawal> withdrawals;
+    for (const COutPoint& outpoint : bundle->withdrawals) {
+        auto withdrawal{GetWithdrawal(outpoint)};
+        if (!withdrawal) return std::nullopt;
+        withdrawals.push_back(std::move(*withdrawal));
     }
-    return BuildBundle(withdrawals, m_bundle->height, m_bundle->nonce);
+    std::vector<const Withdrawal*> pointers;
+    for (const Withdrawal& withdrawal : withdrawals) pointers.push_back(&withdrawal);
+    return BuildBundle(pointers, bundle->height, bundle->nonce);
 }
 
-bool State::StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, StateUndo& undo, std::string& reject_reason, bool main_pending)
+bool State::StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, std::string& reject_reason, bool main_pending)
 {
     std::vector<COutPoint> withdrawals;
     const auto bundle{NextBundle(height, prev, params, &withdrawals, main_pending)};
@@ -175,14 +318,14 @@ bool State::StartBundle(const uint256& hash, int height, const uint256& prev, co
         reject_reason = "bad-sc-bundle-hash";
         return false;
     }
-    m_bundle = PendingBundle{hash, std::move(withdrawals), height, prev};
+    SetBundle(PendingBundle{hash, std::move(withdrawals), height, prev});
     return true;
 }
 
 bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason, bool main_pending) const
 {
-    const auto it{m_withdrawals.find(request.withdrawal)};
-    if (it == m_withdrawals.end()) {
+    const auto withdrawal{GetWithdrawal(request.withdrawal)};
+    if (!withdrawal) {
         reject_reason = "bad-sc-refund-unknown";
         return false;
     }
@@ -198,33 +341,34 @@ bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason
     }
     CPubKey pubkey;
     if (!pubkey.RecoverCompact(MessageHash(RefundMessage(request.withdrawal)), request.signature) || !pubkey.IsCompressed() ||
-        pubkey.GetID() != CKeyID{it->second.refund_keyhash}) {
+        pubkey.GetID() != CKeyID{withdrawal->refund_keyhash}) {
         reject_reason = "bad-sc-refund-signature";
         return false;
     }
     return true;
 }
 
-bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
+bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
                     std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending)
 {
-    // All or nothing: a transaction that breaks a rule leaves the state as it was, so that block
-    // assembly can leave it out and go on, rather than start over.
-    const size_t added{undo.added.size()}, removed{undo.removed.size()}, paid{payouts.size()};
-    if (ApplyTxSteps(tx, height, params, undo, payouts, reject_reason, main_pending)) return true;
-    for (size_t i{added}; i < undo.added.size(); ++i) m_withdrawals.erase(undo.added[i]);
-    for (size_t i{removed}; i < undo.removed.size(); ++i) m_withdrawals.emplace(undo.removed[i].outpoint, undo.removed[i]);
-    undo.added.resize(added);
-    undo.removed.resize(removed);
-    payouts.resize(paid);
-    return false;
+    // All or nothing: on an overlay of its own, kept only if the transaction keeps the rules, so that
+    // block assembly can leave a transaction out and go on, rather than start over.
+    StoreOverlay tx_overlay{Writable(), /*journal=*/false};
+    const size_t paid{payouts.size()};
+    State tx_state{tx_overlay};
+    if (!tx_state.ApplyTxSteps(tx, height, params, payouts, reject_reason, main_pending)) {
+        payouts.resize(paid);
+        return false;
+    }
+    tx_overlay.MergeInto(Writable());
+    return true;
 }
 
-bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
+bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
                          std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending)
 {
-    // The chain's own rules go last, once nothing else can fail: they cannot be taken back here,
-    // and fail only before they change anything. What they pay still comes first, as it always has.
+    // The shielded pool goes last, once nothing else can fail; what it pays (nothing, so far)
+    // would still come first.
     std::vector<CTxOut> refunds;
     for (uint32_t n{0}; n < tx.vout.size(); ++n) {
         const CTxOut& out{tx.vout[n]};
@@ -240,29 +384,24 @@ bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::Si
             }
             withdrawal->outpoint = COutPoint{tx.GetHash(), n};
             withdrawal->height = height;
-            undo.added.push_back(withdrawal->outpoint);
-            m_withdrawals.emplace(withdrawal->outpoint, std::move(*withdrawal));
+            AddWithdrawal(*withdrawal);
         } else if (const auto refund{ParseRefundScript(out.scriptPubKey)}) {
             if (!CheckRefund(*refund, reject_reason, main_pending)) return false;
-            const Withdrawal& withdrawal{m_withdrawals.at(refund->withdrawal)};
+            const Withdrawal withdrawal{*Assert(GetWithdrawal(refund->withdrawal))};
             refunds.emplace_back(withdrawal.Burned(), GetScriptForDestination(WitnessV0KeyHash{withdrawal.refund_keyhash}));
-            Remove(refund->withdrawal, undo);
+            Remove(refund->withdrawal);
         }
     }
-    // The shielded pool: a transaction that breaks its rules is invalid, and changes nothing.
-    if (!m_shielded.ApplyTx(tx, undo.shielded, reject_reason)) return false;
+    // The shielded pool: a transaction that breaks its rules is invalid.
+    zside::ShieldedState shielded{Writable()};
+    if (!shielded.ApplyTx(tx, reject_reason)) return false;
     payouts.insert(payouts.end(), refunds.begin(), refunds.end());
     return true;
 }
 
 bool State::ConnectBlock(const CBlock& block, int height, const Consensus::SidechainParams& params, const Mainchain& mainchain,
-                         StateUndo& undo, CAmount& minted, std::string& reject_reason)
+                         CAmount& minted, std::string& reject_reason)
 {
-    undo = StateUndo{};
-    undo.main_height = m_main_height;
-    undo.bundle = m_bundle;
-    undo.last_failure_height = m_last_failure_height;
-
     // The block follows the mainchain up to the block before the one that committed to it.
     const auto bmm_height{mainchain.BmmHeight(block.GetHash())};
     if (!bmm_height) {
@@ -270,7 +409,7 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
         return false;
     }
     std::vector<CTxOut> payouts, tx_payouts;
-    if (!ApplyMainEvents(*bmm_height - 1, mainchain, height, params, undo, payouts, reject_reason)) return false;
+    if (!ApplyMainEvents(*bmm_height - 1, mainchain, height, params, payouts, reject_reason)) return false;
     const bool main_pending{MainPending(mainchain, height, params)};
 
     // A new bundle takes the withdrawals that were waiting before this block.
@@ -290,7 +429,7 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
             reject_reason = "bad-sc-bundle-closed";
             return false;
         }
-        if (!StartBundle(*commitment, height, block.hashPrevBlock, params, undo, reject_reason, main_pending)) return false;
+        if (!StartBundle(*commitment, height, block.hashPrevBlock, params, reject_reason, main_pending)) return false;
     }
 
     // The coinbase has no part in the shielded pool (its transactions are checked one by one below).
@@ -299,14 +438,14 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
         return false;
     }
     for (size_t i{1}; i < block.vtx.size(); ++i) {
-        if (!ApplyTx(*block.vtx[i], height, params, undo, tx_payouts, reject_reason, main_pending)) return false;
+        if (!ApplyTx(*block.vtx[i], height, params, tx_payouts, reject_reason, main_pending)) return false;
     }
 
     // The root the block leaves the shielded tree with is an anchor for the next blocks.
-    m_shielded.EndBlock(undo.shielded);
+    zside::ShieldedState{Writable()}.EndBlock();
 
     // The coinbase pays the deposits and the refunds, right after its first output, as many as a block can.
-    payouts = TakePayouts(std::move(payouts), std::move(tx_payouts), undo);
+    payouts = TakePayouts(std::move(payouts), std::move(tx_payouts));
     const std::vector<CTxOut>& coinbase{block.vtx[0]->vout};
     if (coinbase.size() < 1 + payouts.size()) {
         reject_reason = "bad-sc-payouts-missing";
@@ -327,42 +466,34 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
     return true;
 }
 
-std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, StateUndo& undo)
+std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx)
 {
-    undo.queued = owed.size();
-    undo.queued_tx = owed_tx.size();
-    m_queue.insert(m_queue.end(), std::make_move_iterator(owed.begin()), std::make_move_iterator(owed.end()));
-    m_queue_tx.insert(m_queue_tx.end(), std::make_move_iterator(owed_tx.begin()), std::make_move_iterator(owed_tx.end()));
-    const size_t count{std::min(m_queue.size(), MAX_PAYOUTS_PER_BLOCK)};
-    const size_t count_tx{std::min(m_queue_tx.size(), MAX_PAYOUTS_PER_BLOCK - count)};
-    undo.paid.assign(m_queue.begin(), m_queue.begin() + count);
-    undo.paid_tx.assign(m_queue_tx.begin(), m_queue_tx.begin() + count_tx);
-    m_queue.erase(m_queue.begin(), m_queue.begin() + count);
-    m_queue_tx.erase(m_queue_tx.begin(), m_queue_tx.begin() + count_tx);
-    std::vector<CTxOut> paid{undo.paid};
-    paid.insert(paid.end(), undo.paid_tx.begin(), undo.paid_tx.end());
+    StoreOverlay& out{Writable()};
+    // Each queue: what is owed goes at its end; what is paid comes from its front.
+    const auto push{[&](const Table<uint64_t, CTxOut>& table, const Cell<QueueEnds>& cell, const std::vector<CTxOut>& owed_now) {
+        QueueEnds ends{cell.Get(*m_view)};
+        for (const CTxOut& o : owed_now) table.Put(out, ends.tail++, o);
+        cell.Put(out, ends);
+        return ends.tail - ends.head;
+    }};
+    const auto take{[&](const Table<uint64_t, CTxOut>& table, const Cell<QueueEnds>& cell, uint64_t count, std::vector<CTxOut>& paid) {
+        QueueEnds ends{cell.Get(*m_view)};
+        for (uint64_t i{0}; i < count; ++i) {
+            paid.push_back(*Assert(table.Get(*m_view, ends.head)));
+            table.Erase(out, ends.head++);
+        }
+        // An empty queue starts again at 0, so that a state never holds a count that only grows.
+        if (ends.head == ends.tail) ends = QueueEnds{};
+        cell.Put(out, ends);
+    }};
+    const uint64_t queued{push(QUEUE, QUEUE_ENDS, owed)};
+    const uint64_t queued_tx{push(TX_QUEUE, TX_QUEUE_ENDS, owed_tx)};
+    const uint64_t count{std::min<uint64_t>(queued, MAX_PAYOUTS_PER_BLOCK)};
+    const uint64_t count_tx{std::min<uint64_t>(queued_tx, MAX_PAYOUTS_PER_BLOCK - count)};
+    std::vector<CTxOut> paid;
+    take(QUEUE, QUEUE_ENDS, count, paid);
+    take(TX_QUEUE, TX_QUEUE_ENDS, count_tx, paid);
     return paid;
-}
-
-void State::DisconnectBlock(const StateUndo& undo)
-{
-    // The queue was what it was before the block, with what the block owed at its end, less what
-    // the block paid from its front: put the paid ones back in front, and drop the block's own.
-    std::vector<CTxOut> queue{undo.paid};
-    queue.insert(queue.end(), m_queue.begin(), m_queue.end());
-    queue.resize(queue.size() - undo.queued);
-    m_queue = std::move(queue);
-    std::vector<CTxOut> queue_tx{undo.paid_tx};
-    queue_tx.insert(queue_tx.end(), m_queue_tx.begin(), m_queue_tx.end());
-    queue_tx.resize(queue_tx.size() - undo.queued_tx);
-    m_queue_tx = std::move(queue_tx);
-    // A withdrawal that the block both added and removed ends up removed.
-    for (const Withdrawal& withdrawal : undo.removed) m_withdrawals.emplace(withdrawal.outpoint, withdrawal);
-    for (const COutPoint& outpoint : undo.added) m_withdrawals.erase(outpoint);
-    m_main_height = undo.main_height;
-    m_bundle = undo.bundle;
-    m_last_failure_height = undo.last_failure_height;
-    m_shielded.Revert(undo.shielded);
 }
 
 } // namespace sidechain

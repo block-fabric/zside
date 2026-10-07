@@ -14,7 +14,12 @@ namespace drivechain {
 namespace {
 
 constexpr uint8_t DB_BLOCK{'U'};
-constexpr uint8_t DB_STATE{'S'};
+//! The sidechain database, without the sidechain state (now in its store): a node with the
+//! earlier format, under 'S', rebuilds the state from its blocks.
+constexpr uint8_t DB_STATE_OLD{'S'};
+constexpr uint8_t DB_STATE{'s'};
+//! The entries of the store of the sidechain state: 'T', the chainstate's name, 0, then the key.
+constexpr uint8_t DB_SIDE_STORE{'T'};
 constexpr uint8_t DB_DEPOSIT{'D'};
 
 /** Key of an escrow change; big endian so that the database orders the changes of a sidechain by position in the chain. */
@@ -88,10 +93,31 @@ bool Database::EraseBlockDeposits(const uint256& block_hash)
     return true;
 }
 
-bool Database::WriteState(const std::string& chainstate, const SidechainDB& scdb)
+bool Database::WriteState(const std::string& chainstate, const SidechainDB& scdb, const sidechain::DbStore* side_db,
+                          const std::map<sidechain::StoreBytes, std::optional<sidechain::StoreBytes>>* side_changes)
 {
-    m_db.Write(std::make_pair(DB_STATE, chainstate), scdb, /*fSync=*/true);
+    CDBBatch batch{m_db};
+    batch.Write(std::make_pair(DB_STATE, chainstate), scdb);
+    if (side_db && side_changes) side_db->Write(batch, *side_changes);
+    m_db.WriteBatch(batch, /*fSync=*/true);
     return true;
+}
+
+void Database::WipeState(const std::string& chainstate, const sidechain::DbStore& side_db)
+{
+    CDBBatch batch{m_db};
+    batch.Erase(std::make_pair(DB_STATE, chainstate));
+    batch.Erase(std::make_pair(DB_STATE_OLD, chainstate));
+    side_db.Wipe(batch);
+    m_db.WriteBatch(batch, /*fSync=*/true);
+}
+
+std::unique_ptr<sidechain::DbStore> Database::SideStore(const std::string& chainstate)
+{
+    sidechain::StoreBytes prefix{DB_SIDE_STORE};
+    prefix.insert(prefix.end(), chainstate.begin(), chainstate.end());
+    prefix.push_back(0);
+    return std::make_unique<sidechain::DbStore>(m_db, std::move(prefix));
 }
 
 bool Database::ReadState(const std::string& chainstate, SidechainDB& scdb) const

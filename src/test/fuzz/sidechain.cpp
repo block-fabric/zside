@@ -82,7 +82,9 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
     sidechain::MainBlock genesis;
     genesis.hash = uint256{1};
     assert(mainchain.Append(genesis));
-    sidechain::State state;
+    // The state on a store: the chainstate's overlay, and one per block over it.
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay cache{empty, /*journal=*/false};
     std::vector<COutPoint> made;
     std::vector<uint256> proposed_hashes;
     uint32_t counter{0};
@@ -97,10 +99,11 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
             main.proposed.push_back(hash);
             proposed_hashes.push_back(hash);
         }
+        const sidechain::State tip_state{cache};
         if (!proposed_hashes.empty() && fdp.ConsumeBool()) {
             main.bundles.push_back({proposed_hashes[fdp.ConsumeIntegralInRange<size_t>(0, proposed_hashes.size() - 1)], fdp.ConsumeBool()});
         }
-        if (state.Bundle() && fdp.ConsumeBool()) main.bundles.push_back({state.Bundle()->hash, fdp.ConsumeBool()});
+        if (const auto bundle{tip_state.Bundle()}; bundle && fdp.ConsumeBool()) main.bundles.push_back({bundle->hash, fdp.ConsumeBool()});
         if (fdp.ConsumeBool()) {
             sidechain::MainDeposit change;
             change.destination = drivechain::WITHDRAWAL_RETURN_DEST;
@@ -110,21 +113,16 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
         }
         assert(mainchain.Append(main));
 
-        const sidechain::State before{state};
-        sidechain::StateUndo undo;
-        undo.main_height = state.MainHeight();
-        undo.bundle = state.Bundle();
-        undo.last_failure_height = state.LastFailureHeight();
+        const uint256 before{sidechain::StoreHash(cache)};
+        sidechain::StoreOverlay block{cache, /*journal=*/true};
+        sidechain::State state{block};
         std::vector<CTxOut> payouts, tx_payouts;
         std::string reason;
-        if (!state.ApplyMainEvents(mainchain.Height(), mainchain, height, params, undo, payouts, reason)) {
-            state = before;
-            continue;
-        }
+        if (!state.ApplyMainEvents(mainchain.Height(), mainchain, height, params, payouts, reason)) continue;
         const bool main_pending{state.MainPending(mainchain, height, params)};
         if (main_pending) assert(!state.NextBundle(height, uint256{static_cast<uint8_t>(height)}, params, nullptr, main_pending));
         if (const auto bundle{state.NextBundle(height, uint256{static_cast<uint8_t>(height)}, params, nullptr, main_pending)}; bundle && fdp.ConsumeBool()) {
-            assert(state.StartBundle(bundle->GetHash().ToUint256(), height, uint256{static_cast<uint8_t>(height)}, params, undo, reason, main_pending));
+            assert(state.StartBundle(bundle->GetHash().ToUint256(), height, uint256{static_cast<uint8_t>(height)}, params, reason, main_pending));
         }
         // Withdrawals and refunds.
         CMutableTransaction tx;
@@ -145,27 +143,37 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
                                      sidechain::WithdrawalScript(fdp.ConsumeIntegralInRange<CAmount>(0, COIN / 10), keyhash, pay));
             }
         }
-        if (!state.ApplyTx(CTransaction{tx}, height, params, undo, tx_payouts, reason, main_pending)) {
-            state = before;
+        // A transaction that breaks a rule changes nothing.
+        const uint256 before_tx{state.Hash()};
+        if (!state.ApplyTx(CTransaction{tx}, height, params, tx_payouts, reason, main_pending)) {
+            assert(state.Hash() == before_tx);
             continue;
         }
         for (uint32_t n{0}; n < tx.vout.size(); ++n) {
-            if (state.Withdrawals().contains(COutPoint{tx.GetHash(), n})) made.emplace_back(tx.GetHash(), n);
+            if (state.GetWithdrawal(COutPoint{tx.GetHash(), n})) made.emplace_back(tx.GetHash(), n);
         }
-        (void)state.TakePayouts(payouts, tx_payouts, undo);
+        (void)state.TakePayouts(payouts, tx_payouts);
+        const sidechain::StoreUndo undo{block.TakeUndo()};
+        block.MergeInto(cache);
 
         // Undone, the state is what it was, through serialization of the undo data too.
         DataStream stream{};
         stream << undo;
-        sidechain::StateUndo undo_read;
+        sidechain::StoreUndo undo_read;
         stream >> undo_read;
-        sidechain::State reverted{state};
-        reverted.DisconnectBlock(undo_read);
-        assert(reverted == before);
-        DataStream state_stream{};
-        state_stream << state;
-        sidechain::State state_read;
-        state_stream >> state_read;
-        assert(state_read == state);
+        {
+            sidechain::StoreOverlay reverted{cache, /*journal=*/false};
+            reverted.Revert(undo_read);
+            assert(sidechain::StoreHash(reverted) == before);
+        }
+        // The indexes agree with the withdrawals: the next bundle is the highest fees, then outpoints.
+        const sidechain::State after{cache};
+        std::vector<sidechain::Withdrawal> all;
+        after.ForEachWithdrawal([&](const sidechain::Withdrawal& w) { all.push_back(w); return true; });
+        std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.main_fee != b.main_fee ? a.main_fee > b.main_fee : a.outpoint < b.outpoint; });
+        std::vector<COutPoint> next;
+        if (!after.Bundle() && after.NextBundle(height + params.bundle_retry_delay + 1, uint256{}, params, &next)) {
+            for (size_t i{0}; i < next.size(); ++i) assert(next[i] == all[i].outpoint);
+        }
     }
 }

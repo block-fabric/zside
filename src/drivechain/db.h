@@ -8,9 +8,12 @@
 #include <dbwrapper.h>
 #include <drivechain/scdb.h>
 #include <drivechain/sidechain.h>
+#include <sidechain/store.h>
 #include <uint256.h>
 
 #include <cstdint>
+#include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -37,9 +40,17 @@ public:
     /** Remove the escrow changes of a block that is no longer in the active chain from the index. */
     bool EraseBlockDeposits(const uint256& block_hash);
 
-    /** Store the sidechain database of the chainstate named `chainstate`. */
-    bool WriteState(const std::string& chainstate, const SidechainDB& scdb);
+    /**
+     * Store the sidechain database of the chainstate named `chainstate`, and with it, in the same
+     * batch, the changes to the state of this chain as a sidechain (`side`, if given).
+     */
+    bool WriteState(const std::string& chainstate, const SidechainDB& scdb, const sidechain::DbStore* side_db = nullptr,
+                    const std::map<sidechain::StoreBytes, std::optional<sidechain::StoreBytes>>* side_changes = nullptr);
     bool ReadState(const std::string& chainstate, SidechainDB& scdb) const;
+    /** Erase the stored sidechain state, and any state of the format before it (to rebuild from blocks). */
+    void WipeState(const std::string& chainstate, const sidechain::DbStore& side_db);
+    /** Where the state of this chain as a sidechain, of the chainstate named `chainstate`, is stored. */
+    std::unique_ptr<sidechain::DbStore> SideStore(const std::string& chainstate);
 
     /**
      * Escrow changes of a sidechain in chain order.

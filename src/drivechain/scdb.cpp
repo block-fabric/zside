@@ -237,16 +237,15 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
     undo = BlockUndo{};
     undo.prev_block_hash = m_block_hash;
     undo.last_votes = m_last_votes;
-    undo.side.main_height = m_side.MainHeight();
-    undo.side.bundle = m_side.Bundle();
-    undo.side.last_failure_height = m_side.LastFailureHeight();
 
     if (side) {
         if (block.vtx.empty() || !block.vtx[0]->IsCoinBase()) {
             reject_reason = "bad-dc-no-coinbase";
             return false;
         }
-        if (!m_side.ConnectBlock(block, height, side->params, side->mainchain, undo.side, side->minted, reject_reason)) return false;
+        sidechain::State state{side->store};
+        if (!state.ConnectBlock(block, height, side->params, side->mainchain, side->minted, reject_reason)) return false;
+        undo.side = side->store.TakeUndo();
     }
 
     if (block.vtx.empty() || !block.vtx[0]->IsCoinBase()) return invalid("bad-dc-no-coinbase");
@@ -520,7 +519,7 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
 
 void SidechainDB::DisconnectBlock(const BlockUndo& undo)
 {
-    m_side.DisconnectBlock(undo.side);
+    // The sidechain state is reverted by whoever holds its store, with undo.side.
     for (const BlockUndo::SlotUndo& saved : undo.slots) {
         if (saved.existed) {
             m_slots[saved.id] = saved.slot;

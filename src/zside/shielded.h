@@ -9,6 +9,7 @@
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <serialize.h>
+#include <sidechain/store.h>
 #include <uint256.h>
 #include <zside/marker.h>
 
@@ -116,74 +117,42 @@ uint256 EmptyRoot(unsigned level);
 /** The parent of two nodes at `level`. */
 uint256 Combine(unsigned level, const uint256& left, const uint256& right);
 
-/** What a block changed in the ShieldedState, to revert it. */
-struct ShieldedUndo {
-    std::optional<Frontier> tree;
-    std::vector<uint256> nullifiers;
-    std::optional<uint256> root;
-    std::optional<CAmount> pool;
-
-    bool empty() const { return !tree && nullifiers.empty() && !root && !pool; }
-    template <typename Stream>
-    void Serialize(Stream& s) const
-    {
-        s << tree.has_value();
-        if (tree) s << *tree;
-        s << nullifiers << root.has_value();
-        if (root) s << *root;
-        s << pool.has_value();
-        if (pool) s << *pool;
-    }
-    template <typename Stream>
-    void Unserialize(Stream& s)
-    {
-        bool has;
-        s >> has;
-        tree.reset();
-        if (has) s >> tree.emplace();
-        s >> nullifiers >> has;
-        root.reset();
-        if (has) s >> root.emplace();
-        s >> has;
-        pool.reset();
-        if (has) s >> pool.emplace();
-    }
-};
-
-/** The shielded pool, as the chain leaves it. */
+/**
+ * The shielded pool, as the chain leaves it, on the store of the sidechain state (sidechain/store.h):
+ * the nullifiers of spent notes and the anchors one entry each, so that neither is ever read, copied
+ * or written whole. Tables: 0x10 nullifiers, 0x11 anchors (roots the tree had at the end of a
+ * block); single values: 0x12 the tree's frontier, 0x13 what the pool holds, 0x14 and 0x15 how many
+ * nullifiers and anchors there are. The empty tree's root is an anchor from the start without an entry.
+ */
 class ShieldedState
 {
 public:
-    ShieldedState();
+    /** Read only. */
+    explicit ShieldedState(const sidechain::StoreView& view) : m_view{&view}, m_overlay{nullptr} {}
+    /** Read and write. */
+    explicit ShieldedState(sidechain::StoreOverlay& overlay) : m_view{&overlay}, m_overlay{&overlay} {}
 
     /** Check a transaction against the pool, and apply it. A transaction that fails changes nothing. */
-    [[nodiscard]] bool ApplyTx(const CTransaction& tx, ShieldedUndo& undo, std::string& reject_reason);
+    [[nodiscard]] bool ApplyTx(const CTransaction& tx, std::string& reject_reason);
     /** Whether ApplyTx would accept the transaction now. */
     [[nodiscard]] bool CheckTx(const CTransaction& tx, std::string& reject_reason) const;
     /** End a block: its final root becomes an anchor later bundles may use. */
-    void EndBlock(ShieldedUndo& undo);
-    void Revert(const ShieldedUndo& undo);
+    void EndBlock();
 
-    const Frontier& Tree() const { return m_tree; }
-    bool IsSpent(const uint256& nullifier) const { return m_nullifiers.contains(nullifier); }
-    bool IsAnchor(const uint256& root) const { return m_roots.contains(root); }
-    /** How many roots are anchors: fewer than before means blocks were undone. */
-    size_t AnchorCount() const { return m_roots.size(); }
+    Frontier Tree() const;
+    bool IsSpent(const uint256& nullifier) const;
+    bool IsAnchor(const uint256& root) const;
+    /** How many roots are anchors, the empty tree's included. */
+    uint64_t AnchorCount() const;
     /** What the pool holds. */
-    CAmount Pool() const { return m_pool; }
-    size_t NullifierCount() const { return m_nullifiers.size(); }
-
-    SERIALIZE_METHODS(ShieldedState, obj) { READWRITE(obj.m_tree, obj.m_nullifiers, obj.m_roots, obj.m_pool); }
-    friend bool operator==(const ShieldedState&, const ShieldedState&) = default;
+    CAmount Pool() const;
+    uint64_t NullifierCount() const;
 
 private:
     [[nodiscard]] bool Check(const CTransaction& tx, const Bundle& bundle, std::string& reject_reason) const;
 
-    Frontier m_tree;
-    std::set<uint256> m_nullifiers;
-    //! Roots of the tree at the end of every block: what anchors may be.
-    std::set<uint256> m_roots;
-    CAmount m_pool{0};
+    const sidechain::StoreView* m_view;
+    sidechain::StoreOverlay* m_overlay;
 };
 
 } // namespace zside

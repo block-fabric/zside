@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <addresstype.h>
+#include <cctype>
 #include <chain.h>
 #include <common/args.h>
 #include <common/settings.h>
@@ -75,7 +76,7 @@ RPCMethod getmainchaininfo()
     result.pushKV("node", strprintf("%s:%u", follower.Client().GetOptions().host, follower.Client().GetOptions().port));
     result.pushKV("height", chainman.m_mainchain->Height());
     if (chainman.m_mainchain->Height() >= 0) result.pushKV("bestblockhash", chainman.m_mainchain->TipHash().GetHex());
-    result.pushKV("tipheight", WITH_LOCK(::cs_main, return chainman.ActiveChainstate().m_scdb.m_side.MainHeight()));
+    result.pushKV("tipheight", WITH_LOCK(::cs_main, return chainman.ActiveChainstate().SideState().MainHeight()));
     return result;
 },
     };
@@ -316,9 +317,12 @@ RPCMethod listwithdrawals()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     LOCK(::cs_main);
-    const sidechain::State& side{chainman.ActiveChainstate().m_scdb.m_side};
+    const sidechain::State side{chainman.ActiveChainstate().SideState()};
     UniValue result(UniValue::VARR);
-    for (const auto& [outpoint, withdrawal] : side.Withdrawals()) result.push_back(WithdrawalToJSON(withdrawal, side));
+    side.ForEachWithdrawal([&](const sidechain::Withdrawal& withdrawal) {
+        result.push_back(WithdrawalToJSON(withdrawal, side));
+        return true;
+    });
     return result;
 },
     };
@@ -348,15 +352,15 @@ RPCMethod getwithdrawalbundle()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     LOCK(::cs_main);
-    const sidechain::State& side{chainman.ActiveChainstate().m_scdb.m_side};
+    const sidechain::State side{chainman.ActiveChainstate().SideState()};
     UniValue result(UniValue::VOBJ);
     std::optional<CMutableTransaction> tx;
     std::vector<COutPoint> withdrawals;
-    if (side.Bundle()) {
+    if (const auto pending{side.Bundle()}) {
         result.pushKV("status", "pending");
         tx = side.BundleTx();
-        withdrawals = side.Bundle()->withdrawals;
-        result.pushKV("height", side.Bundle()->height);
+        withdrawals = pending->withdrawals;
+        result.pushKV("height", pending->height);
     } else if ((tx = side.NextBundle(chainman.ActiveHeight() + 1, chainman.ActiveChain().Tip()->GetBlockHash(), chainman.GetConsensus().sidechain, &withdrawals,
                                      side.MainPendingNext(*Assert(chainman.m_mainchain), chainman.ActiveHeight() + 1, chainman.GetConsensus().sidechain)))) {
         result.pushKV("status", "next");
@@ -366,8 +370,9 @@ RPCMethod getwithdrawalbundle()
     if (tx) {
         CAmount amount{0}, fee{0};
         for (const COutPoint& outpoint : withdrawals) {
-            amount += side.Withdrawals().at(outpoint).amount;
-            fee += side.Withdrawals().at(outpoint).main_fee;
+            const sidechain::Withdrawal withdrawal{*Assert(side.GetWithdrawal(outpoint))};
+            amount += withdrawal.amount;
+            fee += withdrawal.main_fee;
         }
         result.pushKV("hash", tx->GetHash().GetHex());
         result.pushKV("withdrawals", withdrawals.size());
@@ -377,7 +382,12 @@ RPCMethod getwithdrawalbundle()
         blind << TX_NO_WITNESS(CTransaction{*tx});
         result.pushKV("hex", HexStr(blind));
     }
-    result.pushKV("waiting", side.Withdrawals().size() - withdrawals.size());
+    size_t total{0};
+    side.ForEachWithdrawal([&](const sidechain::Withdrawal&) {
+        ++total;
+        return true;
+    });
+    result.pushKV("waiting", total - withdrawals.size());
     if (side.LastFailureHeight() >= 0) result.pushKV("lastfailureheight", side.LastFailureHeight());
     return result;
 },
@@ -385,6 +395,51 @@ RPCMethod getwithdrawalbundle()
 }
 
 } // namespace
+
+RPCMethod getsidechainstate()
+{
+    return RPCMethod{
+        "getsidechainstate",
+        "Returns a hash of the whole state of this chain as a sidechain, as of the chain tip (withdrawals, the pending\n"
+        "bundle, the payouts owed, and whatever this sidechain keeps: names, assets, markets, notes...), and how many\n"
+        "entries each table has. Nodes with the same chain have the same hash.",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR_HEX, "bestblock", "The block the state is as of"},
+            {RPCResult::Type::NUM, "height", "Its height"},
+            {RPCResult::Type::STR_HEX, "hash", "The hash of every entry of the state, in key order"},
+            {RPCResult::Type::NUM, "entries", "The number of entries"},
+            {RPCResult::Type::OBJ_DYN, "tables", "Entries per table, by the table's key byte", {{RPCResult::Type::NUM, "byte", "The number of entries"}}},
+        }},
+        RPCExamples{HelpExampleCli("getsidechainstate", "")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+    LOCK(::cs_main);
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    const sidechain::StoreView& view{chainstate.SideCache()};
+    std::map<unsigned char, uint64_t> tables;
+    uint64_t entries{0};
+    view.ForEach({}, [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
+        ++tables[key.empty() ? 0 : key[0]];
+        ++entries;
+        return true;
+    });
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("bestblock", chainstate.m_chain.Tip()->GetBlockHash().GetHex());
+    result.pushKV("height", chainstate.m_chain.Height());
+    result.pushKV("hash", sidechain::StoreHash(view).GetHex());
+    result.pushKV("entries", entries);
+    UniValue by_table(UniValue::VOBJ);
+    for (const auto& [table, count] : tables) {
+        by_table.pushKV(std::isprint(table) ? std::string(1, static_cast<char>(table)) : strprintf("0x%02x", table), count);
+    }
+    result.pushKV("tables", std::move(by_table));
+    return result;
+},
+    };
+}
 
 void RegisterSidechainRPCCommands(CRPCTable& t)
 {
@@ -397,6 +452,7 @@ void RegisterSidechainRPCCommands(CRPCTable& t)
         {"sidechain", &getbmminfo},
         {"sidechain", &listwithdrawals},
         {"sidechain", &getwithdrawalbundle},
+        {"sidechain", &getsidechainstate},
     };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);

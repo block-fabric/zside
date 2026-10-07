@@ -11,10 +11,12 @@
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <serialize.h>
-#include <uint256.h>
+#include <sidechain/store.h>
 #include <zside/shielded.h>
+#include <uint256.h>
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -106,61 +108,38 @@ struct RefundRequest {
     std::vector<unsigned char> signature;
 };
 
-/** What a block changed in the State, in the form needed to revert it. */
-struct StateUndo {
-    int32_t main_height{-1};
-    std::optional<PendingBundle> bundle;
-    int32_t last_failure_height{-1};
-    //! Withdrawals the block added.
-    std::vector<COutPoint> added;
-    //! Withdrawals the block removed, by paying or refunding them.
-    std::vector<Withdrawal> removed;
-    //! Payouts the block took from the front of each queue, and how many it added at their ends.
-    std::vector<CTxOut> paid;
-    uint64_t queued{0};
-    std::vector<CTxOut> paid_tx;
-    uint64_t queued_tx{0};
-    //! What the block changed in the shielded pool.
-    zside::ShieldedUndo shielded;
-
-    template <typename Stream>
-    void Serialize(Stream& s) const
-    {
-        s << main_height << bundle.has_value();
-        if (bundle) s << *bundle;
-        s << last_failure_height << added << removed << paid << queued << paid_tx << queued_tx << shielded;
-    }
-    template <typename Stream>
-    void Unserialize(Stream& s)
-    {
-        bool has_bundle;
-        s >> main_height >> has_bundle;
-        bundle.reset();
-        if (has_bundle) s >> bundle.emplace();
-        s >> last_failure_height >> added >> removed >> paid >> queued >> paid_tx >> queued_tx >> shielded;
-    }
-};
-
 class Mainchain;
 
-/** The sidechain state implied by a chain of blocks and the record of the mainchain. */
+/**
+ * The sidechain state implied by a chain of blocks and the record of the mainchain, read from a
+ * store (sidechain/store.h) and, when given an overlay, written to it. It holds nothing itself:
+ * a State is a way to look at a store, as cheap to make as a pointer.
+ *
+ * Tables (the first byte of the keys): 'w' withdrawals by outpoint; 'f' the same by fee (highest
+ * first), 'p' by what they pay (oldest first): indexes, so that no rule reads every withdrawal;
+ * 'q' and 'r' the payout queues, by position; single values under 'h', 'b', 'x', 'Q', 'R' (heights,
+ * the pending bundle, where each queue starts and ends). Sidechains add tables of their own, under
+ * other bytes (see SIDECHAIN_TABLES).
+ */
 class State
 {
 public:
+    /** Read only. */
+    explicit State(const StoreView& view) : m_view{&view}, m_overlay{nullptr} {}
+    /** Read and write. */
+    explicit State(StoreOverlay& overlay) : m_view{&overlay}, m_overlay{&overlay} {}
+
     /**
      * Check `block`, to be connected at `height` on top of the block this
      * state belongs to, against the sidechain rules, and update the state.
+     * What it changes, the overlay's journal notes: the undo data of the block.
      *
-     * @param[out] undo           what is needed to revert the update
      * @param[out] minted         the coins the coinbase has to create on top of the fees: deposits and refunds
      * @param[out] reject_reason  set when the block is invalid
-     * @return false if the block is invalid, in which case the state is left
-     *         partially updated and must be discarded.
+     * @return false if the block is invalid, in which case the overlay holds a partial update and must be dropped.
      */
     [[nodiscard]] bool ConnectBlock(const CBlock& block, int height, const Consensus::SidechainParams& params, const Mainchain& mainchain,
-                                    StateUndo& undo, CAmount& minted, std::string& reject_reason);
-    /** Revert the update of the block that produced `undo`. */
-    void DisconnectBlock(const StateUndo& undo);
+                                    CAmount& minted, std::string& reject_reason);
 
     //
     // The steps of ConnectBlock, in the order it takes them. Block assembly
@@ -173,14 +152,14 @@ public:
      * @param[in,out] payouts  outputs the coinbase must have, in order, after its first output
      */
     [[nodiscard]] bool ApplyMainEvents(int main_height, const Mainchain& mainchain, int height, const Consensus::SidechainParams& params,
-                                       StateUndo& undo, std::vector<CTxOut>& payouts, std::string& reject_reason);
+                                       std::vector<CTxOut>& payouts, std::string& reject_reason);
     /**
      * The bundle a block at `height`, on top of the block `prev`, may commit to: empty if no bundle can be made now.
      * @param[in] main_pending  whether a bundle of this sidechain is pending on the mainchain (MainPending)
      */
     std::optional<CMutableTransaction> NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals = nullptr, bool main_pending = false) const;
     /** Make the bundle with the hash `hash` the pending one. */
-    [[nodiscard]] bool StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, StateUndo& undo, std::string& reject_reason, bool main_pending = false);
+    [[nodiscard]] bool StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, std::string& reject_reason, bool main_pending = false);
     /**
      * Whether a block at `height`, with this state, has to wait for a bundle of this sidechain that is
      * pending on the mainchain (SidechainParams::single_bundle_height): as the mainchain was after
@@ -199,62 +178,55 @@ public:
      * (`owed_tx`: refunds and the like), so that transactions, however many,
      * cannot hold deposits back. The rest is queued for the next blocks.
      */
-    std::vector<CTxOut> TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, StateUndo& undo);
+    std::vector<CTxOut> TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx);
     /** Payouts owed and not paid yet, oldest first: from the mainchain, and from transactions. */
-    const std::vector<CTxOut>& Queue() const { return m_queue; }
-    const std::vector<CTxOut>& TxQueue() const { return m_queue_tx; }
-    /** Take in the withdrawals and the refund requests of a transaction that is not a coinbase. */
-    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
+    std::vector<CTxOut> Queue() const;
+    std::vector<CTxOut> TxQueue() const;
+    /**
+     * Take in the withdrawals and the refund requests of a transaction that is not a coinbase.
+     * All or nothing: a transaction that breaks a rule changes nothing.
+     */
+    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
                                std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending = false);
 
     /** Whether a refund request could be mined now. @param[in] main_pending  see MainPending */
     [[nodiscard]] bool CheckRefund(const RefundRequest& request, std::string& reject_reason, bool main_pending = false) const;
 
     /** Height of the last mainchain block this state has acted on. */
-    int32_t MainHeight() const { return m_main_height; }
-    const std::map<COutPoint, Withdrawal>& Withdrawals() const { return m_withdrawals; }
-    const std::optional<PendingBundle>& Bundle() const { return m_bundle; }
+    int32_t MainHeight() const;
+    /** That height before a block, from its undo data and the height after it. */
+    static int32_t MainHeightBefore(const StoreUndo& undo, int32_t after);
+    std::optional<Withdrawal> GetWithdrawal(const COutPoint& outpoint) const;
+    /** The withdrawals not paid yet, by outpoint, until `fn` returns false. */
+    void ForEachWithdrawal(const std::function<bool(const Withdrawal&)>& fn) const;
+    std::optional<PendingBundle> Bundle() const;
     /** The transaction of the pending bundle, as the mainchain wants to receive it. */
     std::optional<CMutableTransaction> BundleTx() const;
     bool InBundle(const COutPoint& withdrawal) const;
-    int32_t LastFailureHeight() const { return m_last_failure_height; }
-    /** The shielded pool. */
-    const zside::ShieldedState& Shielded() const { return m_shielded; }
+    int32_t LastFailureHeight() const;
 
-    template <typename Stream>
-    void Serialize(Stream& s) const
-    {
-        s << m_main_height << m_withdrawals << m_bundle.has_value();
-        if (m_bundle) s << *m_bundle;
-        s << m_last_failure_height << m_queue << m_queue_tx << m_shielded;
-    }
-    template <typename Stream>
-    void Unserialize(Stream& s)
-    {
-        bool has_bundle;
-        s >> m_main_height >> m_withdrawals >> has_bundle;
-        m_bundle.reset();
-        if (has_bundle) s >> m_bundle.emplace();
-        s >> m_last_failure_height >> m_queue >> m_queue_tx >> m_shielded;
-    }
-    friend bool operator==(const State&, const State&) = default;
+    /** The shielded pool, read only. */
+    zside::ShieldedState Shielded() const { return zside::ShieldedState{*m_view}; }
 
-private:
-    void Remove(const COutPoint& withdrawal, StateUndo& undo);
-    /** ApplyTx, which undoes what this did if it returns false. */
-    [[nodiscard]] bool ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
+    /** A hash of the whole state: the same on every node with the same chain. */
+    uint256 Hash() const { return StoreHash(*m_view); }
+
+    const StoreView& View() const { return *m_view; }
+
+protected:
+    /** The overlay to write to; a State made read only has none. */
+    StoreOverlay& Writable() const;
+    /** ApplyTx, on an overlay of its own. */
+    [[nodiscard]] bool ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
                                     std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending);
 
-    int32_t m_main_height{-1};
-    //! Withdrawals that the mainchain has not paid yet: those waiting for a bundle and those in the pending bundle.
-    std::map<COutPoint, Withdrawal> m_withdrawals;
-    std::optional<PendingBundle> m_bundle;
-    //! Height of the block that learned that a bundle failed, -1 if none did.
-    int32_t m_last_failure_height{-1};
-    //! Payouts owed beyond what earlier blocks could pay, oldest first: from the mainchain, and from transactions.
-    std::vector<CTxOut> m_queue;
-    std::vector<CTxOut> m_queue_tx;
-    zside::ShieldedState m_shielded;
+private:
+    void AddWithdrawal(const Withdrawal& withdrawal);
+    void Remove(const COutPoint& withdrawal);
+    void SetBundle(const std::optional<PendingBundle>& bundle);
+
+    const StoreView* m_view;
+    StoreOverlay* m_overlay;
 };
 
 //

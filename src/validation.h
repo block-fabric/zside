@@ -13,6 +13,8 @@
 #include <coins.h>
 #include <consensus/amount.h>
 #include <drivechain/miner.h>
+#include <sidechain/state.h>
+#include <sidechain/store.h>
 #include <drivechain/scdb.h>
 #include <sidechain/mainchain.h>
 #include <cuckoocache.h>
@@ -792,16 +794,32 @@ public:
     // DisconnectBlock leaves it alone if scdb is null. ConnectBlock always
     // checks the drivechain rules; if scdb is null it does so against a
     // temporary copy of m_scdb.
+    //
+    // The state of this chain as a sidechain is in its store: `side_store` is the overlay the
+    // block's changes go to (ConnectBlock, when it succeeds and is not only checking) or are
+    // undone in (DisconnectBlock). If null, ConnectBlock checks against the chainstate's store
+    // and keeps nothing, and DisconnectBlock leaves the store alone.
     DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view,
-                                     drivechain::SidechainDB* scdb = nullptr)
+                                     drivechain::SidechainDB* scdb = nullptr, sidechain::StoreOverlay* side_store = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                       CCoinsViewCache& view, bool fJustCheck = false,
-                      drivechain::SidechainDB* scdb = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+                      drivechain::SidechainDB* scdb = nullptr, sidechain::StoreOverlay* side_store = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     //! The sidechain database as of the chain tip. Its block hash is null
     //! until the first block is connected on top of it.
     drivechain::SidechainDB m_scdb GUARDED_BY(::cs_main);
+
+    /**
+     * The state of this chain as a sidechain, as of the chain tip: its entries in the drivechain
+     * database and, over them, those changed since the last flush (sidechain/store.h). Set up by
+     * LoadDrivechainState.
+     */
+    sidechain::StoreOverlay& SideCache() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** The sidechain state as of the chain tip, read only. */
+    sidechain::State SideState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return sidechain::State{SideCache()}; }
+    /** Write the sidechain database and the store's changes, in one batch. */
+    void WriteDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
      * Bring m_scdb in line with the chain tip after startup, starting from the
@@ -809,6 +827,10 @@ public:
      * disk for the difference.
      */
     bool LoadDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+private:
+    std::unique_ptr<sidechain::DbStore> m_side_db GUARDED_BY(::cs_main);
+    std::unique_ptr<sidechain::StoreOverlay> m_side_cache GUARDED_BY(::cs_main);
+public:
 
     /** Name under which the sidechain database of this chainstate is stored. */
     std::string DrivechainStateName() const;
@@ -1076,7 +1098,7 @@ public:
      */
     void AddBmmWaiting(const CBlockHeader& header, int64_t peer) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** What the sidechain rules need to check a block; empty if this chain is not a sidechain. */
-    std::optional<drivechain::SideContext> SideContext(CAmount& minted) const;
+    std::optional<drivechain::SideContext> SideContext(CAmount& minted, sidechain::StoreOverlay& store) const;
 
     using Options = kernel::ChainstateManagerOpts;
 

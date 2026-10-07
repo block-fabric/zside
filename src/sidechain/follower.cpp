@@ -383,7 +383,7 @@ void Follower::CheckActiveChain()
         // -- are found from the tip down, as far as such a reorg could reach; the lowest block whose
         // commitment moved is checked again, with all above it.
         if (!lowest) {
-            int main_height{chainman.ActiveChainstate().m_scdb.m_side.MainHeight()};
+            int main_height{chainman.ActiveChainstate().SideState().MainHeight()};
             for (CBlockIndex* pindex{chainman.ActiveChain().Tip()}; pindex && pindex->nHeight > 0; pindex = pindex->pprev) {
                 const auto bmm_height{record.CommittedHeight(pindex->GetBlockHash())};
                 if (!bmm_height) break;
@@ -392,7 +392,7 @@ void Follower::CheckActiveChain()
                 // What the mainchain had done before this block is what it had done after its parent.
                 drivechain::BlockUndo undo;
                 if (!chainman.m_blockman.m_drivechain_db->ReadBlockUndo(pindex->GetBlockHash(), undo)) break;
-                main_height = undo.side.main_height;
+                main_height = State::MainHeightBefore(undo.side, main_height);
             }
         }
     }
@@ -439,9 +439,9 @@ void Follower::SendBundle()
     uint256 hash;
     {
         LOCK(::cs_main);
-        const State& side{chainman.ActiveChainstate().m_scdb.m_side};
-        if (side.Bundle()) {
-            hash = side.Bundle()->hash;
+        const State side{chainman.ActiveChainstate().SideState()};
+        if (const auto pending{side.Bundle()}) {
+            hash = pending->hash;
             tx = side.BundleTx();
         }
     }

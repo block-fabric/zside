@@ -246,6 +246,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   sidechain/mainchain.cpp
   sidechain/mainclient.cpp
   sidechain/state.cpp
+  sidechain/store.cpp
   drivechain/miner.cpp
   node/blockstorage.cpp
   node/caches.cpp

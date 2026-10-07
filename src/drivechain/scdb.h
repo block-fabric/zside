@@ -47,8 +47,9 @@ struct BlockUndo {
     //! The votes of the previous block, which this block replaced.
     std::map<SidechainId, Vote> last_votes;
 
-    //! What the block changed in the state of this chain as a sidechain.
-    sidechain::StateUndo side;
+    //! What the block changed in the state of this chain as a sidechain: the earlier value of
+    //! every entry of the store it changed (sidechain/store.h).
+    sidechain::StoreUndo side;
 
     SERIALIZE_METHODS(BlockUndo, obj) { READWRITE(obj.prev_block_hash, obj.slots, obj.proposals_added, obj.acked, obj.removed, obj.closed, obj.last_votes, obj.side); }
 };
@@ -59,6 +60,9 @@ struct SideContext {
     const sidechain::Mainchain& mainchain;
     //! Set to the coins the coinbase has to create on top of the fees.
     CAmount& minted;
+    //! Where the sidechain state is read and written: an overlay that journals, whose journal
+    //! becomes BlockUndo::side.
+    sidechain::StoreOverlay& store;
 };
 
 /**
@@ -160,13 +164,10 @@ public:
     /** Hash committing to the entire state. */
     uint256 GetHash() const;
 
-    /**
-     * The state of this chain as a sidechain of another. It lives here so that
-     * it is stored, copied and reverted together with the rest.
-     */
-    sidechain::State m_side;
+    // The state of this chain as a sidechain of another is not here: it is in its store
+    // (sidechain/store.h), one entry per key, of which ConnectBlock is given an overlay.
 
-    SERIALIZE_METHODS(SidechainDB, obj) { READWRITE(obj.m_block_hash, obj.m_slots, obj.m_proposals, obj.m_closed, obj.m_last_votes, obj.m_side); }
+    SERIALIZE_METHODS(SidechainDB, obj) { READWRITE(obj.m_block_hash, obj.m_slots, obj.m_proposals, obj.m_closed, obj.m_last_votes); }
 
     friend bool operator==(const SidechainDB&, const SidechainDB&) = default;
 

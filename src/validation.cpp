@@ -99,6 +99,8 @@ using node::SnapshotMetadata;
  *  network over time settles into a few cohorts of synchronized writers.
 */
 static constexpr auto DATABASE_WRITE_INTERVAL_MIN{50min};
+//! Changes of the sidechain state held in memory before they are written out with the coins.
+static constexpr size_t SIDE_CACHE_MAX_BYTES{64 << 20};
 static constexpr auto DATABASE_WRITE_INTERVAL_MAX{70min};
 /** Maximum age of our tip for us to be considered current for fee estimation */
 static constexpr std::chrono::hours MAX_FEE_ESTIMATION_TIP_AGE{3};
@@ -793,7 +795,7 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
 
     // On a sidechain: withdrawals have to be well formed, and a refund request has to be one that the next block can honour.
     if (const Consensus::SidechainParams& side_params{m_active_chainstate.m_chainman.GetConsensus().sidechain}; side_params.enabled) {
-        const sidechain::State& side{m_active_chainstate.m_scdb.m_side};
+        const sidechain::State side{m_active_chainstate.SideState()};
         for (const CTxOut& out : tx.vout) {
             if (sidechain::IsWithdrawalScript(out.scriptPubKey)) {
                 const auto withdrawal{sidechain::ParseWithdrawalOutput(out)};
@@ -1956,10 +1958,10 @@ PackageMempoolAcceptResult ProcessNewPackage(Chainstate& active_chainstate, CTxM
     return result;
 }
 
-std::optional<drivechain::SideContext> ChainstateManager::SideContext(CAmount& minted) const
+std::optional<drivechain::SideContext> ChainstateManager::SideContext(CAmount& minted, sidechain::StoreOverlay& store) const
 {
     if (!GetConsensus().sidechain.enabled) return std::nullopt;
-    return drivechain::SideContext{GetConsensus().sidechain, *Assert(m_mainchain), minted};
+    return drivechain::SideContext{GetConsensus().sidechain, *Assert(m_mainchain), minted, store};
 }
 
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
@@ -2310,7 +2312,7 @@ int ApplyTxInUndo(Coin&& undo, CCoinsViewCache& view, const COutPoint& out)
 /** Undo the effects of this block (with given index) on the UTXO set represented by coins.
  *  When FAILED is returned, view is left in an indeterminate state. */
 DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view,
-                                             drivechain::SidechainDB* scdb)
+                                             drivechain::SidechainDB* scdb, sidechain::StoreOverlay* side_store)
 {
     AssertLockHeld(::cs_main);
     bool fClean = true;
@@ -2383,6 +2385,8 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
             return DISCONNECT_FAILED;
         }
         scdb->DisconnectBlock(scdb_undo);
+        // The sidechain state: the earlier values of what the block changed.
+        if (side_store) side_store->Revert(scdb_undo.side);
     }
 
     // move best block pointer to prevout block
@@ -2437,7 +2441,7 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
  *  can fail if those validity checks fail (among other reasons). */
 bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
-                               CCoinsViewCache& view, bool fJustCheck, drivechain::SidechainDB* scdb)
+                               CCoinsViewCache& view, bool fJustCheck, drivechain::SidechainDB* scdb, sidechain::StoreOverlay* side_store)
 {
     AssertLockHeld(cs_main);
     assert(pindex);
@@ -2782,6 +2786,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             db->SetBlockHash(hash);
         }
     } scdb_rollback;
+    // The block's changes to the state of this chain as a sidechain: an overlay of their own over
+    // where the caller keeps them (or the chainstate's store, only to check against). It notes the
+    // earlier value of what it changes: the undo data. Merged at the end if all went well; dropped
+    // otherwise, which takes them back.
+    sidechain::StoreOverlay& side_base{side_store ? *side_store : SideCache()};
+    sidechain::StoreOverlay block_store{side_base, /*journal=*/true};
     if (state.IsValid()) {
         const uint256 scdb_hash{scdb->GetBlockHash()};
         // A sidechain database that has not seen a block yet is empty and fits any block.
@@ -2799,7 +2809,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         std::optional<drivechain::SidechainDB> scdb_check;
         if (scdb != &scdb_copy && params.DefaultConsistencyChecks()) scdb_check.emplace(*scdb);
         std::string reject_reason;
-        const auto side{m_chainman.SideContext(minted)};
+        const auto side{m_chainman.SideContext(minted, block_store)};
         if (scdb != &scdb_copy) {
             // Field by field: assigning a temporary would run its destructor, which rolls back.
             scdb_rollback.undo = &scdb_undo;
@@ -2810,12 +2820,14 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
         } else if (scdb_check) {
             CAmount check_minted{0};
-            const auto check_side{m_chainman.SideContext(check_minted)};
+            sidechain::StoreOverlay check_store{side_base, /*journal=*/true};
+            const auto check_side{m_chainman.SideContext(check_minted, check_store)};
             drivechain::BlockUndo check_undo;
             std::vector<drivechain::Deposit> check_deposits;
             std::string check_reason;
             assert(scdb_check->ConnectBlock(block, pindex->nHeight, params.GetConsensus().drivechain, check_undo, &check_deposits, check_reason, check_side ? &*check_side : nullptr));
             assert(*scdb_check == *scdb && check_minted == minted);
+            assert(check_store.Changes() == block_store.Changes() && check_undo.side == scdb_undo.side);
         }
     }
 
@@ -2881,6 +2893,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         Ticks<std::chrono::nanoseconds>(time_5 - time_start)
     );
 
+    if (side_store) block_store.MergeInto(*side_store);
     scdb_rollback.db = nullptr;
     return true;
 }
@@ -2976,6 +2989,8 @@ bool Chainstate::FlushStateToDisk(
         bool fCacheLarge = mode == FlushStateMode::PERIODIC && cache_state >= CoinsCacheSizeState::LARGE;
         // The cache is over the limit, we have to write now.
         bool fCacheCritical = mode == FlushStateMode::IF_NEEDED && cache_state >= CoinsCacheSizeState::CRITICAL;
+        // So is the sidechain state's, whose changes are written with the coins.
+        if (m_side_cache && m_side_cache->Bytes() > SIDE_CACHE_MAX_BYTES && mode != FlushStateMode::NONE) fCacheCritical = true;
         // It's been a while since we wrote the block index and chain state to disk. Do this frequently, so we don't need to redownload or reindex after a crash.
         bool fPeriodicWrite = mode == FlushStateMode::PERIODIC && nNow >= m_next_write;
         const auto empty_cache{(mode == FlushStateMode::FORCE_FLUSH) || fCacheLarge || fCacheCritical};
@@ -3027,7 +3042,7 @@ bool Chainstate::FlushStateToDisk(
                 empty_cache ? CoinsTip().Flush() : CoinsTip().Sync();
                 // Keep a snapshot of the sidechain database that matches the coins on disk.
                 if (m_scdb.GetBlockHash() == CoinsTip().GetBestBlock()) {
-                    m_blockman.m_drivechain_db->WriteState(DrivechainStateName(), m_scdb);
+                    WriteDrivechainState();
                 }
                 m_last_flushed_block = m_blockman.LookupBlockIndex(CoinsTip().GetBestBlock());
                 full_flush_completed = true;
@@ -3174,12 +3189,15 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         CCoinsViewCache view(&CoinsTip());
         assert(view.GetBestBlock() == pindexDelete->GetBlockHash());
         drivechain::SidechainDB scdb{m_scdb};
-        if (DisconnectBlock(block, pindexDelete, view, &scdb) != DISCONNECT_OK) {
+        // The sidechain state is undone in an overlay of its own, merged once all went well.
+        sidechain::StoreOverlay side_store{SideCache(), /*journal=*/false};
+        if (DisconnectBlock(block, pindexDelete, view, &scdb, &side_store) != DISCONNECT_OK) {
             LogError("DisconnectTip(): DisconnectBlock %s failed\n", pindexDelete->GetBlockHash().ToString());
             return false;
         }
         view.Flush(/*reallocate_cache=*/false); // local CCoinsViewCache goes out of scope
         m_scdb = std::move(scdb);
+        side_store.MergeInto(SideCache());
         m_blockman.m_drivechain_db->EraseBlockDeposits(pindexDelete->GetBlockHash());
     }
     LogDebug(BCLog::BENCH, "- Disconnect block: %.2fms\n",
@@ -3268,7 +3286,7 @@ bool Chainstate::ConnectTip(
         // is kept only to check that (regtest).
         std::optional<drivechain::SidechainDB> scdb_before;
         if (m_chainman.GetParams().DefaultConsistencyChecks()) scdb_before.emplace(m_scdb);
-        bool rv = ConnectBlock(*block_to_connect, state, pindexNew, view, /*fJustCheck=*/false, &m_scdb);
+        bool rv = ConnectBlock(*block_to_connect, state, pindexNew, view, /*fJustCheck=*/false, &m_scdb, &SideCache());
         if (!rv && scdb_before) assert(m_scdb == *scdb_before);
         if (m_chainman.m_options.signals) {
             m_chainman.m_options.signals->BlockChecked(block_to_connect, state);
@@ -4954,9 +4972,10 @@ void Chainstate::RemoveStaleDrivechainTxs()
     // On a sidechain: a withdrawal that was paid, refunded or put in a bundle can no longer be taken back.
     if (m_chainman.GetConsensus().sidechain.enabled) {
         // Nor while a bundle of this sidechain is pending on the mainchain.
-        const bool main_pending{m_scdb.m_side.MainPendingNext(*Assert(m_chainman.m_mainchain), tip->nHeight + 1, m_chainman.GetConsensus().sidechain)};
+        const sidechain::State side{SideState()};
+        const bool main_pending{side.MainPendingNext(*Assert(m_chainman.m_mainchain), tip->nHeight + 1, m_chainman.GetConsensus().sidechain)};
         for (const auto& [withdrawal, txid] : m_mempool->m_refunds) {
-            if (m_scdb.m_side.Withdrawals().contains(withdrawal) && !m_scdb.m_side.InBundle(withdrawal) && !main_pending) continue;
+            if (side.GetWithdrawal(withdrawal) && !side.InBundle(withdrawal) && !main_pending) continue;
             if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
         }
         // Shielded transactions whose notes another spent in a block (they reveal a nullifier the chain
@@ -4964,7 +4983,7 @@ void Chainstate::RemoveStaleDrivechainTxs()
         // could be built.
         std::set<Txid> shielded, checked;
         for (const auto& [nf, txid] : m_mempool->m_shielded_nullifiers) {
-            if (m_scdb.m_side.Shielded().IsSpent(nf) && shielded.insert(txid).second) {
+            if (SideState().Shielded().IsSpent(nf) && shielded.insert(txid).second) {
                 if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
             }
         }
@@ -4978,7 +4997,7 @@ void Chainstate::RemoveStaleDrivechainTxs()
             if (!tx) continue;
             std::string error;
             const auto bundle{zside::Bundle::FromTx(*tx, error)};
-            if (bundle && !m_scdb.m_side.Shielded().IsAnchor(bundle->Anchor()) && shielded.insert(txid).second) stale.push_back(tx);
+            if (bundle && !SideState().Shielded().IsAnchor(bundle->Anchor()) && shielded.insert(txid).second) stale.push_back(tx);
         }
     }
 
@@ -5019,6 +5038,24 @@ std::string Chainstate::DrivechainStateName() const
     return m_from_snapshot_blockhash ? m_from_snapshot_blockhash->ToString() : std::string{};
 }
 
+sidechain::StoreOverlay& Chainstate::SideCache()
+{
+    AssertLockHeld(::cs_main);
+    if (!m_side_cache) {
+        m_side_db = m_blockman.m_drivechain_db->SideStore(DrivechainStateName());
+        m_side_cache = std::make_unique<sidechain::StoreOverlay>(*m_side_db);
+    }
+    return *m_side_cache;
+}
+
+void Chainstate::WriteDrivechainState()
+{
+    AssertLockHeld(::cs_main);
+    sidechain::StoreOverlay& cache{SideCache()};
+    m_blockman.m_drivechain_db->WriteState(DrivechainStateName(), m_scdb, m_side_db.get(), &cache.Changes());
+    cache.Clear();
+}
+
 bool Chainstate::LoadDrivechainState()
 {
     AssertLockHeld(::cs_main);
@@ -5026,6 +5063,7 @@ bool Chainstate::LoadDrivechainState()
     if (!tip) return true;
 
     drivechain::Database& db{*m_blockman.m_drivechain_db};
+    sidechain::StoreOverlay& cache{SideCache()};
     drivechain::SidechainDB scdb;
     if (db.ReadState(DrivechainStateName(), scdb) && scdb.GetBlockHash() == tip->GetBlockHash()) {
         m_scdb = std::move(scdb);
@@ -5036,6 +5074,8 @@ bool Chainstate::LoadDrivechainState()
         // A chainstate created from a UTXO snapshot does not have the blocks
         // the sidechain database would have to be derived from.
         LogWarning("No sidechain database for the chainstate loaded from a UTXO snapshot; starting with an empty one.");
+        db.WipeState(DrivechainStateName(), *m_side_db);
+        cache.Clear();
         m_scdb = drivechain::SidechainDB{};
         m_scdb.SetBlockHash(tip->GetBlockHash());
         return true;
@@ -5043,7 +5083,11 @@ bool Chainstate::LoadDrivechainState()
 
     const CBlockIndex* pindex{scdb.GetBlockHash().IsNull() ? nullptr : m_blockman.LookupBlockIndex(scdb.GetBlockHash())};
     if (!pindex) {
-        // No usable snapshot: derive everything from the blocks.
+        // No usable snapshot -- none yet, or one of the format before the sidechain state had a
+        // store of its own: derive everything from the blocks, the store emptied first.
+        LogInfo("Deriving the sidechain database from the blocks");
+        db.WipeState(DrivechainStateName(), *m_side_db);
+        cache.Clear();
         scdb = drivechain::SidechainDB{};
         pindex = m_chain.Genesis();
         scdb.SetBlockHash(pindex->GetBlockHash());
@@ -5058,6 +5102,7 @@ bool Chainstate::LoadDrivechainState()
             return false;
         }
         scdb.DisconnectBlock(undo);
+        cache.Revert(undo.side);
         db.EraseBlockDeposits(pindex->GetBlockHash());
         pindex = pindex->pprev;
     }
@@ -5075,17 +5120,25 @@ bool Chainstate::LoadDrivechainState()
         std::vector<drivechain::Deposit> deposits;
         std::string reject_reason;
         CAmount minted{0};
-        const auto side{m_chainman.SideContext(minted)};
+        sidechain::StoreOverlay block_store{cache, /*journal=*/true};
+        const auto side{m_chainman.SideContext(minted, block_store)};
         if (!scdb.ConnectBlock(block, height, params, undo, &deposits, reject_reason, side ? &*side : nullptr)) {
             LogError("%s: block %s breaks the drivechain rules (%s)", __func__, next->GetBlockHash().ToString(), reject_reason);
             return false;
         }
         db.WriteBlock(next->GetBlockHash(), height, undo, deposits);
+        block_store.MergeInto(cache);
+        // What the store holds in memory stays small: written out as it goes, with the database
+        // it matches.
+        if (height % 1000 == 0) {
+            m_scdb = scdb;
+            WriteDrivechainState();
+        }
         if (m_chainman.m_interrupt) return false;
     }
 
     m_scdb = std::move(scdb);
-    db.WriteState(DrivechainStateName(), m_scdb);
+    WriteDrivechainState();
     return true;
 }
 
@@ -5109,6 +5162,8 @@ VerifyDBResult CVerifyDB::VerifyDB(
     LogInfo("Verifying last %i blocks at level %i", nCheckDepth, nCheckLevel);
     CCoinsViewCache coins(&coinsview);
     drivechain::SidechainDB scdb{chainstate.m_scdb};
+    // Blocks are undone and done again on an overlay of the sidechain state, dropped after.
+    sidechain::StoreOverlay side_store{chainstate.SideCache(), /*journal=*/false};
     CBlockIndex* pindex;
     CBlockIndex* pindexFailure = nullptr;
     int nGoodTransactions = 0;
@@ -5166,7 +5221,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
         if (nCheckLevel >= 3) {
             if (curr_coins_usage <= chainstate.m_coinstip_cache_size_bytes) {
                 assert(coins.GetBestBlock() == pindex->GetBlockHash());
-                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, &scdb);
+                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, &scdb, &side_store);
                 if (res == DISCONNECT_FAILED) {
                     LogError("Verification error: irrecoverable inconsistency in block data at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
                     return VerifyDBResult::CORRUPTED_BLOCK_DB;
@@ -5210,7 +5265,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
                 LogError("Verification error: ReadBlock failed at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
                 return VerifyDBResult::CORRUPTED_BLOCK_DB;
             }
-            if (!chainstate.ConnectBlock(block, state, pindex, coins, /*fJustCheck=*/false, &scdb)) {
+            if (!chainstate.ConnectBlock(block, state, pindex, coins, /*fJustCheck=*/false, &scdb, &side_store)) {
                 LogError("Verification error: found unconnectable block at %d, hash=%s (%s)", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
                 return VerifyDBResult::CORRUPTED_BLOCK_DB;
             }

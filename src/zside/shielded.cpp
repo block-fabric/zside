@@ -4,6 +4,8 @@
 
 #include <zside/shielded.h>
 
+#include <util/check.h>
+
 #include <crypto/common.h>
 #include <hash.h>
 #include <sync.h>
@@ -262,11 +264,27 @@ uint256 Frontier::Root() const
 // The state.
 //
 
-ShieldedState::ShieldedState()
+namespace {
+const sidechain::Table<uint256, bool> NULLIFIERS{0x10};
+const sidechain::Table<uint256, bool> ANCHORS{0x11};
+const sidechain::Cell<Frontier> TREE{0x12, Frontier{}};
+const sidechain::Cell<CAmount> POOL{0x13, 0};
+const sidechain::Cell<uint64_t> NULLIFIER_COUNT{0x14, 0};
+const sidechain::Cell<uint64_t> ANCHOR_COUNT{0x15, 0};
+
+const uint256& EmptyTreeRoot()
 {
-    // The empty tree is an anchor from the start (a bundle that spends nothing names it).
-    m_roots.insert(m_tree.Root());
+    static const uint256 root{Frontier{}.Root()};
+    return root;
 }
+} // namespace
+
+Frontier ShieldedState::Tree() const { return TREE.Get(*m_view); }
+bool ShieldedState::IsSpent(const uint256& nullifier) const { return NULLIFIERS.Contains(*m_view, nullifier); }
+bool ShieldedState::IsAnchor(const uint256& root) const { return root == EmptyTreeRoot() || ANCHORS.Contains(*m_view, root); }
+uint64_t ShieldedState::AnchorCount() const { return 1 + ANCHOR_COUNT.Get(*m_view); }
+CAmount ShieldedState::Pool() const { return POOL.Get(*m_view); }
+uint64_t ShieldedState::NullifierCount() const { return NULLIFIER_COUNT.Get(*m_view); }
 
 bool ShieldedState::Check(const CTransaction& tx, const Bundle& bundle, std::string& reject_reason) const
 {
@@ -274,14 +292,14 @@ bool ShieldedState::Check(const CTransaction& tx, const Bundle& bundle, std::str
         reject_reason = reason;
         return false;
     }};
-    if (!m_roots.contains(bundle.Anchor())) return invalid("bad-zs-anchor");
+    if (!IsAnchor(bundle.Anchor())) return invalid("bad-zs-anchor");
     std::set<uint256> seen;
     for (const uint256& nf : bundle.Nullifiers()) {
-        if (m_nullifiers.contains(nf) || !seen.insert(nf).second) return invalid("bad-zs-double-spend");
+        if (IsSpent(nf) || !seen.insert(nf).second) return invalid("bad-zs-double-spend");
     }
-    if (m_tree.Size() + bundle.NumActions() > (uint64_t{1} << TREE_DEPTH)) return invalid("bad-zs-tree-full");
+    if (Tree().Size() + bundle.NumActions() > (uint64_t{1} << TREE_DEPTH)) return invalid("bad-zs-tree-full");
     // The pool never holds less than nothing: a flaw in the proofs could not take out more than went in.
-    if (m_pool - bundle.ValueBalance() < 0) return invalid("bad-zs-pool-negative");
+    if (Pool() - bundle.ValueBalance() < 0) return invalid("bad-zs-pool-negative");
     return true;
 }
 
@@ -294,37 +312,35 @@ bool ShieldedState::CheckTx(const CTransaction& tx, std::string& reject_reason) 
     return CheckShieldedTx(tx, reject_reason);
 }
 
-bool ShieldedState::ApplyTx(const CTransaction& tx, ShieldedUndo& undo, std::string& reject_reason)
+bool ShieldedState::ApplyTx(const CTransaction& tx, std::string& reject_reason)
 {
     if (!CheckShieldedTx(tx, reject_reason)) return false;
     std::string error;
     const auto bundle{Bundle::FromTx(tx, error)};
     if (!bundle) return true;
     if (!Check(tx, *bundle, reject_reason)) return false;
-    if (!undo.tree) undo.tree = m_tree;
-    if (!undo.pool) undo.pool = m_pool;
+    sidechain::StoreOverlay& out{*Assert(m_overlay)};
+    uint64_t spent{NullifierCount()};
     for (const uint256& nf : bundle->Nullifiers()) {
-        m_nullifiers.insert(nf);
-        undo.nullifiers.push_back(nf);
+        NULLIFIERS.Put(out, nf, true);
+        ++spent;
     }
-    for (const uint256& cmx : bundle->Commitments()) m_tree.Append(cmx);
-    m_pool -= bundle->ValueBalance();
+    NULLIFIER_COUNT.Put(out, spent);
+    Frontier tree{Tree()};
+    for (const uint256& cmx : bundle->Commitments()) tree.Append(cmx);
+    TREE.Put(out, tree);
+    POOL.Put(out, Pool() - bundle->ValueBalance());
     return true;
 }
 
-void ShieldedState::EndBlock(ShieldedUndo& undo)
+void ShieldedState::EndBlock()
 {
-    if (!undo.tree) return;
-    const uint256 root{m_tree.Root()};
-    if (m_roots.insert(root).second) undo.root = root;
-}
-
-void ShieldedState::Revert(const ShieldedUndo& undo)
-{
-    if (undo.root) m_roots.erase(*undo.root);
-    for (const uint256& nf : undo.nullifiers) m_nullifiers.erase(nf);
-    if (undo.tree) m_tree = *undo.tree;
-    if (undo.pool) m_pool = *undo.pool;
+    // A root the tree had before is an anchor already: only a new one is added.
+    const uint256 root{Tree().Root()};
+    if (IsAnchor(root)) return;
+    sidechain::StoreOverlay& out{*Assert(m_overlay)};
+    ANCHORS.Put(out, root, true);
+    ANCHOR_COUNT.Put(out, ANCHOR_COUNT.Get(*m_view) + 1);
 }
 
 } // namespace zside

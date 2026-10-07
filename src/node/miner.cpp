@@ -208,11 +208,12 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     std::vector<CTxOut> side_outputs, side_tx_outputs;
     if (const Consensus::SidechainParams& side_params{chainparams.GetConsensus().sidechain}; side_params.enabled) {
         const sidechain::Mainchain& mainchain{*Assert(chainman.m_mainchain)};
-        sidechain::State side{m_chainstate.m_scdb.m_side};
-        sidechain::StateUndo undo;
+        // On an overlay of the chainstate's store, dropped after: nothing is copied.
+        sidechain::StoreOverlay side_store{m_chainstate.SideCache(), /*journal=*/false};
+        sidechain::State side{side_store};
         std::string reject_reason;
         // The block is built for the next mainchain block to commit to.
-        if (!side.ApplyMainEvents(mainchain.Height(), mainchain, nHeight, side_params, undo, side_outputs, reject_reason)) {
+        if (!side.ApplyMainEvents(mainchain.Height(), mainchain, nHeight, side_params, side_outputs, reject_reason)) {
             throw std::runtime_error(strprintf("%s: the block does not fit the mainchain on record (%s)", __func__, reject_reason));
         }
         const bool main_pending{side.MainPending(mainchain, nHeight, side_params)};
@@ -253,8 +254,8 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
             // with what depends on them -- otherwise a refund kept pending on purpose, of ever new
             // withdrawals, would hold every withdrawal back.
             const bool overdue{std::any_of(bundled.begin(), bundled.end(), [&](const COutPoint& withdrawal) {
-                const auto it{side.Withdrawals().find(withdrawal)};
-                return it != side.Withdrawals().end() && nHeight - it->second.height > sidechain::REFUND_GRACE_BLOCKS;
+                const auto found{side.GetWithdrawal(withdrawal)};
+                return found && nHeight - found->height > sidechain::REFUND_GRACE_BLOCKS;
             })};
             const bool refund_pending{!overdue && m_mempool && WITH_LOCK(m_mempool->cs, return std::any_of(bundled.begin(), bundled.end(), [&](const COutPoint& withdrawal) EXCLUSIVE_LOCKS_REQUIRED(m_mempool->cs) { return m_mempool->m_refunds.contains(withdrawal); }))};
             const std::set<COutPoint> taken(bundled.begin(), bundled.end());
@@ -271,7 +272,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
             if (!dropped.empty()) drop(std::move(dropped));
             if (!refund_pending) {
                 bundle_hash = bundle->GetHash().ToUint256();
-                if (!side.StartBundle(*bundle_hash, nHeight, pindexPrev->GetBlockHash(), side_params, undo, reject_reason, main_pending)) bundle_hash.reset();
+                if (!side.StartBundle(*bundle_hash, nHeight, pindexPrev->GetBlockHash(), side_params, reject_reason, main_pending)) bundle_hash.reset();
             }
         }
         // A transaction of the mempool can break the rules of the sidechain in this block: a refund of a
@@ -281,7 +282,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         // nothing), and what depends on it comes after it in the block, so it goes before it is applied.
         side_tx_outputs.clear();
         for (size_t i{1}; i < pblock->vtx.size();) {
-            if (side.ApplyTx(*pblock->vtx[i], nHeight, side_params, undo, side_tx_outputs, reject_reason, main_pending)) {
+            if (side.ApplyTx(*pblock->vtx[i], nHeight, side_params, side_tx_outputs, reject_reason, main_pending)) {
                 ++i;
                 continue;
             }
@@ -289,7 +290,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
             drop({pblock->vtx[i]->GetHash()});
         }
         // As many of the payouts owed as a block may pay; the rest wait for the next block.
-        side_outputs = side.TakePayouts(std::move(side_outputs), std::move(side_tx_outputs), undo);
+        side_outputs = side.TakePayouts(std::move(side_outputs), std::move(side_tx_outputs));
         if (bundle_hash) side_outputs.emplace_back(0, sidechain::BundleCommitScript(*bundle_hash));
     }
 

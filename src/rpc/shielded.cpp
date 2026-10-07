@@ -41,12 +41,13 @@ RPCMethod getshieldedinfo()
     uint64_t size;
     {
         LOCK(::cs_main);
-        const zside::ShieldedState& state{chainman.ActiveChainstate().m_scdb.m_side.Shielded()};
-        size = state.Tree().Size();
+        const zside::ShieldedState state{chainman.ActiveChainstate().SideState().Shielded()};
+        const zside::Frontier tree{state.Tree()};
+        size = tree.Size();
         result.pushKV("pool", ValueFromAmount(state.Pool()));
         result.pushKV("notes", size);
         result.pushKV("spent", state.NullifierCount());
-        result.pushKV("root", HexStr(state.Tree().Root()));
+        result.pushKV("root", HexStr(tree.Root()));
     }
     if (g_orchardindex) {
         g_orchardindex->BlockUntilSyncedToCurrentChain();

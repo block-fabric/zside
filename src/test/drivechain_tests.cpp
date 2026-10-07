@@ -1150,41 +1150,58 @@ BOOST_AUTO_TEST_CASE(withdrawal_to_treasury_refused)
     }
 }
 
+namespace {
+/** The state of a sidechain, on a store of its own that journals (as a block's would). */
+struct SideStore {
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay store{empty, /*journal=*/true};
+    sidechain::State state{store};
+    size_t Withdrawals() const
+    {
+        size_t n{0};
+        state.ForEachWithdrawal([&](const sidechain::Withdrawal&) { ++n; return true; });
+        return n;
+    }
+};
+} // namespace
+
 BOOST_AUTO_TEST_CASE(payout_queue)
 {
     // A block pays at most MAX_PAYOUTS_PER_BLOCK outputs; the rest wait, in order, and undo restores them.
-    sidechain::State state;
+    SideStore side;
+    sidechain::State& state{side.state};
     std::vector<CTxOut> owed;
     for (size_t i{0}; i < sidechain::MAX_PAYOUTS_PER_BLOCK + 500; ++i) owed.emplace_back(static_cast<CAmount>(i + 1), CScript() << OP_TRUE);
-    sidechain::StateUndo first;
-    const auto paid1{state.TakePayouts(owed, {}, first)};
+    const auto paid1{state.TakePayouts(owed, {})};
+    const sidechain::StoreUndo first{side.store.TakeUndo()};
     BOOST_REQUIRE_EQUAL(paid1.size(), sidechain::MAX_PAYOUTS_PER_BLOCK);
     BOOST_CHECK(paid1.front() == owed.front() && paid1.back() == owed[sidechain::MAX_PAYOUTS_PER_BLOCK - 1]);
     BOOST_CHECK_EQUAL(state.Queue().size(), 500U);
-    const sidechain::State after_first{state};
-
-    sidechain::StateUndo second;
+    const uint256 after_first{state.Hash()};
     const CTxOut extra{7 * COIN, CScript() << OP_TRUE << OP_TRUE};
-    const auto paid2{state.TakePayouts({}, {extra}, second)};
+    const auto paid2{state.TakePayouts({}, {extra})};
+    const sidechain::StoreUndo second{side.store.TakeUndo()};
     BOOST_REQUIRE_EQUAL(paid2.size(), 501U);
     BOOST_CHECK(paid2.front() == owed[sidechain::MAX_PAYOUTS_PER_BLOCK] && paid2.back() == extra);
     BOOST_CHECK(state.Queue().empty());
 
-    state.DisconnectBlock(second);
-    BOOST_CHECK(state == after_first);
-    state.DisconnectBlock(first);
+    side.store.Revert(second);
+    BOOST_CHECK(state.Hash() == after_first);
+    side.store.Revert(first);
+    side.store.TakeUndo();
     BOOST_CHECK(state.Queue().empty());
 
     // Payouts of transactions, however many, do not hold back deposits: those go first.
     std::vector<CTxOut> spam(sidechain::MAX_PAYOUTS_PER_BLOCK + 10, CTxOut{1, CScript() << OP_TRUE});
-    sidechain::StateUndo third, fourth;
-    BOOST_CHECK_EQUAL(state.TakePayouts({}, spam, third).size(), sidechain::MAX_PAYOUTS_PER_BLOCK);
+    BOOST_CHECK_EQUAL(state.TakePayouts({}, spam).size(), sidechain::MAX_PAYOUTS_PER_BLOCK);
+    side.store.TakeUndo();
     const CTxOut deposit{5 * COIN, CScript() << OP_TRUE << OP_TRUE};
-    const auto paid4{state.TakePayouts({deposit}, {}, fourth)};
+    const auto paid4{state.TakePayouts({deposit}, {})};
+    const sidechain::StoreUndo fourth{side.store.TakeUndo()};
     BOOST_REQUIRE_EQUAL(paid4.size(), 11U);
     BOOST_CHECK(paid4.front() == deposit);
     BOOST_CHECK(state.TxQueue().empty());
-    state.DisconnectBlock(fourth);
+    side.store.Revert(fourth);
     BOOST_CHECK_EQUAL(state.TxQueue().size(), 10U);
 }
 
@@ -1192,14 +1209,14 @@ BOOST_AUTO_TEST_CASE(bundle_nonce)
 {
     // A bundle carries the hash of the block before the one that commits to it: its hash cannot be known in advance.
     Consensus::SidechainParams params;
-    sidechain::State state;
+    SideStore side;
+    sidechain::State& state{side.state};
     CMutableTransaction tx;
     tx.vin.resize(1);
     tx.vout.emplace_back(COIN, sidechain::WithdrawalScript(1000, uint160::FromHex("0101010101010101010101010101010101010101").value(), GetScriptForDestination(WitnessV0KeyHash{uint160::FromHex("0101010101010101010101010101010101010101").value()})));
-    sidechain::StateUndo undo;
     std::vector<CTxOut> payouts;
     std::string reason;
-    BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, 1, params, undo, payouts, reason), reason);
+    BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, 1, params, payouts, reason), reason);
     const auto a{state.NextBundle(10, uint256{0xa}, params)};
     const auto b{state.NextBundle(10, uint256{0xb}, params)};
     BOOST_REQUIRE(a && b);
@@ -1208,7 +1225,7 @@ BOOST_AUTO_TEST_CASE(bundle_nonce)
     BOOST_CHECK(a->vout.back().scriptPubKey == (CScript() << OP_RETURN << std::vector<unsigned char>(prev.begin(), prev.end())));
     BOOST_CHECK(IsBlindWithdrawal(CTransaction{*a}));
     // The pending bundle remembers it, so that the bundle can be built again.
-    BOOST_REQUIRE_MESSAGE(state.StartBundle(a->GetHash().ToUint256(), 10, uint256{0xa}, params, undo, reason), reason);
+    BOOST_REQUIRE_MESSAGE(state.StartBundle(a->GetHash().ToUint256(), 10, uint256{0xa}, params, reason), reason);
     BOOST_CHECK(state.BundleTx()->GetHash() == a->GetHash());
 }
 
@@ -1217,17 +1234,17 @@ BOOST_AUTO_TEST_CASE(paid_on_another_branch)
     // A bundle committed on another branch of this chain, which this branch never had, is paid out on
     // the mainchain: the withdrawals it paid are paid on this branch too, and cannot be paid again.
     Consensus::SidechainParams params;
-    sidechain::State state;
+    SideStore side;
+    sidechain::State& state{side.state};
     const CScript pay{GetScriptForDestination(WitnessV0KeyHash{uint160::FromHex("0101010101010101010101010101010101010101").value()})};
     CMutableTransaction tx;
     tx.vin.resize(1);
     tx.vout.emplace_back(COIN, sidechain::WithdrawalScript(1000, uint160::FromHex("0101010101010101010101010101010101010101").value(), pay));
     tx.vout.emplace_back(2 * COIN, sidechain::WithdrawalScript(1000, uint160::FromHex("0101010101010101010101010101010101010101").value(), pay));
-    sidechain::StateUndo undo;
     std::vector<CTxOut> payouts;
     std::string reason;
-    BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, 1, params, undo, payouts, reason), reason);
-    BOOST_REQUIRE_EQUAL(state.Withdrawals().size(), 2U);
+    BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, 1, params, payouts, reason), reason);
+    BOOST_REQUIRE_EQUAL(side.Withdrawals(), 2U);
 
     sidechain::Mainchain mainchain;
     sidechain::MainBlock genesis;
@@ -1243,14 +1260,14 @@ BOOST_AUTO_TEST_CASE(paid_on_another_branch)
     paying.deposits.push_back(change);
     BOOST_REQUIRE(mainchain.Append(paying));
 
-    const sidechain::State before{state};
-    sidechain::StateUndo main_undo;
-    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(1, mainchain, 2, params, main_undo, payouts, reason), reason);
+    const uint256 before{state.Hash()};
+    side.store.TakeUndo();
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(1, mainchain, 2, params, payouts, reason), reason);
     // The one withdrawal that pays that output with that amount is gone; the other stays.
-    BOOST_REQUIRE_EQUAL(state.Withdrawals().size(), 1U);
-    BOOST_CHECK_EQUAL(state.Withdrawals().begin()->second.amount, 2 * COIN - 1000);
-    state.DisconnectBlock(main_undo);
-    BOOST_CHECK(state == before);
+    BOOST_REQUIRE_EQUAL(side.Withdrawals(), 1U);
+    state.ForEachWithdrawal([&](const sidechain::Withdrawal& w) { BOOST_CHECK_EQUAL(w.amount, 2 * COIN - 1000); return true; });
+    side.store.Revert(side.store.TakeUndo());
+    BOOST_CHECK(state.Hash() == before);
 }
 
 BOOST_AUTO_TEST_CASE(paid_on_another_branch_oldest_first)
@@ -1258,7 +1275,8 @@ BOOST_AUTO_TEST_CASE(paid_on_another_branch_oldest_first)
     // Of several withdrawals that pay the same output with the same amount, a payout of a bundle of
     // another branch takes the oldest, whatever their outpoints.
     Consensus::SidechainParams params;
-    sidechain::State state;
+    SideStore side;
+    sidechain::State& state{side.state};
     const uint160 key{uint160::FromHex("0101010101010101010101010101010101010101").value()};
     const CScript pay{GetScriptForDestination(WitnessV0KeyHash{key})};
     std::vector<CTxOut> payouts;
@@ -1268,8 +1286,7 @@ BOOST_AUTO_TEST_CASE(paid_on_another_branch_oldest_first)
         tx.vin.resize(1);
         tx.vin[0].prevout = COutPoint{Txid::FromUint256(uint256{salt}), 0};
         tx.vout.emplace_back(COIN, sidechain::WithdrawalScript(1000, key, pay));
-        sidechain::StateUndo undo;
-        BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, height, params, undo, payouts, reason), reason);
+        BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, height, params, payouts, reason), reason);
         return COutPoint{tx.GetHash(), 0};
     }};
     const COutPoint older{withdraw(1, 1)}, newer{withdraw(2, 2)};
@@ -1287,11 +1304,10 @@ BOOST_AUTO_TEST_CASE(paid_on_another_branch_oldest_first)
     change.payouts.emplace_back(COIN - 1000, pay);
     paying.deposits.push_back(change);
     BOOST_REQUIRE(mainchain.Append(paying));
-    sidechain::StateUndo undo;
-    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(1, mainchain, 3, params, undo, payouts, reason), reason);
-    BOOST_REQUIRE_EQUAL(state.Withdrawals().size(), 1U);
-    BOOST_CHECK(state.Withdrawals().contains(newer));
-    BOOST_CHECK(!state.Withdrawals().contains(older));
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(1, mainchain, 3, params, payouts, reason), reason);
+    BOOST_REQUIRE_EQUAL(side.Withdrawals(), 1U);
+    BOOST_CHECK(state.GetWithdrawal(newer).has_value());
+    BOOST_CHECK(!state.GetWithdrawal(older).has_value());
 }
 
 BOOST_AUTO_TEST_CASE(no_refund_while_a_bundle_is_pending_on_the_mainchain)
@@ -1301,7 +1317,8 @@ BOOST_AUTO_TEST_CASE(no_refund_while_a_bundle_is_pending_on_the_mainchain)
     // then paid there, a withdrawal is paid twice. While a bundle of this sidechain is pending on the
     // mainchain, nothing is refunded and no other bundle is started.
     Consensus::SidechainParams params;
-    sidechain::State state;
+    SideStore side;
+    sidechain::State& state{side.state};
     CKey key;
     key.MakeNewKey(/*fCompressed=*/true);
     const uint160 keyhash{key.GetPubKey().GetID()};
@@ -1309,10 +1326,9 @@ BOOST_AUTO_TEST_CASE(no_refund_while_a_bundle_is_pending_on_the_mainchain)
     CMutableTransaction tx;
     tx.vin.resize(1);
     tx.vout.emplace_back(COIN, sidechain::WithdrawalScript(1000, keyhash, pay));
-    sidechain::StateUndo undo;
     std::vector<CTxOut> payouts;
     std::string reason;
-    BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, 1, params, undo, payouts, reason), reason);
+    BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, 1, params, payouts, reason), reason);
     sidechain::RefundRequest refund;
     refund.withdrawal = COutPoint{tx.GetHash(), 0};
     BOOST_REQUIRE(key.SignCompact(MessageHash(sidechain::RefundMessage(refund.withdrawal)), refund.signature));
@@ -1333,9 +1349,7 @@ BOOST_AUTO_TEST_CASE(no_refund_while_a_bundle_is_pending_on_the_mainchain)
     BOOST_CHECK(!mainchain.BundlePending(0));
     BOOST_CHECK(mainchain.BundlePending(1));
     BOOST_CHECK(!mainchain.BundlePending(2));
-
-    sidechain::StateUndo main_undo;
-    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(1, mainchain, 2, params, main_undo, payouts, reason), reason);
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(1, mainchain, 2, params, payouts, reason), reason);
     // Before the rule: the refund goes through, though the pending bundle may pay the same withdrawal.
     params.single_bundle_height = 100;
     BOOST_CHECK(!state.MainPending(mainchain, 2, params));
@@ -1347,10 +1361,10 @@ BOOST_AUTO_TEST_CASE(no_refund_while_a_bundle_is_pending_on_the_mainchain)
     BOOST_CHECK_EQUAL(reason, "bad-sc-refund-bundle-pending");
     BOOST_CHECK(!state.NextBundle(2, uint256{0xa}, params, nullptr, state.MainPending(mainchain, 2, params)));
     std::string start_reason;
-    BOOST_CHECK(!state.StartBundle(uint256{0xc}, 2, uint256{0xa}, params, main_undo, start_reason, state.MainPending(mainchain, 2, params)));
+    BOOST_CHECK(!state.StartBundle(uint256{0xc}, 2, uint256{0xa}, params, start_reason, state.MainPending(mainchain, 2, params)));
     BOOST_CHECK_EQUAL(start_reason, "bad-sc-bundle-not-allowed");
     // Once the mainchain has failed it, the withdrawal can be refunded, or bundled again.
-    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(2, mainchain, 3, params, main_undo, payouts, reason), reason);
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(2, mainchain, 3, params, payouts, reason), reason);
     BOOST_CHECK(!state.MainPending(mainchain, 3, params));
     BOOST_CHECK(state.CheckRefund(refund, reason, false));
     BOOST_CHECK(state.NextBundle(3, uint256{0xa}, params));

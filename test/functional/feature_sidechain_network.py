@@ -326,7 +326,8 @@ class SidechainNetworkTest(BitcoinTestFramework):
         tip = self.nodes[0].getbestblockhash()
         self.check_in_sync([self.nodes[0], self.nodes[1]])
         for i in held_by:
-            assert_equal(self.nodes[i].getmainchaininfo()["connected"], False)
+            # The follower learns it at its next poll.
+            self.wait_until(lambda: self.nodes[i].getmainchaininfo()["connected"] is False, timeout=60)
             assert tip != self.nodes[i].getbestblockhash()
         b.start()
         self.connect_mains()
