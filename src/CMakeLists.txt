@@ -113,6 +113,7 @@ target_link_libraries(zside_orchard INTERFACE Threads::Threads ${CMAKE_DL_LIBS} 
 add_dependencies(zside_orchard zside_orchard_build)
 
 add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
+  sidechain/store.cpp
   addresstype.cpp
   base58.cpp
   bech32.cpp
@@ -246,7 +247,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   sidechain/mainchain.cpp
   sidechain/mainclient.cpp
   sidechain/state.cpp
-  sidechain/store.cpp
+  sidechain/store_db.cpp
   drivechain/miner.cpp
   node/blockstorage.cpp
   node/caches.cpp
