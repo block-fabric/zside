@@ -444,6 +444,8 @@ class SidechainTest(BitcoinTestFramework):
         self.sync_blocks()
         self.check_in_sync()
 
+        self.run_double_payout_test()
+
         self.log.info("Without the mainchain node, the node keeps running and says so")
         self.stop_mainchain()
         self.wait_until(lambda: not side.getmainchaininfo()["connected"])
@@ -451,6 +453,113 @@ class SidechainTest(BitcoinTestFramework):
         assert_raises_rpc_error(-1, "Cannot reach the mainchain node", side.syncmainchain)
         self.start_mainchain()
         self.wait_until(lambda: side.getmainchaininfo()["connected"])
+
+        self.log.info("A mainchain node that takes connections and never answers does not stall the node")
+        import socket
+        import threading
+        silent = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(16)
+        held = []
+        stop = threading.Event()
+
+        def accept():
+            silent.settimeout(0.5)
+            while not stop.is_set():
+                try:
+                    held.append(silent.accept()[0])
+                except OSError:
+                    pass
+        thread = threading.Thread(target=accept, daemon=True)
+        thread.start()
+        try:
+            self.restart_node(1, extra_args=[a for a in self.extra_args[1] if not a.startswith("-mainchainrpcport")] + [f"-mainchainrpcport={silent.getsockname()[1]}"])
+            self.connect_nodes(0, 1)
+            # Blocks come from node 0: node 1 cannot check their commitments, and must stay responsive
+            # meanwhile. (Built by hand: the helpers ask every node to sync with the mainchain.)
+            block = side.createbmmblock(self.side_address)
+            self.main.createbmmrequest(SLOT, block["hash"], Decimal("0.001"))
+            self.main.generatetoaddress(1, self.main_address)
+            side.syncmainchain()
+            assert_equal(side.getbestblockhash(), block["hash"])
+            start = time.time()
+            for _ in range(20):
+                other.getblockcount()
+                other.getpeerinfo()
+            assert_greater_than(5, time.time() - start)
+        finally:
+            stop.set()
+            thread.join()
+            for conn in held:
+                conn.close()
+            silent.close()
+        self.restart_node(1)
+        self.connect_nodes(0, 1)
+        self.sync_blocks()
+
+
+    def run_double_payout_test(self):
+        """A bundle left pending on the mainchain by a reorg is paid once, and its withdrawals are not paid again."""
+        main = self.main
+        side, other = self.nodes
+        self.log.info("Double payout: a reorg leaves a bundle pending on the mainchain that the sidechain no longer has")
+        # What is pending pays first, and the votes are back to their default.
+        main.setwithdrawalvote(SLOT, "default")
+        while main.listwithdrawalbundles(SLOT):
+            self.mine_main()
+        self.bmm()
+        assert_equal(side.getwithdrawalbundle()["status"], "none")
+
+        payout_address = main.getnewaddress()
+        withdrawal = side.createwithdrawal(payout_address, 2)
+        self.bmm()
+        fee = side.listwithdrawals()[0]["mainchainfee"]
+        # The block that commits to bundle X, and the mainchain block that commits to that block.
+        committed = self.bmm()
+        x = side.getwithdrawalbundle()
+        assert_equal(x["status"], "pending")
+        commitment = main.getbestblockhash()
+        # The mainchain node got X from its sidechain node, and proposes it.
+        self.mine_main()
+        assert_equal([b["hash"] for b in main.listwithdrawalbundles(SLOT)], [x["hash"]])
+
+        # The mainchain drops the block that committed to the sidechain block with X: the sidechain
+        # block goes, and with it X, on this sidechain. The mainchain node still has X, and proposes
+        # it again on its new branch.
+        main.invalidateblock(commitment)
+        # Its request for the sidechain block went back to the mempool, good for the new tip: an empty
+        # block first, after which it is stale, so that nothing commits to that sidechain block again.
+        main.generateblock(main.getnewaddress(), [])
+        for node in self.nodes:
+            node.syncmainchain()
+            assert committed != node.getbestblockhash()
+        self.mine_main()
+        assert_equal([b["hash"] for b in main.listwithdrawalbundles(SLOT)], [x["hash"]])
+        assert_equal(side.listwithdrawals()[0]["status"], "waiting")
+
+        # X may hold the withdrawal: it cannot be refunded, nor put in another bundle, while X is pending.
+        assert_raises_rpc_error(-4, "not accepted into the mempool", side.refundwithdrawal, withdrawal["txid"], withdrawal["vout"])
+        assert_equal(side.getwithdrawalbundle()["status"], "none")
+        for _ in range(BUNDLE_RETRY_DELAY + 2):
+            self.bmm()
+            assert_equal(side.getwithdrawalbundle()["status"], "none")
+        assert_equal([b["hash"] for b in main.listwithdrawalbundles(SLOT)], [x["hash"]])
+
+        # X is voted through and paid: the withdrawal is paid once, and is gone from the sidechain.
+        escrow = main.getsidechain(SLOT)["escrow"]["amount"]
+        while main.getwithdrawalbundle(SLOT, x["hash"])["status"] == "pending":
+            self.mine_main()
+        assert_equal(main.getwithdrawalbundle(SLOT, x["hash"])["status"], "paid")
+        self.mine_main()
+        self.bmm()
+        assert_equal(side.listwithdrawals(), [])
+        for _ in range(WITHDRAWAL_MIN_SCORE + 5):
+            self.mine_main()
+        assert_equal(main.getreceivedbyaddress(payout_address), 2)
+        assert_equal(main.getsidechain(SLOT)["escrow"]["amount"], escrow - 2 - fee)
+        main.reconsiderblock(commitment)
+        self.bmm()
+        self.check_in_sync()
 
 
 if __name__ == '__main__':

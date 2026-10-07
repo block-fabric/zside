@@ -800,7 +800,8 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
                 if (withdrawal->amount < side_params.min_withdrawal) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bad-sc-withdrawal-amount");
             } else if (const auto refund{sidechain::ParseRefundScript(out.scriptPubKey)}) {
                 std::string reject_reason;
-                if (!side.CheckRefund(*refund, reject_reason)) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
+                const bool main_pending{side.MainPendingNext(*Assert(m_active_chainstate.m_chainman.m_mainchain), m_active_chainstate.m_chain.Height() + 1, side_params)};
+                if (!side.CheckRefund(*refund, reject_reason, main_pending)) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
                 if (const auto other{m_pool.m_refunds.find(refund->withdrawal)}; other != m_pool.m_refunds.end() && !ws.m_conflicts.contains(other->second)) {
                     return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "sc-refund-in-mempool");
                 }
@@ -846,7 +847,7 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
     drivechain::BlockUndo undo;
     std::string reject_reason;
     // A withdrawal is welcome once its bundle has the work score (BIP300 M6): any miner can then mine it.
-    if (!scdb.ConnectTx(tx, params, escrow_outputs, /*allow_withdrawal=*/true, undo, nullptr, reject_reason)) {
+    if (!scdb.ConnectTx(tx, params, escrow_outputs, undo, nullptr, reject_reason)) {
         return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
     }
     return true;
@@ -2705,7 +2706,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         // * p2sh (when P2SH enabled in flags and excludes coinbase)
         // * witness (when witness enabled in flags and excludes coinbase)
         nSigOpsCost += GetTransactionSigOpCost(tx, view, flags);
-        if (nSigOpsCost > MAX_BLOCK_SIGOPS_COST) {
+        if (nSigOpsCost > params.GetConsensus().MaxBlockSigOpsCost(pindex->nHeight)) {
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops", "too many sigops");
             break;
         }
@@ -4165,7 +4166,8 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
     {
         nSigOps += GetLegacySigOpCount(*tx);
     }
-    if (nSigOps * WITNESS_SCALE_FACTOR > MAX_BLOCK_SIGOPS_COST)
+    // Without the height here: the limit of any height. ConnectBlock applies the one of the block's.
+    if (nSigOps * WITNESS_SCALE_FACTOR > consensusParams.MaxBlockSigOpsCostEver())
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops", "out-of-bounds SigOpCount");
 
     if (fCheckPOW && fCheckMerkleRoot)
@@ -4879,7 +4881,7 @@ drivechain::SidechainDB Chainstate::GetMempoolSidechainDB(const std::set<drivech
                     drivechain::SidechainDB probe{scdb};
                     drivechain::SidechainDB::EscrowOutputs probe_outputs{escrow_outputs};
                     drivechain::BlockUndo probe_undo;
-                    if (probe.ConnectTx(*candidate, params, probe_outputs, /*allow_withdrawal=*/true, probe_undo, nullptr, reject_reason)) {
+                    if (probe.ConnectTx(*candidate, params, probe_outputs, probe_undo, nullptr, reject_reason)) {
                         next = candidate;
                         break;
                     }
@@ -4887,7 +4889,7 @@ drivechain::SidechainDB Chainstate::GetMempoolSidechainDB(const std::set<drivech
             }
             if (!next) break;
             if (stop_before && stop_before->contains(next->GetHash())) break;
-            if (!scdb.ConnectTx(*next, params, escrow_outputs, /*allow_withdrawal=*/true, undo, nullptr, reject_reason)) break;
+            if (!scdb.ConnectTx(*next, params, escrow_outputs, undo, nullptr, reject_reason)) break;
             if (applied) applied->insert(next->GetHash());
         }
     }
@@ -4907,8 +4909,10 @@ void Chainstate::RemoveStaleDrivechainTxs()
 
     // On a sidechain: a withdrawal that was paid, refunded or put in a bundle can no longer be taken back.
     if (m_chainman.GetConsensus().sidechain.enabled) {
+        // Nor while a bundle of this sidechain is pending on the mainchain.
+        const bool main_pending{m_scdb.m_side.MainPendingNext(*Assert(m_chainman.m_mainchain), tip->nHeight + 1, m_chainman.GetConsensus().sidechain)};
         for (const auto& [withdrawal, txid] : m_mempool->m_refunds) {
-            if (m_scdb.m_side.Withdrawals().contains(withdrawal) && !m_scdb.m_side.InBundle(withdrawal)) continue;
+            if (m_scdb.m_side.Withdrawals().contains(withdrawal) && !m_scdb.m_side.InBundle(withdrawal) && !main_pending) continue;
             if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
         }
         // Shielded transactions whose notes another spent in a block (they reveal a nullifier the chain

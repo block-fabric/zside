@@ -337,6 +337,8 @@ public:
                        .message_start = {0x7a, 0x73, 0x64, 0x02}, .default_port = 19455, .bech32_hrp = "tzs"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
+        // The test network ran without it until then; see SidechainParams.
+        consensus.sidechain.single_bundle_height = 1'000'000;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };

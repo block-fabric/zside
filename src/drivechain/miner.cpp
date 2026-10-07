@@ -395,7 +395,7 @@ BlockAdditions MinerState::CreateBlockAdditions(const SidechainDB& scdb, const C
             add_message(BmmAcceptScript(request.slot, request.side_block_hash));
         }
         // The mempool only holds transactions that pass this, withdrawals of bundles with the work score included.
-        (void)after.ConnectTx(*tx, params, escrow_outputs, /*allow_withdrawal=*/true, undo, nullptr, reject_reason);
+        (void)after.ConnectTx(*tx, params, escrow_outputs, undo, nullptr, reject_reason);
     }
 
     // M6: pay out the bundles that have the work score.
@@ -412,7 +412,7 @@ BlockAdditions MinerState::CreateBlockAdditions(const SidechainDB& scdb, const C
             if (!mtx) continue;
             const CTransactionRef tx{MakeTransactionRef(std::move(*mtx))};
             // A withdrawal the block already has from the mempool fails here, the bundle being paid.
-            if (!after.ConnectTx(*tx, params, escrow_outputs, /*allow_withdrawal=*/true, undo, nullptr, reject_reason)) continue;
+            if (!after.ConnectTx(*tx, params, escrow_outputs, undo, nullptr, reject_reason)) continue;
             additions.withdrawals.push_back(tx);
             additions.withdrawal_fees.push_back(fee);
             // One withdrawal per sidechain per block: the next one needs the new escrow output.

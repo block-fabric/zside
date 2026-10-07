@@ -9,6 +9,9 @@
 namespace sidechain {
 namespace {
 constexpr uint8_t DB_BLOCK{'b'};
+//! Version of the record: 2 since blocks keep the bundles they proposed.
+constexpr uint8_t DB_VERSION{'v'};
+constexpr uint32_t RECORD_VERSION{2};
 
 /** Key of a block: its height, big endian so that the blocks are stored in order. */
 struct BlockKey {
@@ -42,9 +45,18 @@ Mainchain::Mainchain(const std::optional<DBParams>& db_params)
         if (!m_blocks.empty() && block.prev_hash != m_blocks.back().hash) break;
         if (block.bmm) m_bmm.emplace(*block.bmm, m_blocks.size());
         for (const MainBundleEvent& event : block.bundles) m_closed.emplace(event.hash, m_blocks.size());
+        for (const uint256& hash : block.proposed) m_proposed.emplace(hash, m_blocks.size());
         m_blocks.push_back(std::move(block));
     }
-    LogInfo("Loaded the record of %d mainchain blocks", m_blocks.size());
+    uint32_t version{0};
+    if (!m_db->Read(DB_VERSION, version) || version < RECORD_VERSION) {
+        if (m_blocks.empty()) {
+            m_db->Write(DB_VERSION, RECORD_VERSION);
+        } else {
+            m_needs_backfill = true;
+        }
+    }
+    LogInfo("Loaded the record of %d mainchain blocks%s", m_blocks.size(), m_needs_backfill ? ", whose proposed bundles are to be filled in" : "");
 }
 
 int Mainchain::Height() const
@@ -90,6 +102,45 @@ std::optional<int> Mainchain::ClosedHeight(const uint256& hash) const
     return it->second;
 }
 
+bool Mainchain::BundlePending(int main_height) const
+{
+    LOCK(m_mutex);
+    for (const auto& [hash, proposed] : m_proposed) {
+        if (proposed > main_height) continue;
+        const auto closed{m_closed.find(hash)};
+        if (closed == m_closed.end() || closed->second > main_height) return true;
+    }
+    return false;
+}
+
+bool Mainchain::NeedsBackfill() const
+{
+    LOCK(m_mutex);
+    return m_needs_backfill;
+}
+
+bool Mainchain::Backfill(int height, const uint256& hash, const std::vector<uint256>& proposed)
+{
+    LOCK(m_mutex);
+    if (height < 0 || height >= static_cast<int>(m_blocks.size()) || m_blocks[height].hash != hash) return false;
+    MainBlock& block{m_blocks[height]};
+    for (const uint256& old : block.proposed) {
+        const auto it{m_proposed.find(old)};
+        if (it != m_proposed.end() && it->second == height) m_proposed.erase(it);
+    }
+    block.proposed = proposed;
+    for (const uint256& p : proposed) m_proposed.emplace(p, height);
+    if (m_db) m_db->Write(BlockKey{static_cast<uint32_t>(height)}, block);
+    return true;
+}
+
+void Mainchain::BackfillDone()
+{
+    LOCK(m_mutex);
+    m_needs_backfill = false;
+    if (m_db) m_db->Write(DB_VERSION, RECORD_VERSION, /*fSync=*/true);
+}
+
 bool Mainchain::Append(const MainBlock& block)
 {
     LOCK(m_mutex);
@@ -97,6 +148,7 @@ bool Mainchain::Append(const MainBlock& block)
     // A sidechain block has one place in the mainchain; a second commitment to it means nothing.
     if (block.bmm) m_bmm.emplace(*block.bmm, m_blocks.size());
     for (const MainBundleEvent& event : block.bundles) m_closed.emplace(event.hash, m_blocks.size());
+    for (const uint256& hash : block.proposed) m_proposed.emplace(hash, m_blocks.size());
     if (m_db) m_db->Write(BlockKey{static_cast<uint32_t>(m_blocks.size())}, block);
     m_blocks.push_back(block);
     return true;
@@ -118,6 +170,10 @@ std::vector<MainBlock> Mainchain::Truncate(int height)
         for (const MainBundleEvent& event : m_blocks[i].bundles) {
             const auto it{m_closed.find(event.hash)};
             if (it != m_closed.end() && it->second == static_cast<int>(i)) m_closed.erase(it);
+        }
+        for (const uint256& hash : m_blocks[i].proposed) {
+            const auto it{m_proposed.find(hash)};
+            if (it != m_proposed.end() && it->second == static_cast<int>(i)) m_proposed.erase(it);
         }
         if (!m_blocks[i].bmm) continue;
         const auto it{m_bmm.find(*m_blocks[i].bmm)};

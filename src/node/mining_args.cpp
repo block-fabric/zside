@@ -4,6 +4,8 @@
 
 #include <node/mining_args.h>
 
+#include <chainparams.h>
+
 #include <common/args.h>
 #include <common/messages.h>
 #include <consensus/amount.h>
@@ -35,15 +37,17 @@ Result<void> CheckMiningOptions(BlockCreateOptions options, bool use_argnames)
                                             use_argnames ? "-blockreservedweight" : "block_reserved_weight",
                                             *options.block_reserved_weight, MINIMUM_BLOCK_RESERVED_WEIGHT))};
     }
-    if (*options.block_reserved_weight > MAX_BLOCK_WEIGHT) {
+    // The chain's own maximum, which may be above Bitcoin's.
+    const uint32_t max_weight{Params().GetConsensus().max_block_weight};
+    if (*options.block_reserved_weight > max_weight) {
         return Error{Untranslated(strprintf("%s (%d) exceeds consensus maximum block weight (%d)",
                                             use_argnames ? "-blockreservedweight" : "block_reserved_weight",
-                                            *options.block_reserved_weight, MAX_BLOCK_WEIGHT))};
+                                            *options.block_reserved_weight, max_weight))};
     }
-    if (*options.block_max_weight > MAX_BLOCK_WEIGHT) {
+    if (*options.block_max_weight > max_weight) {
         return Error{Untranslated(strprintf("%s (%d) exceeds consensus maximum block weight (%d)",
                                             use_argnames ? "-blockmaxweight" : "block_max_weight",
-                                            *options.block_max_weight, MAX_BLOCK_WEIGHT))};
+                                            *options.block_max_weight, max_weight))};
     }
     if (*options.block_reserved_weight > *options.block_max_weight) {
         return Error{Untranslated(strprintf("%s (%d) exceeds %s (%d)",

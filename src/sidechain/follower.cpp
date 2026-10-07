@@ -46,6 +46,18 @@ uint256 Hash256(const UniValue& value)
     return *hash;
 }
 
+/** The bundles a mainchain block proposed. A node that does not say is too old to follow: taking
+ * its silence for "none" would let withdrawals in a pending bundle be refunded. */
+std::vector<uint256> ParseProposed(const UniValue& obj)
+{
+    if (!obj.exists("proposed")) {
+        throw std::runtime_error("The mainchain node is too old: it does not report the withdrawal bundles that blocks propose. Upgrade Chains");
+    }
+    std::vector<uint256> proposed;
+    for (const UniValue& hash : obj["proposed"].getValues()) proposed.push_back(Hash256(hash));
+    return proposed;
+}
+
 MainBlock ParseMainBlock(const UniValue& obj)
 {
     MainBlock block;
@@ -73,6 +85,7 @@ MainBlock ParseMainBlock(const UniValue& obj)
     for (const UniValue& entry : obj["bundles"].getValues()) {
         block.bundles.push_back({Hash256(entry["hash"]), entry["paid"].get_bool()});
     }
+    block.proposed = ParseProposed(obj);
     return block;
 }
 } // namespace
@@ -118,6 +131,25 @@ bool Follower::UpdateRecord(bool may_drop)
     }};
 
     bool changed{false};
+    // A record written before it kept proposed bundles gets them, block by block, before anything
+    // else. Blocks are only filled in, never dropped: no commitment goes missing meanwhile. A block
+    // the mainchain no longer has stops it; the loop below then drops it and those above it, and
+    // fetches what replaced them, proposals included.
+    if (may_drop && record.NeedsBackfill()) {
+        LogInfo("Filling in the withdrawal bundles proposed in the %d mainchain blocks on record", record.Height() + 1);
+        bool complete{true};
+        for (int from{0}; from <= record.Height() && complete; from += BATCH) {
+            if (m_stop) return changed;
+            const UniValue batch{fetch(from, BATCH)};
+            for (size_t i{0}; i < batch.size() && from + static_cast<int>(i) <= record.Height(); ++i) {
+                if (!record.Backfill(from + static_cast<int>(i), Hash256(batch[i]["hash"]), ParseProposed(batch[i]))) {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        record.BackfillDone();
+    }
     while (!m_stop) {
         const int height{record.Height()};
         // The block on record is asked for again, to learn whether the mainchain still has it.
@@ -185,25 +217,20 @@ bool Follower::UpdateRecord(bool may_drop)
 
 void Follower::Poll()
 {
-    // Headers from peers can ask for this at any rate, while the node holds its main lock: at most
-    // one call to the mainchain node every few seconds; a header it does not answer for waits.
+    // Headers from peers can ask for this at any rate: the follower is woken at most every few
+    // seconds; a header whose commitment is not on record yet waits for it.
     const auto now{NodeClock::now()};
     {
         LOCK(m_mutex);
         if (now < m_last_poll + POLL_SPACING) return;
         m_last_poll = now;
     }
-    TRY_LOCK(m_sync_mutex, locked);
-    if (!locked) return;
-    try {
-        if (UpdateRecord(/*may_drop=*/false)) {
-            LOCK(m_mutex);
-            m_woken = true;
-            m_wake.notify_all();
-        }
-    } catch (const std::exception&) {
-        // The thread of the follower will run into the same error and report it.
-    }
+    // The caller holds the main lock: no call to the mainchain node here, which could take as long as
+    // its timeout. The thread of the follower updates the record, and takes up the headers that wait
+    // for a commitment once it is on record.
+    LOCK(m_mutex);
+    m_woken = true;
+    m_wake.notify_all();
 }
 
 bool Follower::Sync(std::string& error)

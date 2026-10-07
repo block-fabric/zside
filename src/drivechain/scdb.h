@@ -12,6 +12,7 @@
 #include <serialize.h>
 #include <uint256.h>
 
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -106,13 +107,15 @@ public:
      * block; the mempool uses it to keep out transactions that could not be mined.
      *
      * @param[in,out] escrow_outputs   as returned by GetEscrowOutputs(), kept up to date across calls
-     * @param[in]     allow_withdrawal whether a withdrawal is acceptable (it still needs a bundle with the work score)
      * @param[out]    deposit          the escrow change, if the transaction made one; may be null.
      *                                 The caller fills in the transaction and block fields.
+     * @param[in]     height           of the block the transaction is in; the mempool and the miner leave
+     *                                 it out, and so check by the newest rules
      * @return false if the transaction is invalid; see ConnectBlock.
      */
     [[nodiscard]] bool ConnectTx(const CTransaction& tx, const Consensus::DrivechainParams& params, EscrowOutputs& escrow_outputs,
-                                 bool allow_withdrawal, BlockUndo& undo, std::optional<Deposit>* deposit, std::string& reject_reason);
+                                 BlockUndo& undo, std::optional<Deposit>* deposit, std::string& reject_reason,
+                                 int height = std::numeric_limits<int>::max());
 
     /** Revert the update of the block that produced `undo`. */
     void DisconnectBlock(const BlockUndo& undo);

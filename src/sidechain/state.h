@@ -174,10 +174,24 @@ public:
      */
     [[nodiscard]] bool ApplyMainEvents(int main_height, const Mainchain& mainchain, int height, const Consensus::SidechainParams& params,
                                        StateUndo& undo, std::vector<CTxOut>& payouts, std::string& reject_reason);
-    /** The bundle a block at `height`, on top of the block `prev`, may commit to: empty if no bundle can be made now. */
-    std::optional<CMutableTransaction> NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals = nullptr) const;
+    /**
+     * The bundle a block at `height`, on top of the block `prev`, may commit to: empty if no bundle can be made now.
+     * @param[in] main_pending  whether a bundle of this sidechain is pending on the mainchain (MainPending)
+     */
+    std::optional<CMutableTransaction> NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals = nullptr, bool main_pending = false) const;
     /** Make the bundle with the hash `hash` the pending one. */
-    [[nodiscard]] bool StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, StateUndo& undo, std::string& reject_reason);
+    [[nodiscard]] bool StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, StateUndo& undo, std::string& reject_reason, bool main_pending = false);
+    /**
+     * Whether a block at `height`, with this state, has to wait for a bundle of this sidechain that is
+     * pending on the mainchain (SidechainParams::single_bundle_height): as the mainchain was after
+     * the last block this state acted on.
+     */
+    bool MainPending(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const;
+    /**
+     * The same as the next block will see it: it follows the mainchain up to the last block on record
+     * first. For the mempool, which must not take what that block would refuse.
+     */
+    bool MainPendingNext(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const;
     /**
      * The payouts a block pays: at most MAX_PAYOUTS_PER_BLOCK, of what was owed
      * before it and of what it gave rise to, oldest first. What the mainchain
@@ -191,10 +205,10 @@ public:
     const std::vector<CTxOut>& TxQueue() const { return m_queue_tx; }
     /** Take in the withdrawals and the refund requests of a transaction that is not a coinbase. */
     [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
-                               std::vector<CTxOut>& payouts, std::string& reject_reason);
+                               std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending = false);
 
-    /** Whether a refund request could be mined now. */
-    [[nodiscard]] bool CheckRefund(const RefundRequest& request, std::string& reject_reason) const;
+    /** Whether a refund request could be mined now. @param[in] main_pending  see MainPending */
+    [[nodiscard]] bool CheckRefund(const RefundRequest& request, std::string& reject_reason, bool main_pending = false) const;
 
     /** Height of the last mainchain block this state has acted on. */
     int32_t MainHeight() const { return m_main_height; }

@@ -56,13 +56,15 @@ struct MainBlock {
     std::optional<uint256> bmm;
     std::vector<MainDeposit> deposits;
     std::vector<MainBundleEvent> bundles;
+    //! The withdrawal bundles of this sidechain that the block proposed (M3): pending until closed.
+    std::vector<uint256> proposed;
 
     template <typename Stream>
     void Serialize(Stream& s) const
     {
         s << hash << prev_hash << time << bmm.has_value();
         if (bmm) s << *bmm;
-        s << deposits << bundles;
+        s << deposits << bundles << proposed;
     }
     template <typename Stream>
     void Unserialize(Stream& s)
@@ -71,6 +73,13 @@ struct MainBlock {
         s >> hash >> prev_hash >> time >> has_bmm;
         if (has_bmm) s >> bmm.emplace();
         s >> deposits >> bundles;
+        // Records written before proposals were kept end here: Mainchain fills them in (NeedsBackfill).
+        proposed.clear();
+        if constexpr (requires { s.empty(); }) {
+            if (!s.empty()) s >> proposed;
+        } else {
+            s >> proposed;
+        }
     }
     friend bool operator==(const MainBlock&, const MainBlock&) = default;
 };
@@ -105,6 +114,25 @@ public:
     std::optional<int> CommittedHeight(const uint256& side_hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Height of the mainchain block that closed (paid out or failed) the bundle `hash`, if any did. */
     std::optional<int> ClosedHeight(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Whether a withdrawal bundle of this sidechain was pending on the mainchain after the block at
+     * `main_height`: proposed at or below it, and not closed at or below it. Such a bundle may hold
+     * any withdrawal, those of other branches of this chain too.
+     */
+    bool BundlePending(int main_height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Whether the record was written before it kept the proposals of bundles: then the Follower
+     * fills them in for the blocks on record (Backfill), before anything acts on them.
+     */
+    bool NeedsBackfill() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Set the proposals of the block on record at `height`, if it is the block `hash`.
+     * @return false if the record has another block there.
+     */
+    bool Backfill(int height, const uint256& hash, const std::vector<uint256>& proposed) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** The record is complete again: mark it so. */
+    void BackfillDone() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Add the block that follows the last one on record. @return false if it does not follow it. */
     bool Append(const MainBlock& block) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -141,6 +169,9 @@ private:
     std::map<uint256, int> m_bmm GUARDED_BY(m_mutex);
     //! Bundle hash to the height of the mainchain block that closed it.
     std::map<uint256, int> m_closed GUARDED_BY(m_mutex);
+    //! Bundle hash to the height of the mainchain block that proposed it.
+    std::map<uint256, int> m_proposed GUARDED_BY(m_mutex);
+    bool m_needs_backfill GUARDED_BY(m_mutex){false};
     std::optional<int> m_assumed_height GUARDED_BY(m_mutex);
     std::unique_ptr<CDBWrapper> m_db;
 };

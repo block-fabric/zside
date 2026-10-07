@@ -1147,7 +1147,7 @@ static RPCMethod getblocktemplate()
     result.pushKV("mintime", GetMinimumTime(pindexPrev, consensusParams.DifficultyAdjustmentInterval()));
     result.pushKV("mutable", std::move(aMutable));
     result.pushKV("noncerange", "00000000ffffffff");
-    int64_t nSigOpLimit = MAX_BLOCK_SIGOPS_COST;
+    int64_t nSigOpLimit = consensusParams.MaxBlockSigOpsCost(pindexPrev->nHeight + 1);
     int64_t nSizeLimit = consensusParams.max_block_weight;
     if (fPreSegWit) {
         CHECK_NONFATAL(nSigOpLimit % WITNESS_SCALE_FACTOR == 0);

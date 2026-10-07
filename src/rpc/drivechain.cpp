@@ -866,6 +866,10 @@ RPCMethod getsidechainevents()
                         {RPCResult::Type::BOOL, "paid", "Whether the bundle was paid out; if not, it failed"},
                     }},
                 }},
+                {RPCResult::Type::ARR, "proposed", "The withdrawal bundles the block proposed (BIP300 M3): pending from it until a block closes them",
+                {
+                    {RPCResult::Type::STR_HEX, "", "The hash of the bundle"},
+                }},
             }},
         }},
         RPCExamples{HelpExampleCli("getsidechainevents", "0 1000 100")},
@@ -931,7 +935,10 @@ RPCMethod getsidechainevents()
 
         UniValue bundles(UniValue::VARR);
         drivechain::BlockUndo undo;
-        if (chainman.m_blockman.m_drivechain_db->ReadBlockUndo(pindex->GetBlockHash(), undo)) {
+        // What a block closed and proposed is what sidechains act on: missing, it must not look like nothing.
+        const bool have_undo{chainman.m_blockman.m_drivechain_db->ReadBlockUndo(pindex->GetBlockHash(), undo)};
+        if (!have_undo && height > 0) throw JSONRPCError(RPC_MISC_ERROR, strprintf("The drivechain data of block %d is not available", height));
+        if (have_undo) {
             for (const auto& [slot, hash] : undo.closed) {
                 if (slot != id) continue;
                 UniValue entry(UniValue::VOBJ);
@@ -941,6 +948,18 @@ RPCMethod getsidechainevents()
             }
         }
         obj.pushKV("bundles", std::move(bundles));
+
+        // A proposal counts if the block took it: then it changed the slot (a proposal for a slot
+        // without a sidechain is ignored, and changes nothing).
+        UniValue proposed(UniValue::VARR);
+        const bool slot_changed{std::any_of(undo.slots.begin(), undo.slots.end(), [&](const drivechain::BlockUndo::SlotUndo& saved) { return saved.id == id; })};
+        if (slot_changed) {
+            for (const CTxOut& out : block.vtx[0]->vout) {
+                const auto bundle{drivechain::ParseBundleScript(out.scriptPubKey)};
+                if (bundle && bundle->first == id) proposed.push_back(bundle->second.GetHex());
+            }
+        }
+        obj.pushKV("proposed", std::move(proposed));
         result.push_back(std::move(obj));
     }
     return result;

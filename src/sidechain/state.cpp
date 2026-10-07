@@ -118,9 +118,19 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
     return true;
 }
 
-std::optional<CMutableTransaction> State::NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals) const
+bool State::MainPending(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const
 {
-    if (m_bundle || m_withdrawals.empty()) return std::nullopt;
+    return height >= params.single_bundle_height && mainchain.BundlePending(m_main_height);
+}
+
+bool State::MainPendingNext(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const
+{
+    return height >= params.single_bundle_height && (mainchain.BundlePending(m_main_height) || mainchain.BundlePending(mainchain.Height()));
+}
+
+std::optional<CMutableTransaction> State::NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals, bool main_pending) const
+{
+    if (m_bundle || m_withdrawals.empty() || main_pending) return std::nullopt;
     if (m_last_failure_height >= 0 && height - m_last_failure_height < params.bundle_retry_delay) return std::nullopt;
 
     // Those that offer mainchain miners the most go first; the rest wait for the next bundle.
@@ -151,10 +161,10 @@ std::optional<CMutableTransaction> State::BundleTx() const
     return BuildBundle(withdrawals, m_bundle->height, m_bundle->nonce);
 }
 
-bool State::StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, StateUndo& undo, std::string& reject_reason)
+bool State::StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, StateUndo& undo, std::string& reject_reason, bool main_pending)
 {
     std::vector<COutPoint> withdrawals;
-    const auto bundle{NextBundle(height, prev, params, &withdrawals)};
+    const auto bundle{NextBundle(height, prev, params, &withdrawals, main_pending)};
     if (!bundle) {
         reject_reason = "bad-sc-bundle-not-allowed";
         return false;
@@ -167,7 +177,7 @@ bool State::StartBundle(const uint256& hash, int height, const uint256& prev, co
     return true;
 }
 
-bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason) const
+bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason, bool main_pending) const
 {
     const auto it{m_withdrawals.find(request.withdrawal)};
     if (it == m_withdrawals.end()) {
@@ -176,6 +186,12 @@ bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason
     }
     if (InBundle(request.withdrawal)) {
         reject_reason = "bad-sc-refund-in-bundle";
+        return false;
+    }
+    // A bundle pending on the mainchain may hold it, whatever this branch says: refunded and paid, it
+    // would be paid twice.
+    if (main_pending) {
+        reject_reason = "bad-sc-refund-bundle-pending";
         return false;
     }
     CPubKey pubkey;
@@ -188,7 +204,7 @@ bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason
 }
 
 bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
-                    std::vector<CTxOut>& payouts, std::string& reject_reason)
+                    std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending)
 {
     // The shielded pool: a transaction that breaks its rules is invalid, so it comes first, and
     // changes nothing if it fails.
@@ -210,7 +226,7 @@ bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::Sidecha
             undo.added.push_back(withdrawal->outpoint);
             m_withdrawals.emplace(withdrawal->outpoint, std::move(*withdrawal));
         } else if (const auto refund{ParseRefundScript(out.scriptPubKey)}) {
-            if (!CheckRefund(*refund, reject_reason)) return false;
+            if (!CheckRefund(*refund, reject_reason, main_pending)) return false;
             const Withdrawal& withdrawal{m_withdrawals.at(refund->withdrawal)};
             payouts.emplace_back(withdrawal.Burned(), GetScriptForDestination(WitnessV0KeyHash{withdrawal.refund_keyhash}));
             Remove(refund->withdrawal, undo);
@@ -235,6 +251,7 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
     }
     std::vector<CTxOut> payouts, tx_payouts;
     if (!ApplyMainEvents(*bmm_height - 1, mainchain, height, params, undo, payouts, reject_reason)) return false;
+    const bool main_pending{MainPending(mainchain, height, params)};
 
     // A new bundle takes the withdrawals that were waiting before this block.
     std::optional<uint256> commitment;
@@ -253,7 +270,7 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
             reject_reason = "bad-sc-bundle-closed";
             return false;
         }
-        if (!StartBundle(*commitment, height, block.hashPrevBlock, params, undo, reject_reason)) return false;
+        if (!StartBundle(*commitment, height, block.hashPrevBlock, params, undo, reject_reason, main_pending)) return false;
     }
 
     // The coinbase has no part in the shielded pool (its transactions are checked one by one below).
@@ -262,7 +279,7 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
         return false;
     }
     for (size_t i{1}; i < block.vtx.size(); ++i) {
-        if (!ApplyTx(*block.vtx[i], height, params, undo, tx_payouts, reject_reason)) return false;
+        if (!ApplyTx(*block.vtx[i], height, params, undo, tx_payouts, reject_reason, main_pending)) return false;
     }
 
     // The root the block leaves the shielded tree with is an anchor for the next blocks.

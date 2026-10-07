@@ -193,7 +193,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         const CTransactionRef& withdrawal{drivechain_additions.withdrawals[i]};
         // A withdrawal that does not fit waits for the next block.
         if (nBlockWeight + GetTransactionWeight(*withdrawal) >= *Assert(m_options.block_max_weight)) continue;
-        if (nBlockSigOpsCost + WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*withdrawal) >= MAX_BLOCK_SIGOPS_COST) continue;
+        if (nBlockSigOpsCost + WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*withdrawal) >= chainparams.GetConsensus().MaxBlockSigOpsCost(nHeight)) continue;
         pblock->vtx.push_back(withdrawal);
         pblocktemplate->vTxFees.push_back(drivechain_additions.withdrawal_fees[i]);
         pblocktemplate->vTxSigOpsCost.push_back(WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*withdrawal));
@@ -215,6 +215,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         if (!side.ApplyMainEvents(mainchain.Height(), mainchain, nHeight, side_params, undo, side_outputs, reject_reason)) {
             throw std::runtime_error(strprintf("%s: the block does not fit the mainchain on record (%s)", __func__, reject_reason));
         }
+        const bool main_pending{side.MainPending(mainchain, nHeight, side_params)};
         // Take transactions out of the block, with what spends their outputs.
         const auto drop{[&](std::set<Txid> dropped) {
             // The fee and sigop lists have no entry for the coinbase: transaction i is entry i - 1.
@@ -242,7 +243,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         }};
         std::optional<uint256> bundle_hash;
         std::vector<COutPoint> bundled;
-        const auto bundle{side.NextBundle(nHeight, pindexPrev->GetBlockHash(), side_params, &bundled)};
+        const auto bundle{side.NextBundle(nHeight, pindexPrev->GetBlockHash(), side_params, &bundled, main_pending)};
         // Not a bundle the mainchain has closed already: the block would be invalid.
         if (bundle && !mainchain.ClosedHeight(bundle->GetHash().ToUint256())) {
             // A bundle takes its withdrawals out of reach of refunds. Someone who just made a
@@ -270,7 +271,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
             if (!dropped.empty()) drop(std::move(dropped));
             if (!refund_pending) {
                 bundle_hash = bundle->GetHash().ToUint256();
-                if (!side.StartBundle(*bundle_hash, nHeight, pindexPrev->GetBlockHash(), side_params, undo, reject_reason)) bundle_hash.reset();
+                if (!side.StartBundle(*bundle_hash, nHeight, pindexPrev->GetBlockHash(), side_params, undo, reject_reason, main_pending)) bundle_hash.reset();
             }
         }
         // A transaction of the mempool can break the rules of the sidechain in this block: a refund of a
@@ -284,7 +285,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
             undo = undo_before_txs;
             side_tx_outputs.clear();
             for (size_t i{1}; i < pblock->vtx.size(); ++i) {
-                if (!side.ApplyTx(*pblock->vtx[i], nHeight, side_params, undo, side_tx_outputs, reject_reason)) {
+                if (!side.ApplyTx(*pblock->vtx[i], nHeight, side_params, undo, side_tx_outputs, reject_reason, main_pending)) {
                     LogInfo("%s: leaving out transaction %s, which breaks the sidechain rules in this block (%s)", __func__, pblock->vtx[i]->GetHash().ToString(), reject_reason);
                     drop({pblock->vtx[i]->GetHash()});
                     applied = false;
@@ -398,7 +399,7 @@ bool BlockAssembler::TestChunkBlockLimits(int64_t chunk_weight, int64_t chunk_si
     if (nBlockWeight + chunk_weight >= m_options.block_max_weight) {
         return false;
     }
-    if (nBlockSigOpsCost + chunk_sigops_cost >= MAX_BLOCK_SIGOPS_COST) {
+    if (nBlockSigOpsCost + chunk_sigops_cost >= chainparams.GetConsensus().MaxBlockSigOpsCost(nHeight)) {
         return false;
     }
     return true;

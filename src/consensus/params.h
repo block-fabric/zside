@@ -99,6 +99,13 @@ struct SidechainParams {
     uint32_t max_bundle_withdrawals{1000};
     /** Number of blocks to wait after a withdrawal bundle failed before the next one can be made. */
     int bundle_retry_delay{144};
+    /**
+     * From this height, no withdrawal is refunded, and no bundle started, while a bundle of this
+     * sidechain is pending on the mainchain. It may hold any withdrawal: one committed on another
+     * branch of this chain, after a reorg, holds withdrawals this branch thinks are free; paid,
+     * it would pay them a second time.
+     */
+    int single_bundle_height{0};
 };
 
 /**
@@ -120,6 +127,12 @@ struct DrivechainParams {
     int withdrawal_min_score{64800};
     /** Maximum number of pending withdrawal bundles per sidechain. */
     uint32_t max_pending_bundles{64};
+    /**
+     * From this height, paying a bundle of a sidechain fails its other pending bundles. A sidechain
+     * means one bundle to be paid; others pending for its slot are copies left by a reorg of the
+     * sidechain, holding the same withdrawals, which would otherwise be paid a second time.
+     */
+    int single_payout_height{0};
 };
 
 /**
@@ -188,6 +201,15 @@ struct Params {
     uint32_t max_block_tx_weight{MAX_BLOCK_WEIGHT};
     /** Number of blocks before the outputs of a coinbase can be spent. */
     int coinbase_maturity{COINBASE_MATURITY};
+    /**
+     * Most signature operations (in cost units) in a block from sigops_height on; before, Bitcoin's
+     * MAX_BLOCK_SIGOPS_COST. A chain with larger blocks raises it with them.
+     */
+    int64_t max_block_sigops_cost{MAX_BLOCK_SIGOPS_COST};
+    int sigops_height{0};
+    int64_t MaxBlockSigOpsCost(int height) const { return height >= sigops_height ? max_block_sigops_cost : MAX_BLOCK_SIGOPS_COST; }
+    /** The most any block can have, whatever its height: for checks that do not know the height. */
+    int64_t MaxBlockSigOpsCostEver() const { return std::max<int64_t>(MAX_BLOCK_SIGOPS_COST, max_block_sigops_cost); }
     /** Upper bound for the serialized size of a block; a sanity limit, not a consensus rule. */
     uint32_t MaxBlockSerializedSize() const { return std::max<uint32_t>(MAX_BLOCK_SERIALIZED_SIZE, max_block_weight); }
     std::chrono::seconds PowTargetSpacing() const

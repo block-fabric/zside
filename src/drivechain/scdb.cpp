@@ -124,7 +124,7 @@ SidechainDB::EscrowOutputs SidechainDB::GetEscrowOutputs() const
 }
 
 bool SidechainDB::ConnectTx(const CTransaction& tx, const Consensus::DrivechainParams& params, EscrowOutputs& escrow_outputs,
-                            bool allow_withdrawal, BlockUndo& undo, std::optional<Deposit>* deposit, std::string& reject_reason)
+                            BlockUndo& undo, std::optional<Deposit>* deposit, std::string& reject_reason, int height)
 {
     const auto invalid = [&](const char* reason) {
         reject_reason = reason;
@@ -183,7 +183,6 @@ bool SidechainDB::ConnectTx(const CTransaction& tx, const Consensus::DrivechainP
         // Withdrawal (M6): the treasury output is the only input, the new
         // treasury output is output 0, the payouts follow, and whatever else
         // left the treasury is the fee for mainchain miners.
-        if (!allow_withdrawal) return invalid("bad-dc-withdrawal-loose");
         if (tx.vin.size() != 1) return invalid("bad-dc-withdrawal-inputs");
         if (tx.vout.size() < 2 || burn_index != 0) return invalid("bad-dc-withdrawal-outputs");
 
@@ -195,6 +194,11 @@ bool SidechainDB::ConnectTx(const CTransaction& tx, const Consensus::DrivechainP
 
         slot.bundles.erase(bundle);
         CloseBundle(id, *blind_hash, /*paid=*/true, undo);
+        if (height >= params.single_payout_height) {
+            // The other bundles of the sidechain are copies holding the same withdrawals: they fail.
+            for (const Bundle& other : slot.bundles) CloseBundle(id, other.hash, /*paid=*/false, undo);
+            slot.bundles.clear();
+        }
         destination = WITHDRAWAL_RETURN_DEST;
         paid_bundle = *blind_hash;
     } else {
@@ -312,7 +316,7 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
         }
 
         std::optional<Deposit> deposit;
-        if (!ConnectTx(tx, params, escrow_outputs, /*allow_withdrawal=*/true, undo, &deposit, reject_reason)) return false;
+        if (!ConnectTx(tx, params, escrow_outputs, undo, &deposit, reject_reason, height)) return false;
         if (deposit && deposits) {
             deposit->tx = block.vtx[tx_index];
             deposit->tx_index = static_cast<uint32_t>(tx_index);
