@@ -10,6 +10,8 @@
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
+#include <streams.h>
+#include <util/strencodings.h>
 #include <sidechain/follower.h>
 #include <sidechain/mainchain.h>
 #include <sidechain/state.h>
@@ -351,7 +353,9 @@ RPCMethod getwithdrawalbundle()
         result.pushKV("withdrawals", withdrawals.size());
         result.pushKV("amount", ValueFromAmount(amount));
         result.pushKV("mainchainfee", ValueFromAmount(fee));
-        result.pushKV("hex", EncodeHexTx(CTransaction{*tx}));
+        DataStream blind{};
+        blind << TX_NO_WITNESS(CTransaction{*tx});
+        result.pushKV("hex", HexStr(blind));
     }
     result.pushKV("waiting", side.Withdrawals().size() - withdrawals.size());
     if (side.LastFailureHeight() >= 0) result.pushKV("lastfailureheight", side.LastFailureHeight());

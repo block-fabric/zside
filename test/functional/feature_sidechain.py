@@ -539,21 +539,27 @@ class SidechainTest(BitcoinTestFramework):
 
         # X may hold the withdrawal: it cannot be refunded, nor put in another bundle, while X is pending.
         assert_raises_rpc_error(-4, "not accepted into the mempool", side.refundwithdrawal, withdrawal["txid"], withdrawal["vout"])
+        self.bmm()
         assert_equal(side.getwithdrawalbundle()["status"], "none")
-        for _ in range(BUNDLE_RETRY_DELAY + 2):
-            self.bmm()
-            assert_equal(side.getwithdrawalbundle()["status"], "none")
-        assert_equal([b["hash"] for b in main.listwithdrawalbundles(SLOT)], [x["hash"]])
-
-        # X is voted through and paid: the withdrawal is paid once, and is gone from the sidechain.
+        # This chain has no bundle: its node says so, and the mainchain node downvotes X, which fails.
+        assert_equal(main.listwithdrawalbundles(SLOT)[0]["vote"], "downvote")
         escrow = main.getsidechain(SLOT)["escrow"]["amount"]
         while main.getwithdrawalbundle(SLOT, x["hash"])["status"] == "pending":
             self.mine_main()
-        assert_equal(main.getwithdrawalbundle(SLOT, x["hash"])["status"], "paid")
+        assert_equal(main.getwithdrawalbundle(SLOT, x["hash"])["status"], "failed")
+        # Then the withdrawal goes in a bundle of this chain, which is paid: once.
+        for _ in range(BUNDLE_RETRY_DELAY + 2):
+            self.bmm()
+        y = side.getwithdrawalbundle()
+        assert_equal(y["status"], "pending")
+        assert y["hash"] != x["hash"]
+        while main.getwithdrawalbundle(SLOT, y["hash"])["status"] == "pending":
+            self.mine_main()
+        assert_equal(main.getwithdrawalbundle(SLOT, y["hash"])["status"], "paid")
         self.mine_main()
         self.bmm()
         assert_equal(side.listwithdrawals(), [])
-        for _ in range(WITHDRAWAL_MIN_SCORE + 5):
+        for _ in range(5):
             self.mine_main()
         assert_equal(main.getreceivedbyaddress(payout_address), 2)
         assert_equal(main.getsidechain(SLOT)["escrow"]["amount"], escrow - 2 - fee)

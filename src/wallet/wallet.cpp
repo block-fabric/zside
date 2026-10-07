@@ -4,6 +4,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <wallet/wallet.h>
+
+#include <drivechain/sidechain.h>
 #include <chainparams.h>
 
 #include <bitcoin-build-config.h> // IWYU pragma: keep
@@ -1541,6 +1543,17 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
         // imperfect, and could be improved in general, see
         // https://github.com/bitcoin-core/bitcoin-devwiki/wiki/Wallet-Transaction-Conflict-Tracking
         SyncTransaction(tx, TxStateInactive{});
+    }
+
+    // A drivechain transaction the mempool dropped can never be good again: a BMM request is for one
+    // block only (or another bid replaced it), a deposit lost its treasury input to another. Left as
+    // it is, it would keep its coins from the wallet; it is abandoned, which gives them back.
+    if ((reason == MemPoolRemovalReason::CONFLICT || reason == MemPoolRemovalReason::REPLACED) && it != mapWallet.end() &&
+        (drivechain::GetBmmRequest(*tx) || std::any_of(tx->vout.begin(), tx->vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); }))) {
+        if (!it->second.isAbandoned() && GetTxDepthInMainChain(it->second) == 0 && !it->second.InMempool()) {
+            AbandonTransaction(tx->GetHash());
+            WalletLogPrintf("Abandoned drivechain transaction %s, which the mempool dropped and can never be mined\n", tx->GetHash().ToString());
+        }
     }
 
     const Txid& txid = tx->GetHash();

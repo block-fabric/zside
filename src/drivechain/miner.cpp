@@ -140,6 +140,23 @@ std::set<std::pair<SidechainId, uint256>> MinerState::GetAcks() const
     return m_acks;
 }
 
+bool MinerState::Vouch(SidechainId slot, const std::optional<uint256>& hash)
+{
+    LOCK(m_mutex);
+    if (hash && !m_bundles.contains({slot, *hash})) return false;
+    m_latest_bundle[slot] = hash.value_or(uint256{});
+    Save();
+    return true;
+}
+
+std::optional<uint256> MinerState::Vouched(SidechainId slot) const
+{
+    LOCK(m_mutex);
+    const auto it{m_latest_bundle.find(slot)};
+    if (it == m_latest_bundle.end()) return std::nullopt;
+    return it->second;
+}
+
 std::optional<uint256> MinerState::AddBundle(SidechainId slot, const CMutableTransaction& blind_tx, std::string& error)
 {
     if (!IsBlindWithdrawal(CTransaction{blind_tx})) {
@@ -208,6 +225,12 @@ Vote MinerState::ResolveVote(SidechainId slot, const std::vector<Bundle>& pendin
     // (after a reorg of the sidechain, say), and votes for it would count
     // against the bundle that replaced it.
     if (const auto latest{m_latest_bundle.find(slot)}; latest != m_latest_bundle.end()) {
+        // The sidechain node says its chain has no bundle: whatever is pending for it is a bundle
+        // its chain gave up, or one nobody made -- down, so that it fails (idle_expiry_blocks).
+        if (latest->second.IsNull()) {
+            vote.type = pending.empty() ? Vote::Type::ABSTAIN : Vote::Type::DOWNVOTE;
+            return vote;
+        }
         if (std::any_of(pending.begin(), pending.end(), [&](const Bundle& b) { return b.hash == latest->second; })) {
             vote.bundle = latest->second;
             return vote;
@@ -298,7 +321,8 @@ void MinerState::Prune(const SidechainDB& scdb, int height)
         return seen != m_closed_seen.end() && height - seen->second >= PRUNE_DEPTH;
     }) > 0;
     std::erase_if(m_closed_seen, [&](const auto& entry) { return !m_bundles.contains(entry.first); });
-    std::erase_if(m_latest_bundle, [&](const auto& entry) { return !m_bundles.contains({entry.first, entry.second}); });
+    // (A null bundle is the word that the sidechain has none: it stays.)
+    std::erase_if(m_latest_bundle, [&](const auto& entry) { return !entry.second.IsNull() && !m_bundles.contains({entry.first, entry.second}); });
     if (changed) Save();
 }
 
@@ -357,6 +381,9 @@ BlockAdditions MinerState::CreateBlockAdditions(const SidechainDB& scdb, const C
     for (const auto& [slot, hash] : GetBundles()) {
         const Slot* state{scdb.GetSlot(slot)};
         if (!state || proposed_slots.contains(slot)) continue;
+        // Only the bundle the sidechain node vouches for, if it said: one handed before is one its
+        // chain gave up.
+        if (const auto vouched{Vouched(slot)}; vouched && *vouched != hash) continue;
         if (scdb.IsClosed(slot, hash)) continue;
         if (std::any_of(state->bundles.begin(), state->bundles.end(), [&](const Bundle& b) { return b.hash == hash; })) continue;
         if (state->bundles.size() >= params.max_pending_bundles) {

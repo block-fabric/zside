@@ -133,6 +133,14 @@ struct DrivechainParams {
      * sidechain, holding the same withdrawals, which would otherwise be paid a second time.
      */
     int single_payout_height{0};
+    /**
+     * From idle_expiry_height, a bundle that has been pending idle_expiry_blocks or more and has a
+     * score of 0 fails. Miners downvote the bundles their sidechain node does not vouch for -- a
+     * bundle a reorg of the sidechain left behind, or one proposed to get in the way -- which so go
+     * in that many blocks, rather than the whole withdrawal period.
+     */
+    int idle_expiry_height{0};
+    int idle_expiry_blocks{1008};
 };
 
 /**

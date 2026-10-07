@@ -4,7 +4,7 @@
 
 // Drivechains under fuzzing: every message parser gives back what its builder makes of the result,
 // and the sidechain database, fed blocks of fuzzed drivechain messages and escrow transactions,
-// always comes back exactly to where it was when a block is undone.
+// always comes back exactly to where it was when a block is undone, or fails part way.
 
 #include <consensus/amount.h>
 #include <consensus/params.h>
@@ -170,6 +170,10 @@ FUZZ_TARGET(drivechain_scdb)
         std::string reason;
         if (!after.ConnectBlock(block, height, params, undo, &deposits, reason)) {
             assert(!reason.empty());
+            // A block that fails is taken back by what its undo data has so far.
+            after.DisconnectBlock(undo);
+            assert(after == before);
+            assert(after.GetHash() == before.GetHash());
             continue;
         }
         // Undo brings back exactly what was, through serialization too.

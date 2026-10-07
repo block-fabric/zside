@@ -59,9 +59,12 @@ struct BlockTxPosition {
     friend bool operator==(const BlockTxPosition&, const BlockTxPosition&) = default;
 
     // tx_offset is encoded in 3-byte big-endian integer.
-    // This can hold up to 16,777,216, which is >4x the maximum 4 million block weight position
+    // This can hold up to 16,777,216, which is >4x the maximum 4 million block weight position.
+    // A chain with larger blocks may have offsets past it: those are stored as OFFSET_UNKNOWN, and
+    // the transaction is found by reading its block.
     static constexpr uint32_t TX_OFFSET_SIZE{3};
     static_assert(MAX_BLOCK_SERIALIZED_SIZE <= BigEndianFormatter<TX_OFFSET_SIZE>::MAX);
+    static constexpr uint32_t OFFSET_UNKNOWN{BigEndianFormatter<TX_OFFSET_SIZE>::MAX};
 
     SERIALIZE_METHODS(BlockTxPosition, obj)
     {

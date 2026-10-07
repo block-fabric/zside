@@ -423,6 +423,34 @@ RPCMethod receivewithdrawalbundle()
     };
 }
 
+RPCMethod vouchwithdrawalbundle()
+{
+    return RPCMethod{
+        "vouchwithdrawalbundle",
+        "Tell this node which withdrawal bundle the sidechain in a slot has now, as its sidechain node sees its best chain:\n"
+        "one handed with receivewithdrawalbundle, or none. With the default vote (upvote), the node then upvotes that bundle\n"
+        "and only proposes that one; with none, it downvotes the pending bundles of the slot, which a reorg of the sidechain\n"
+        "left behind or nobody made, so that they fail. Sidechain nodes call this on their mainchain node.",
+        {
+            {"slot", RPCArg::Type::NUM, RPCArg::Optional::NO, "The sidechain slot number"},
+            {"hash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "The hash of the bundle (the M6 id); none if left out"},
+        },
+        RPCResult{RPCResult::Type::NONE, "", ""},
+        RPCExamples{HelpExampleCli("vouchwithdrawalbundle", "0 \"hash\"") + HelpExampleCli("vouchwithdrawalbundle", "0")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+    const SidechainId id{ParseSlot(request.params[0], chainman)};
+    std::optional<uint256> hash;
+    if (!request.params[1].isNull()) hash = ParseHashV(request.params[1], "hash");
+    if (!chainman.m_drivechain_miner.Vouch(id, hash)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "This node was not handed that bundle (receivewithdrawalbundle)");
+    }
+    return UniValue::VNULL;
+},
+    };
+}
+
 RPCMethod sendwithdrawalbundle()
 {
     return RPCMethod{
@@ -883,11 +911,29 @@ RPCMethod getsidechainevents()
     if (count < 1 || count > 2000) throw JSONRPCError(RPC_INVALID_PARAMETER, "The count must be between 1 and 2000");
 
     UniValue result(UniValue::VARR);
-    // The lock is held throughout, so that the blocks returned are one chain.
+    // The blocks are read without the main lock, which up to 2000 of them would hold too long; then,
+    // with it, the chain is checked to be the one they were read from, and the rest is filled in.
+    std::vector<std::pair<const CBlockIndex*, FlatFilePos>> wanted;
+    {
+        LOCK(::cs_main);
+        const CChain& chain{chainman.ActiveChain()};
+        for (int height{first}; height < first + count && height <= chain.Height(); ++height) {
+            wanted.emplace_back(chain[height], chain[height]->GetBlockPos());
+        }
+    }
+    std::vector<CBlock> blocks(wanted.size());
+    for (size_t i{0}; i < wanted.size(); ++i) {
+        if (!chainman.m_blockman.ReadBlock(blocks[i], wanted[i].second, wanted[i].first->GetBlockHash())) {
+            throw JSONRPCError(RPC_MISC_ERROR, strprintf("Block %d is not available (pruned?)", first + static_cast<int>(i)));
+        }
+    }
     LOCK(::cs_main);
     const CChain& chain{chainman.ActiveChain()};
+    for (size_t i{0}; i < wanted.size(); ++i) {
+        if (chain[first + static_cast<int>(i)] != wanted[i].first) throw JSONRPCError(RPC_MISC_ERROR, "The chain changed meanwhile; ask again");
+    }
     const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
-    for (int height{first}; height < first + count && height <= chain.Height(); ++height) {
+    for (int height{first}; height < first + static_cast<int>(wanted.size()); ++height) {
         const CBlockIndex* pindex{chain[height]};
         UniValue obj(UniValue::VOBJ);
         obj.pushKV("height", height);
@@ -896,8 +942,7 @@ RPCMethod getsidechainevents()
         obj.pushKV("time", pindex->GetBlockTime());
         obj.pushKV("mediantime", pindex->GetMedianTimePast());
 
-        CBlock block;
-        if (!chainman.m_blockman.ReadBlock(block, *pindex)) throw JSONRPCError(RPC_MISC_ERROR, strprintf("Block %d is not available (pruned?)", height));
+        const CBlock& block{blocks[height - first]};
         for (const CTxOut& out : block.vtx[0]->vout) {
             const auto accept{drivechain::ParseBmmAcceptScript(out.scriptPubKey)};
             if (accept && accept->first == id) {
@@ -1034,6 +1079,7 @@ void RegisterDrivechainRPCCommands(CRPCTable& t)
         {"drivechain", &removesidechainproposal},
         {"drivechain", &acksidechain},
         {"drivechain", &receivewithdrawalbundle},
+        {"drivechain", &vouchwithdrawalbundle},
         {"drivechain", &listwithdrawalbundles},
         {"drivechain", &getwithdrawalbundle},
         {"drivechain", &getaveragefee},

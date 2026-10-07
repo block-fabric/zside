@@ -73,6 +73,13 @@ public:
      */
     std::optional<uint256> AddBundle(SidechainId slot, const CMutableTransaction& blind_tx, std::string& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     std::optional<CMutableTransaction> GetBundle(SidechainId slot, const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * The word of the sidechain node of `slot` on its bundle: the one its chain has (handed before with
+     * AddBundle), or none. Votes and proposals follow it. @return false if `hash` was never handed.
+     */
+    bool Vouch(SidechainId slot, const std::optional<uint256>& hash) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** What the sidechain node of `slot` vouches for: nothing known, none (null), or a bundle. */
+    std::optional<uint256> Vouched(SidechainId slot) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     std::vector<std::pair<SidechainId, uint256>> GetBundles() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** How to vote on the bundles of a sidechain. Sidechains without a vote get the default. */

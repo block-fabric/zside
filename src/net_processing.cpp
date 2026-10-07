@@ -2228,6 +2228,12 @@ void PeerManagerImpl::BlockDisconnected(const std::shared_ptr<const CBlock> &blo
  * Maintain state about the best-seen block and fast-announce a compact block
  * to compatible peers.
  */
+/**
+ * Compact blocks number the transactions they leave out in 16 bits: a block with more transactions
+ * (one of a chain with larger blocks) goes as a whole block, or is announced by its header.
+ */
+static constexpr size_t MAX_COMPACT_BLOCK_TXS{0x10000};
+
 void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock)
 {
     auto pcmpctblock = std::make_shared<const CBlockHeaderAndShortTxIDs>(*pblock, FastRandomContext().rand64());
@@ -2257,6 +2263,8 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
         m_most_recent_compact_block = pcmpctblock;
         m_most_recent_block_txs = std::move(most_recent_block_txs);
     }
+
+    if (pblock->vtx.size() > MAX_COMPACT_BLOCK_TXS) return;
 
     m_connman.ForEachNode([this, pindex, &lazy_ser, &hashBlock](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         AssertLockHeld(::cs_main);
@@ -2705,7 +2713,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             // they won't have a useful mempool to match against a compact block,
             // and we don't feel like constructing the object for them, so
             // instead we respond with the full, non-compact block.
-            if (can_direct_fetch && pindex->nHeight >= tip->nHeight - MAX_CMPCTBLOCK_DEPTH) {
+            if (can_direct_fetch && pindex->nHeight >= tip->nHeight - MAX_CMPCTBLOCK_DEPTH && pblock->vtx.size() <= MAX_COMPACT_BLOCK_TXS) {
                 if (a_recent_compact_block && a_recent_compact_block->header.GetHash() == inv.hash) {
                     MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, *a_recent_compact_block);
                 } else {
@@ -3351,10 +3359,19 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 // The headers after the first one without a commitment were not looked at. Keep them
                 // too, to be taken in when the mainchain commits to them: the peer sends them only once,
                 // and a node that has only the first would not know the rest of the chain to fetch.
+                // Only a run that links up, and a bounded one: anyone can send headers that will never
+                // be committed to, and keeping them costs a scan of those already kept. The mainchain
+                // commits to a few blocks at a time; the rest come again with the next headers.
+                static constexpr size_t MAX_WAITING_PER_MESSAGE{16};
+                size_t kept{0};
+                std::optional<uint256> prev;
                 for (const CBlockHeader& header : headers) {
+                    if (prev && header.hashPrevBlock != *prev) break;
                     const uint256 hash{header.GetHash()};
+                    prev = hash;
                     if (m_chainman.m_blockman.LookupBlockIndex(hash)) continue;
                     m_chainman.AddBmmWaiting(header, pfrom.GetId());
+                    if (++kept >= MAX_WAITING_PER_MESSAGE) break;
                 }
                 UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash());
             }
@@ -6261,7 +6278,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                 }
             }
             if (!fRevertToInv && !vHeaders.empty()) {
-                if (vHeaders.size() == 1 && state.m_requested_hb_cmpctblocks) {
+                if (vHeaders.size() == 1 && state.m_requested_hb_cmpctblocks && pBestIndex->nTx <= MAX_COMPACT_BLOCK_TXS) {
                     // We only send up to 1 block as header-and-ids, as otherwise
                     // probably means we're doing an initial-ish-sync or they're slow
                     LogDebug(BCLog::NET, "%s sending header-and-ids %s to peer=%d\n", __func__,

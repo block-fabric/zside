@@ -277,21 +277,16 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         // A transaction of the mempool can break the rules of the sidechain in this block: a refund of a
         // withdrawal that the mainchain events above paid, say. It is left out, with what depends on it,
         // rather than making no block at all -- the mempool is only cleaned when the tip changes.
-        const sidechain::State side_before_txs{side};
-        const sidechain::StateUndo undo_before_txs{undo};
-        for (bool applied{false}; !applied;) {
-            applied = true;
-            side = side_before_txs;
-            undo = undo_before_txs;
-            side_tx_outputs.clear();
-            for (size_t i{1}; i < pblock->vtx.size(); ++i) {
-                if (!side.ApplyTx(*pblock->vtx[i], nHeight, side_params, undo, side_tx_outputs, reject_reason, main_pending)) {
-                    LogInfo("%s: leaving out transaction %s, which breaks the sidechain rules in this block (%s)", __func__, pblock->vtx[i]->GetHash().ToString(), reject_reason);
-                    drop({pblock->vtx[i]->GetHash()});
-                    applied = false;
-                    break;
-                }
+        // One pass: a transaction that breaks a rule leaves the state as it was (ApplyTx is all or
+        // nothing), and what depends on it comes after it in the block, so it goes before it is applied.
+        side_tx_outputs.clear();
+        for (size_t i{1}; i < pblock->vtx.size();) {
+            if (side.ApplyTx(*pblock->vtx[i], nHeight, side_params, undo, side_tx_outputs, reject_reason, main_pending)) {
+                ++i;
+                continue;
             }
+            LogInfo("%s: leaving out transaction %s, which breaks the sidechain rules in this block (%s)", __func__, pblock->vtx[i]->GetHash().ToString(), reject_reason);
+            drop({pblock->vtx[i]->GetHash()});
         }
         // As many of the payouts owed as a block may pay; the rest wait for the next block.
         side_outputs = side.TakePayouts(std::move(side_outputs), std::move(side_tx_outputs), undo);

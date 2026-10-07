@@ -124,8 +124,9 @@ void TxIndex::DB::WriteTxs(const interfaces::BlockInfo& block)
     batch.Write(txindex::DB_NEXT_BLOCK_SEQ, block_seq + 1);
     uint32_t tx_offset_in_block{txindex::BLOCK_HEADER_SIZE + GetSizeOfCompactSize(block.data->vtx.size())};
     for (const auto& tx : block.data->vtx) {
+        const uint32_t stored{std::min(tx_offset_in_block, txindex::BlockTxPosition::OFFSET_UNKNOWN)};
         const txindex::DBKey key{txindex::CreateKeyPrefix(m_hasher, tx->GetHash()),
-                                 txindex::BlockTxPosition{block_seq, tx_offset_in_block}};
+                                 txindex::BlockTxPosition{block_seq, stored}};
         batch.Write(key, txindex::EMPTY_VALUE);
         tx_offset_in_block += tx->ComputeTotalSize();
     }
@@ -166,6 +167,8 @@ std::optional<TxIndexResult> TxIndex::FindTx(const Txid& tx_hash) const
         //! Active chain candidates are attempted first, so duplicate entries
         //! in both active and stale blocks will always return the active block hash.
         bool in_active_chain;
+        //! The position in the block is not known: tx_position is the block's, which is read whole.
+        bool whole_block{false};
     };
     std::vector<Candidate> candidates;
     {
@@ -185,6 +188,11 @@ std::optional<TxIndexResult> TxIndex::FindTx(const Txid& tx_hash) const
                 continue;
             }
             if (!(block_index->nStatus & BLOCK_HAVE_DATA)) continue;
+            if (key.pos.tx_offset_in_block == txindex::BlockTxPosition::OFFSET_UNKNOWN) {
+                // Too far into a large block to be stored: the block is read below.
+                candidates.emplace_back(FlatFilePos{block_index->nFile, block_index->nDataPos}, candidate_block_hash, key.pos.block_seq, m_chainstate->m_chain.Contains(*block_index), true);
+                continue;
+            }
             const FlatFilePos tx_position{block_index->nFile, block_index->nDataPos + key.pos.tx_offset_in_block};
             candidates.emplace_back(tx_position, candidate_block_hash, key.pos.block_seq, m_chainstate->m_chain.Contains(*block_index));
         }
@@ -203,7 +211,16 @@ std::optional<TxIndexResult> TxIndex::FindTx(const Txid& tx_hash) const
         }
         CTransactionRef tx;
         try {
-            file >> TX_WITH_WITNESS(tx);
+            if (candidate.whole_block) {
+                CBlock block;
+                file >> TX_WITH_WITNESS(block);
+                for (const CTransactionRef& in_block : block.vtx) {
+                    if (in_block->GetHash() == tx_hash) tx = in_block;
+                }
+                if (!tx) continue;
+            } else {
+                file >> TX_WITH_WITNESS(tx);
+            }
         } catch (const std::exception& e) {
             LogWarning("Deserialize or I/O error - %s", e.what());
             continue;

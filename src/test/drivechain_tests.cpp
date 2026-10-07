@@ -115,6 +115,10 @@ struct TestChain {
         reject_reason.clear();
         if (!after.ConnectBlock(block, height + 1, params, undo, &deposits, reject_reason)) {
             BOOST_CHECK(!reject_reason.empty());
+            // Failed part way, the block is taken back by its undo data so far (as validation does).
+            after.DisconnectBlock(undo);
+            BOOST_CHECK(after == before);
+            BOOST_CHECK(after.GetHash() == before.GetHash());
             return false;
         }
         BOOST_CHECK(after.GetBlockHash() == block.GetHash());
@@ -919,6 +923,66 @@ BOOST_AUTO_TEST_CASE(upvote_last_handed_bundle)
     BOOST_CHECK(vote.type == Vote::Type::UPVOTE && vote.bundle == *new_bundle);
     // Not pending yet: no vote for the old one meanwhile.
     BOOST_CHECK(miner.ResolveVote(1, {Bundle{*old_bundle, 0, 50}}).type == Vote::Type::ABSTAIN);
+}
+
+BOOST_AUTO_TEST_CASE(vouching)
+{
+    // The sidechain node says which bundle its chain has, or none: the default vote follows.
+    TestChain chain;
+    chain.Activate(MakeSidechain(1));
+    MinerState miner;
+    std::string error;
+    const auto mine{miner.AddBundle(1, TestChain::BlindBundle(COIN, 1000, 1), error)};
+    const auto stale{miner.AddBundle(1, TestChain::BlindBundle(COIN, 1000, 2), error)};
+    BOOST_REQUIRE(mine && stale);
+    // A bundle never handed cannot be vouched for.
+    BOOST_CHECK(!miner.Vouch(1, uint256{0xee}));
+    BOOST_CHECK(!miner.Vouched(2));
+    // None: the pending bundles of the slot are downvoted; with none pending, nothing to say.
+    BOOST_CHECK(miner.Vouch(1, std::nullopt));
+    BOOST_CHECK(miner.Vouched(1) == uint256{});
+    BOOST_CHECK(miner.ResolveVote(1, {Bundle{*stale, 0, 40}}).type == Vote::Type::DOWNVOTE);
+    BOOST_CHECK(miner.ResolveVote(1, {}).type == Vote::Type::ABSTAIN);
+    // A bundle: upvoted, and the only one proposed.
+    BOOST_CHECK(miner.Vouch(1, *mine));
+    const Vote vote{miner.ResolveVote(1, {Bundle{*stale, 0, 40}, Bundle{*mine, 0, 1}})};
+    BOOST_CHECK(vote.type == Vote::Type::UPVOTE && vote.bundle == *mine);
+    const auto scripts{Scripts(miner.CreateBlockAdditions(chain.scdb, chain.params, chain.tip, {}))};
+    BOOST_CHECK(Contains(scripts, BundleScript(1, *mine)));
+    BOOST_CHECK(!Contains(scripts, BundleScript(1, *stale)));
+    // An operator's own vote for the slot still comes first.
+    Vote abstain;
+    abstain.type = Vote::Type::ABSTAIN;
+    miner.SetVote(1, abstain);
+    BOOST_CHECK(miner.ResolveVote(1, {Bundle{*mine, 0, 1}}).type == Vote::Type::ABSTAIN);
+}
+
+BOOST_AUTO_TEST_CASE(idle_bundles_expire)
+{
+    // A bundle at score 0 once it is idle_expiry_blocks old fails, from idle_expiry_height.
+    for (const bool active : {false, true}) {
+        TestChain chain;
+        chain.params.idle_expiry_blocks = 5;
+        chain.Activate(MakeSidechain(1));
+        chain.params.idle_expiry_height = active ? 0 : 1000;
+        const uint256 junk{0x99};
+        BOOST_REQUIRE(chain.Connect({BundleScript(1, junk)}));
+        BOOST_REQUIRE(chain.Connect({Votes({VOTE_DOWNVOTE})}));
+        BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles[0].score, 0U);
+        // Its age counts the block that proposed it: 4 blocks old after the next two, 5 after the third.
+        for (int i{0}; i < 2; ++i) BOOST_REQUIRE(chain.Connect());
+        BOOST_CHECK_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 1U);
+        BOOST_REQUIRE(chain.Connect());
+        BOOST_CHECK_EQUAL(chain.scdb.GetSlot(1)->bundles.empty(), active);
+        if (active) BOOST_CHECK(chain.scdb.WasPaid(1, junk) == std::optional<bool>{false});
+    }
+    // One with votes stays.
+    TestChain chain;
+    chain.params.idle_expiry_blocks = 5;
+    chain.Activate(MakeSidechain(1));
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, uint256{0x98})}));
+    for (int i{0}; i < 8; ++i) BOOST_REQUIRE(chain.Connect({Votes({0})}));
+    BOOST_CHECK_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 1U);
 }
 
 BOOST_AUTO_TEST_CASE(full_queue_bundle_after_own_vote)

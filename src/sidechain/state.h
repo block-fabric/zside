@@ -241,6 +241,9 @@ public:
 
 private:
     void Remove(const COutPoint& withdrawal, StateUndo& undo);
+    /** ApplyTx, which undoes what this did if it returns false. */
+    [[nodiscard]] bool ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
+                                    std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending);
 
     int32_t m_main_height{-1};
     //! Withdrawals that the mainchain has not paid yet: those waiting for a bundle and those in the pending bundle.

@@ -84,7 +84,7 @@ public:
      * @param[out] deposits       escrow changes, for the benefit of sidechain software; may be null
      * @param[out] reject_reason  set when the block is invalid
      * @return false if the block is invalid, in which case the state is left
-     *         partially updated and must be discarded.
+     *         partially updated: DisconnectBlock(undo) takes it back.
      */
     [[nodiscard]] bool ConnectBlock(const CBlock& block, int height, const Consensus::DrivechainParams& params,
                                     BlockUndo& undo, std::vector<Deposit>* deposits, std::string& reject_reason,

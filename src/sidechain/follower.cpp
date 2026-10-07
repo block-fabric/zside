@@ -16,6 +16,8 @@
 #include <node/warnings.h>
 #include <pow.h>
 #include <rpc/util.h>
+#include <streams.h>
+#include <util/strencodings.h>
 #include <sidechain/mainchain.h>
 #include <util/threadnames.h>
 #include <util/translation.h>
@@ -137,16 +139,33 @@ bool Follower::UpdateRecord(bool may_drop)
     // fetches what replaced them, proposals included.
     if (may_drop && record.NeedsBackfill()) {
         LogInfo("Filling in the withdrawal bundles proposed in the %d mainchain blocks on record", record.Height() + 1);
-        bool complete{true};
-        for (int from{0}; from <= record.Height() && complete; from += BATCH) {
+        int filled{-1};
+        std::optional<int> moved;
+        for (int from{0}; from <= record.Height() && !moved; from += BATCH) {
             if (m_stop) return changed;
             const UniValue batch{fetch(from, BATCH)};
             for (size_t i{0}; i < batch.size() && from + static_cast<int>(i) <= record.Height(); ++i) {
-                if (!record.Backfill(from + static_cast<int>(i), Hash256(batch[i]["hash"]), ParseProposed(batch[i]))) {
-                    complete = false;
+                const int h{from + static_cast<int>(i)};
+                if (!record.Backfill(h, Hash256(batch[i]["hash"]), ParseProposed(batch[i]))) {
+                    moved = h;
                     break;
                 }
+                filled = h;
             }
+            // A batch cut short: the mainchain node does not have the blocks yet.
+            if (!moved && filled < std::min(from + BATCH - 1, record.Height())) break;
+        }
+        if (moved) {
+            // The mainchain left the record at this height: what is above goes, and comes back, proposals
+            // included, from the mainchain as it is now.
+            const std::vector<MainBlock> removed{record.Truncate(*moved - 1)};
+            LOCK(m_mutex);
+            for (const MainBlock& block : removed) {
+                if (block.bmm && !record.CommittedHeight(*block.bmm)) m_uncommitted.push_back(*block.bmm);
+            }
+            changed = true;
+        } else if (filled < record.Height()) {
+            throw std::runtime_error("The mainchain node does not have all the blocks on record yet (is it still syncing?); waiting for it before going on");
         }
         record.BackfillDone();
     }
@@ -392,6 +411,23 @@ void Follower::CheckActiveChain()
         }
         chainman.ActiveChainstate().ActivateBestChain(state);
     }
+    // Blocks marked failed for want of a commitment that the record has now: a node that stopped
+    // between learning of the commitment and acting on it would otherwise never take them again.
+    // Each has a commitment on the mainchain, which costs a fee: there cannot be many.
+    std::vector<CBlockIndex*> again;
+    {
+        LOCK(::cs_main);
+        for (auto& [hash, index] : chainman.m_blockman.m_block_index) {
+            if ((index.nStatus & BLOCK_FAILED_VALID) && record.CommittedHeight(hash)) again.push_back(&index);
+        }
+        for (CBlockIndex* pindex : again) chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
+        if (!again.empty()) chainman.RecalculateBestHeader();
+    }
+    if (!again.empty()) {
+        LogInfo("Checking again %d blocks that failed and have a commitment on the mainchain", again.size());
+        BlockValidationState state;
+        chainman.ActiveChainstate().ActivateBestChain(state);
+    }
     LOCK(m_mutex);
     m_chain_checked = true;
 }
@@ -404,18 +440,48 @@ void Follower::SendBundle()
     {
         LOCK(::cs_main);
         const State& side{chainman.ActiveChainstate().m_scdb.m_side};
-        if (!side.Bundle()) return;
-        hash = side.Bundle()->hash;
-        tx = side.BundleTx();
+        if (side.Bundle()) {
+            hash = side.Bundle()->hash;
+            tx = side.BundleTx();
+        }
+    }
+    const uint64_t slot{chainman.GetConsensus().sidechain.slot};
+    // Tell the mainchain node what this chain vouches for, when it changes: its miners upvote that
+    // bundle, and downvote any other of this slot (one a reorg left behind) so that it fails.
+    const auto vouch{[&](const uint256& bundle) {
+        if (WITH_LOCK(m_mutex, return m_vouched == bundle)) return;
+        try {
+            if (bundle.IsNull()) {
+                m_client.Call("vouchwithdrawalbundle", Params({slot}));
+            } else {
+                m_client.Call("vouchwithdrawalbundle", Params({slot, bundle.GetHex()}));
+            }
+        } catch (const std::exception& e) {
+            if (WITH_LOCK(m_mutex, return !m_vouched.has_value() || !m_vouch_warned)) {
+                LogWarning("The mainchain node did not take the word of this chain on its bundle (%s); it may be too old to vote by it", e.what());
+                LOCK(m_mutex);
+                m_vouch_warned = true;
+            }
+            return;
+        }
+        LOCK(m_mutex);
+        m_vouched = bundle;
+    }};
+    if (hash.IsNull()) {
+        vouch(uint256{});
+        return;
     }
     if (!tx) return;
-    const uint64_t slot{chainman.GetConsensus().sidechain.slot};
     if (WITH_LOCK(m_mutex, return m_bundle_sent != hash)) {
         // The mainchain node proposes the bundle in the blocks it mines; others learn its hash from those.
         // That it refuses the bundle is no reason to stop following the mainchain: it is logged, and tried
         // again with the next block.
         try {
-            m_client.Call("receivewithdrawalbundle", Params({slot, EncodeHexTx(CTransaction{*tx})}));
+            // Without the witness form: a blind bundle has no witness, and the mainchain reads it so (a
+            // chain with its own extended formats, as zSide, could otherwise pick one the mainchain cannot read).
+            DataStream blind{};
+            blind << TX_NO_WITNESS(CTransaction{*tx});
+            m_client.Call("receivewithdrawalbundle", Params({slot, HexStr(blind)}));
         } catch (const std::exception& e) {
             if (WITH_LOCK(m_mutex, return m_bundle_refused != hash)) {
                 LogWarning("The mainchain node did not take the withdrawal bundle %s: %s", hash.ToString(), e.what());
@@ -428,6 +494,7 @@ void Follower::SendBundle()
         LOCK(m_mutex);
         m_bundle_sent = hash;
     }
+    vouch(hash);
     // Once the bundle has the work score, the mainchain node broadcasts the
     // withdrawal that pays it out, and any miner can mine it: one try per
     // mainchain block, since the treasury output it spends can change.
