@@ -131,6 +131,7 @@ class ZSideTest(SidechainTest):
 
         # Before melt and unshield, which leave the wallet without coins on either side.
         self.run_anchor_reorg_test()
+        self.run_reorg_end_test()
         self.run_bump_test()
         self.run_conflict_test()
         self.run_rescan_test()
@@ -177,6 +178,38 @@ class ZSideTest(SidechainTest):
             assert_equal(side.gettransaction(spend)["confirmations"], 1)
         except JSONRPCException:
             assert_raises_rpc_error(-5, "not eligible for abandonment", side.abandontransaction, spend)
+        self.check_in_sync()
+
+    def run_reorg_end_test(self):
+        side, other = self.nodes
+        self.log.info("A reorg judges the shielded spends of the mempool once it is done, not on the way")
+        self.mine_txs()
+        assert_equal(side.getrawmempool(), [])
+        self.disconnect_nodes(0, 1)
+        # On the first node's branch: a coin shielded in a block, then a spend of every note, the new
+        # one too: its anchor is the tree that block left, which the other branch has only at its second block.
+        shield = side.shieldcoins(Decimal("0.5"))["txid"]
+        shield_hex = side.gettransaction(shield)["hex"]
+        self.bmm(node=side, expect=False)
+        assert_equal(side.getrawmempool(), [])
+        available = side.getshieldedbalance()["available"]
+        spend = side.sendshielded({side.getshieldedaddress(True): available - Decimal("0.01")})["txid"]
+        assert spend in side.getrawmempool()
+        # The other branch: a block without the coin, one with it (the tree the first node's block left),
+        # and one more, the longer branch.
+        self.bmm(node=other, expect=False)
+        # (The marker carries what goes into the pool: an unspendable output, allowed here.)
+        other.sendrawtransaction(shield_hex, 0, 1)
+        self.bmm(node=other, expect=False)
+        assert shield in other.getblock(other.getbestblockhash())["tx"]
+        self.bmm(node=other, expect=False)
+        self.connect_nodes(0, 1)
+        self.sync_blocks()
+        # On the way (the branch's first block), the anchor was not one; at the end it is: the spend stays.
+        assert spend in side.getrawmempool()
+        # (Made while the nodes were apart, the other has not heard of it: the first node mines it.)
+        self.bmm()
+        assert_equal(side.gettransaction(spend)["confirmations"], 1)
         self.check_in_sync()
 
     def run_bump_test(self):

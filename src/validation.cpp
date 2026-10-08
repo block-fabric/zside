@@ -397,8 +397,8 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
     // We also need to remove any now-immature transactions
     m_mempool->removeForReorg(m_chain, filter_final_and_mature);
-    // And the ones the drivechain rules no longer allow on top of the new tip.
-    RemoveStaleDrivechainTxs();
+    // And the ones the drivechain rules no longer allow on top of the new tip, the reorg done.
+    RemoveStaleDrivechainTxs(/*after_reorg=*/true);
     // Re-limit mempool size, in case we added any transactions
     LimitMempoolSize(*m_mempool, this->CoinsTip());
 }
@@ -5105,14 +5105,30 @@ drivechain::SidechainDB Chainstate::GetMempoolSidechainDB(const std::set<drivech
     return scdb;
 }
 
-void Chainstate::RemoveStaleDrivechainTxs()
+void Chainstate::RemoveStaleDrivechainTxs(bool after_reorg)
 {
     AssertLockHeld(::cs_main);
     if (!m_mempool) return;
     AssertLockHeld(m_mempool->cs);
-    if (m_mempool->m_bmm_requests.empty() && m_mempool->m_escrow_txs.empty() && m_mempool->m_refunds.empty() && m_mempool->m_shielded_nullifiers.empty()) return;
     const CBlockIndex* tip{m_chain.Tip()};
     if (!tip) return;
+
+    // zSide: whether the shielded transactions are looked at now, and why. Anchors only go when
+    // blocks are undone; the sighash domain changes at audit2_height (either way, a reorg may cross
+    // it). In the middle of a reorg the state is one on the way to the new tip, against which valid
+    // transactions could fail: they are looked at once it is done (MaybeUpdateMempoolForReorg).
+    // Kept up to date with no shielded transaction in the mempool too: those that come are checked
+    // for the current domain.
+    bool anchors_went{false}, domain_changed{false};
+    if (after_reorg || !m_blocks_disconnected) {
+        anchors_went = m_blocks_disconnected;
+        m_blocks_disconnected = false;
+        const bool audit2{tip->nHeight + 1 >= m_chainman.GetConsensus().sidechain.zside.audit2_height};
+        domain_changed = m_mempool_shielded_audit2 != audit2;
+        m_mempool_shielded_audit2 = audit2;
+    }
+
+    if (m_mempool->m_bmm_requests.empty() && m_mempool->m_escrow_txs.empty() && m_mempool->m_refunds.empty() && m_mempool->m_shielded_nullifiers.empty()) return;
 
     std::vector<CTransactionRef> stale;
 
@@ -5128,14 +5144,9 @@ void Chainstate::RemoveStaleDrivechainTxs()
         // Shielded transactions whose anchor a reorg took away: a block with them would be invalid,
         // and no block could be built. (Those whose notes another spent in a block, revealing one of
         // their nullifiers, went with the block's conflicts: CTxMemPool::removeForBlock.)
-        // Anchors only go when blocks are undone: the transactions are looked at only then. The
-        // sighash domain changes at audit2_height: then, or back below it, their proofs are checked
+        // Across audit2_height, either way, the sighash domain changed: their proofs are checked
         // again (those still valid are found in the cache).
-        const bool anchors_went{m_blocks_disconnected};
-        m_blocks_disconnected = false;
         const int next_height{tip->nHeight + 1};
-        const int audit2_height{m_chainman.GetConsensus().sidechain.zside.audit2_height};
-        const bool domain_changed{next_height == audit2_height || (anchors_went && next_height < audit2_height)};
         std::set<Txid> checked;
         for (const auto& [nf, txid] : m_mempool->m_shielded_nullifiers) {
             if (!anchors_went && !domain_changed) break;

@@ -864,9 +864,15 @@ public:
      * for another block, and deposits that do not follow from the current
      * escrow output of their sidechain.
      */
-    void RemoveStaleDrivechainTxs() EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_mempool->cs);
-    //! zSide: blocks were disconnected since RemoveStaleDrivechainTxs last ran (anchors may have gone).
+    void RemoveStaleDrivechainTxs(bool after_reorg = false) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_mempool->cs);
+    //! zSide: blocks were disconnected since the shielded transactions of the mempool were last
+    //! looked at (anchors may have gone). While set, a reorg is under way: the blocks of the new
+    //! branch are connected one by one, and the shielded pass waits for its end (after_reorg, from
+    //! MaybeUpdateMempoolForReorg) rather than judge them against a state on the way.
     bool m_blocks_disconnected GUARDED_BY(::cs_main){false};
+    //! zSide: whether the shielded transactions of the mempool were last looked at for a block in the
+    //! sighash domain of audit2_height (nullopt: never yet).
+    std::optional<bool> m_mempool_shielded_audit2 GUARDED_BY(::cs_main);
 
     /**
      * The sidechain database as the deposits in the mempool leave it, for the
