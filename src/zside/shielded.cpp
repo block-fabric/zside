@@ -247,6 +247,16 @@ bool TxOnlyReason(const std::string& reject_reason)
     return reasons.contains(reject_reason);
 }
 
+bool PunishableProofFailure(const CTransaction& tx, const Consensus::Params& params, int height)
+{
+    const int audit2{params.sidechain.zside.audit2_height};
+    // A chain with the domain from its start (or far from the change): there is no other.
+    if (audit2 <= 0 || height < audit2 - AUDIT2_GRACE_BLOCKS || height > audit2 + AUDIT2_GRACE_BLOCKS) return true;
+    const std::optional<SighashDomain> other{SighashDomainAt(params, height) ? std::nullopt : SighashDomainAt(params, audit2)};
+    std::string reason;
+    return !CheckShieldedTx(tx, reason, other);
+}
+
 bool VerifyBundles(std::span<const CTransactionRef> txs, const std::optional<SighashDomain>& domain)
 {
     std::vector<Bundle> bundles;

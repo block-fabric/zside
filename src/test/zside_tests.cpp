@@ -338,6 +338,37 @@ BOOST_AUTO_TEST_CASE(tx_only_reasons_fail_whatever_the_record)
     BOOST_CHECK(!sidechain::RecordIndependent("bad-sc-payout"));
 }
 
+BOOST_AUTO_TEST_CASE(proof_failure_near_audit2_is_not_punished)
+{
+    // A peer whose tip is a few blocks from this node's signs in the other sighash domain near
+    // audit2_height: that is no misbehaviour. A bundle valid in neither domain, or one sent far
+    // from that height, is.
+    Consensus::Params params;
+    params.hashGenesisBlock = uint256::ONE;
+    params.sidechain.slot = 6;
+    params.sidechain.zside.audit2_height = 100;
+    const auto domain{SighashDomainAt(params, 100)};
+    BOOST_REQUIRE(domain);
+    const CTransaction after{ShieldingTx(1000, domain, 7)};
+    const CTransaction before{ShieldingTx(1000, std::nullopt, 8)};
+    const CTransaction elsewhere{ShieldingTx(1000, SighashDomain{.genesis = uint256::ZERO, .slot = 6}, 10)};
+    std::string reason;
+    // Signed after the change, checked just before it (and the reverse): not punished.
+    BOOST_CHECK(!CheckShieldedTx(after, reason, SighashDomainAt(params, 95)));
+    BOOST_CHECK(!PunishableProofFailure(after, params, 95));
+    BOOST_CHECK(!CheckShieldedTx(before, reason, SighashDomainAt(params, 105)));
+    BOOST_CHECK(!PunishableProofFailure(before, params, 105));
+    // Far from the change: punished.
+    BOOST_CHECK(PunishableProofFailure(after, params, 100 - AUDIT2_GRACE_BLOCKS - 1));
+    BOOST_CHECK(PunishableProofFailure(before, params, 100 + AUDIT2_GRACE_BLOCKS + 1));
+    // Valid in neither domain: punished, near the change too.
+    BOOST_CHECK(PunishableProofFailure(elsewhere, params, 95));
+    BOOST_CHECK(PunishableProofFailure(elsewhere, params, 105));
+    // A chain with the domain from its start has no other.
+    params.sidechain.zside.audit2_height = 0;
+    BOOST_CHECK(PunishableProofFailure(before, params, 1));
+}
+
 BOOST_AUTO_TEST_CASE(bundles_of_a_block_in_one_batch)
 {
     const SighashDomain domain{.genesis = uint256::ONE, .slot = 6};

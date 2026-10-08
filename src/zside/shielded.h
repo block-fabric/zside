@@ -123,6 +123,16 @@ uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uin
 bool TxOnlyReason(const std::string& reject_reason);
 
 /**
+ * Whether a peer that sent a transaction the mempool refused for "bad-zs-proof", checked for a block
+ * at `height`, is to be punished. Near audit2_height a peer whose tip is a few blocks from this
+ * node's signs in the other sighash domain in good faith: punished only if the bundle fails in
+ * that one as well.
+ */
+bool PunishableProofFailure(const CTransaction& tx, const Consensus::Params& params, int height);
+//! How close to audit2_height (in blocks, either side) a bundle is also checked in the other domain.
+inline constexpr int AUDIT2_GRACE_BLOCKS{10};
+
+/**
  * Verify the proofs and signatures of the bundles of several transactions (a block's) in one batch,
  * and remember them valid: CheckShieldedTx then finds them so. False if one is invalid; nothing is
  * remembered then, and CheckShieldedTx finds which, one by one.
