@@ -542,12 +542,21 @@ class SidechainTest(BitcoinTestFramework):
         assert_equal([b["hash"] for b in main.listwithdrawalbundles(SLOT)], [x["hash"]])
 
         # The mainchain drops the block that committed to the sidechain block with X: the sidechain
-        # block goes, and with it X, on this sidechain. The mainchain node still has X, and proposes
-        # it again on its new branch.
+        # block goes, and with it X, on this sidechain.
         main.invalidateblock(commitment)
-        # Its request for the sidechain block went back to the mempool, good for the new tip: an empty
+        # The nodes of this chain learn it, and tell the mainchain node that their chain has no bundle
+        # any more. (Their followers may have done so already, on their own: they poll every second.)
+        for node in self.nodes:
+            node.syncmainchain()
+            assert committed != node.getbestblockhash()
+        # The mainchain node still has X, and a block built before it heard that proposes X again on
+        # the new branch. That order is not left to the timing of the followers: the word for X is
+        # given back for that one block, then taken back as the sidechain nodes gave it.
+        main.vouchwithdrawalbundle(SLOT, x["hash"])
+        # The request for the sidechain block went back to the mempool, good for the new tip: an empty
         # block first, after which it is stale, so that nothing commits to that sidechain block again.
         main.generateblock(main.getnewaddress(), [])
+        main.vouchwithdrawalbundle(SLOT)
         for node in self.nodes:
             node.syncmainchain()
             assert committed != node.getbestblockhash()
