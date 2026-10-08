@@ -45,6 +45,8 @@ class QTimer;
 QT_END_NAMESPACE
 
 /** Interface to Bitcoin wallet from Qt view code. */
+struct WalletModelNotificationGuard;
+
 class WalletModel : public QObject
 {
     Q_OBJECT
@@ -163,6 +165,9 @@ private:
     std::unique_ptr<interfaces::Handler> m_handler_transaction_changed;
     std::unique_ptr<interfaces::Handler> m_handler_show_progress;
     std::unique_ptr<interfaces::Handler> m_handler_can_get_addrs_changed;
+    /** Shared with the wallet notification handlers, which may run on other threads while this
+     *  model is deleted: they reach the model only through it, under its lock. */
+    std::shared_ptr<WalletModelNotificationGuard> m_notification_guard;
     ClientModel* m_client_model;
     interfaces::Node& m_node;
 

@@ -87,6 +87,8 @@ struct BundleCell {
 const Cell<BundleCell> BUNDLE{'b', {}};
 const Cell<int32_t> MAIN_HEIGHT{'h', -1};
 const Cell<int32_t> LAST_FAILURE{'x', -1};
+//! Height of the mainchain block that committed to the pending bundle (from audit2_height).
+const Cell<int32_t> BUNDLE_MAIN_HEIGHT{'y', -1};
 
 /** Signed integers in key order. */
 void EncodeSigned(StoreBytes& out, int64_t v) { KeyCodec<uint64_t>::Encode(out, static_cast<uint64_t>(v) ^ (uint64_t{1} << 63)); }
@@ -166,7 +168,12 @@ void State::ForEachWithdrawal(const std::function<bool(const Withdrawal&)>& fn) 
     WITHDRAWALS.ForEach(*m_view, [&](const COutPoint&, const Withdrawal& w) { return fn(w); });
 }
 
-void State::SetBundle(const std::optional<PendingBundle>& bundle) { BUNDLE.Put(Writable(), BundleCell{bundle}); }
+void State::SetBundle(const std::optional<PendingBundle>& bundle)
+{
+    BUNDLE.Put(Writable(), BundleCell{bundle});
+    // Only a state that has it changes: no new entry in the undo data of blocks before audit2_height.
+    if (!bundle && BUNDLE_MAIN_HEIGHT.Get(*m_view) != -1) BUNDLE_MAIN_HEIGHT.Put(Writable(), -1);
+}
 
 void State::AddWithdrawal(const Withdrawal& withdrawal)
 {
@@ -252,6 +259,17 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
             }
             payouts.emplace_back(deposit.amount, DepositScript(deposit.destination, params.slot));
         }
+        // A bundle the mainchain has not proposed unproposed_expiry_blocks after the block that
+        // committed to it fails: nobody may ever propose it, and its withdrawals, which no refund can
+        // take back while it is pending, would wait for ever.
+        if (height >= params.audit2_height) {
+            const int32_t committed{BUNDLE_MAIN_HEIGHT.Get(*m_view)};
+            if (const auto bundle{Bundle()}; bundle && committed >= 0 && int64_t{h} - committed >= params.unproposed_expiry_blocks &&
+                                             !mainchain.ProposedBetween(bundle->hash, committed, h)) {
+                LAST_FAILURE.Put(Writable(), height);
+                SetBundle(std::nullopt);
+            }
+        }
     }
     MAIN_HEIGHT.Put(Writable(), main_height);
     return true;
@@ -259,19 +277,34 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
 
 bool State::MainPending(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const
 {
+    if (height >= params.audit2_height) {
+        // Only a bundle with support counts: anyone can propose one (a bare M3), and so would freeze
+        // refunds. This chain's own holds back only its withdrawals (InBundle).
+        const auto bundle{Bundle()};
+        return mainchain.SupportedPending(MainHeight(), params.pending_min_score, bundle ? bundle->hash : uint256{});
+    }
     return height >= params.single_bundle_height && mainchain.BundlePending(MainHeight());
 }
 
 bool State::MainPendingNext(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const
 {
     // A record not filled in yet may miss proposals: as if one were pending.
+    if (height >= params.audit2_height) {
+        const auto bundle{Bundle()};
+        const uint256 ours{bundle ? bundle->hash : uint256{}};
+        return mainchain.NeedsBackfill() || mainchain.SupportedPending(MainHeight(), params.pending_min_score, ours) ||
+               mainchain.SupportedPending(mainchain.Height(), params.pending_min_score, ours);
+    }
     return height >= params.single_bundle_height &&
            (mainchain.NeedsBackfill() || mainchain.BundlePending(MainHeight()) || mainchain.BundlePending(mainchain.Height()));
 }
 
 std::optional<CMutableTransaction> State::NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals, bool main_pending) const
 {
-    if (Bundle() || main_pending) return std::nullopt;
+    // From audit2_height a bundle of another branch pending on the mainchain does not hold a new one
+    // back: the mainchain pays one bundle per slot and fails the others, and what the other pays is
+    // matched here (ApplyMainEvents).
+    if (Bundle() || (main_pending && height < params.audit2_height)) return std::nullopt;
     const int32_t last_failure{LastFailureHeight()};
     if (last_failure >= 0 && height - last_failure < params.bundle_retry_delay) return std::nullopt;
 
@@ -325,6 +358,8 @@ bool State::StartBundle(const uint256& hash, int height, const uint256& prev, co
         return false;
     }
     SetBundle(PendingBundle{hash, std::move(withdrawals), height, prev});
+    // The mainchain block that commits to the block with the bundle: the one after the last acted on.
+    if (height >= params.audit2_height) BUNDLE_MAIN_HEIGHT.Put(Writable(), MainHeight() + 1);
     return true;
 }
 
@@ -473,6 +508,18 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
         }
     }
     return true;
+}
+
+int32_t State::BundleMainHeight() const { return BUNDLE_MAIN_HEIGHT.Get(*m_view); }
+
+bool RecordIndependent(const std::string& reject_reason)
+{
+    // What a block breaks whatever the mainchain did: the form of its withdrawals and commitments,
+    // and the signatures of refunds (checked once the withdrawal is known and free).
+    static const std::set<std::string> independent{
+        "bad-sc-withdrawal", "bad-sc-withdrawal-amount", "bad-sc-refund-signature", "bad-sc-bundle-multiple",
+    };
+    return independent.contains(reject_reason);
 }
 
 std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, bool shared)

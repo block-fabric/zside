@@ -349,11 +349,14 @@ RPCMethod sendtoaddress()
 /**
  * Let a BMM request or a deposit be paid from the unconfirmed outputs of earlier ones (a wallet that
  * serves several sidechains), when the wallet has nothing else: the mempool takes it then only if it
- * is small (dc-unconfirmed-parent).
+ * is small (dc-unconfirmed-parent). A deposit is never paid from the change of a BMM request
+ * (bmm_request_parents false): the mempool drops a request that is not in the next block, and the
+ * deposit with it. Another BMM request may be: it asks for the same block, so expires with it anyway.
  */
-static void AllowDrivechainParents(CCoinControl& coin_control)
+static void AllowDrivechainParents(CCoinControl& coin_control, bool bmm_request_parents)
 {
     coin_control.m_allow_drivechain_parents = true;
+    coin_control.m_allow_bmm_request_parents = bmm_request_parents;
     coin_control.m_max_tx_weight = TRUC_CHILD_MAX_WEIGHT;
 }
 
@@ -383,7 +386,7 @@ static Txid SignAndCommit(CWallet& wallet, CMutableTransaction& mtx, const std::
 
     const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
     wallet.CommitTransaction(tx, /*replaces_txid=*/std::nullopt, /*comment=*/std::nullopt, /*comment_to=*/std::nullopt);
-    if (!wallet.chain().isInMempool(tx->GetHash())) {
+    if (CommittedTransactionRefused(wallet, tx)) {
         wallet.AbandonTransaction(tx->GetHash());
         throw JSONRPCError(RPC_WALLET_ERROR, "The transaction was not accepted into the mempool; another deposit to this sidechain may have been made at the same time");
     }
@@ -460,8 +463,16 @@ RPCMethod createsidechaindeposit()
     auto first{fund()};
     std::optional<util::Result<CreatedTransactionResult>> retry;
     if (!first) {
-        AllowDrivechainParents(coin_control);
+        AllowDrivechainParents(coin_control, /*bmm_request_parents=*/false);
         retry.emplace(fund());
+        if (!*retry) {
+            // Say why, when the change of a BMM request would have paid it.
+            CCoinControl with_requests{coin_control};
+            with_requests.m_allow_bmm_request_parents = true;
+            if (FundTransaction(*pwallet, tx, recipients, /*change_pos=*/2, /*lockUnspents=*/false, with_requests)) {
+                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "The funds for this deposit are in the unconfirmed change of a BMM request, which the mempool drops with the request if that is not mined in the next block: wait for a block and try again");
+            }
+        }
     }
     const auto& res{retry ? *retry : first};
     if (!res) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(first).original);
@@ -552,7 +563,7 @@ RPCMethod createbmmrequest()
     auto first_probe{create_probe()};
     std::optional<util::Result<CreatedTransactionResult>> retry_probe;
     if (!first_probe) {
-        AllowDrivechainParents(coin_control);
+        AllowDrivechainParents(coin_control, /*bmm_request_parents=*/true);
         retry_probe.emplace(create_probe());
     }
     const auto& probe{retry_probe ? *retry_probe : first_probe};
@@ -563,7 +574,7 @@ RPCMethod createbmmrequest()
     auto res{CreateTransaction(*pwallet, recipients, /*change_pos=*/1, coin_control, /*sign=*/true)};
     if (!res) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(res).original);
     pwallet->CommitTransaction(res->tx, /*replaces_txid=*/std::nullopt, /*comment=*/std::nullopt, /*comment_to=*/std::nullopt);
-    if (!pwallet->chain().isInMempool(res->tx->GetHash())) {
+    if (CommittedTransactionRefused(*pwallet, res->tx)) {
         pwallet->AbandonTransaction(res->tx->GetHash());
         const auto ahead{pwallet->chain().getMempoolBmmRequest(bmm_request.slot)};
         if (ahead && ahead->prev_main_block_hash == bmm_request.prev_main_block_hash && ahead->txid != res->tx->GetHash()) {

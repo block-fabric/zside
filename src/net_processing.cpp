@@ -4870,7 +4870,14 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             if (state.IsInvalid()) {
                 // On a sidechain, a header can come before the mainchain block that commits to it
                 // is on record. It is tried again then; remember that this peer has the block.
-                if (state.GetRejectReason() == "bmm-unknown") WITH_LOCK(::cs_main, UpdateBlockAvailability(pfrom.GetId(), cmpctblock.header.GetHash()));
+                if (state.GetRejectReason() == "bmm-unknown") {
+                    LOCK(::cs_main);
+                    UpdateBlockAvailability(pfrom.GetId(), cmpctblock.header.GetHash());
+                    // And who sent it: the block is fetched from that peer once the header is taken in,
+                    // which availability alone does not do for a header with less work than the
+                    // peer's best known block (one the record made invalid, say).
+                    m_chainman.AddBmmWaiting(cmpctblock.header, pfrom.GetId());
+                }
                 MaybePunishNodeForBlock(pfrom.GetId(), state, /*via_compact_block=*/true, "invalid header via cmpctblock");
                 return;
             }

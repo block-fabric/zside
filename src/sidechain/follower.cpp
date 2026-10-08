@@ -12,6 +12,7 @@
 #include <core_io.h>
 #include <interfaces/mining.h>
 #include <logging.h>
+#include <net_processing.h>
 #include <node/context.h>
 #include <node/warnings.h>
 #include <pow.h>
@@ -48,6 +49,29 @@ uint256 Hash256(const UniValue& value)
     return *hash;
 }
 
+/** An amount the mainchain node sent. AmountFromValue throws a UniValue, which nothing on the way
+ * up catches: here it becomes a bad answer, as any other. */
+CAmount ParseAmount(const UniValue& value)
+{
+    try {
+        return AmountFromValue(value);
+    } catch (const UniValue& e) {
+        throw std::runtime_error(strprintf("the mainchain node sent something that is not an amount (%s)", e.find_value("message").getValStr()));
+    }
+}
+
+/** The bundles of this sidechain pending after a mainchain block, with their scores. A node that does
+ * not say is too old to follow: from SidechainParams::audit2_height they decide whether refunds wait. */
+std::vector<MainPendingBundle> ParsePending(const UniValue& obj)
+{
+    if (!obj.exists("pending")) {
+        throw std::runtime_error("The mainchain node is too old: it does not report the withdrawal bundles pending after blocks, with their scores. Upgrade Chains");
+    }
+    std::vector<MainPendingBundle> pending;
+    for (const UniValue& entry : obj["pending"].getValues()) pending.push_back({Hash256(entry["hash"]), entry["score"].getInt<uint32_t>()});
+    return pending;
+}
+
 /** The bundles a mainchain block proposed. A node that does not say is too old to follow: taking
  * its silence for "none" would let withdrawals in a pending bundle be refunded. */
 std::vector<uint256> ParseProposed(const UniValue& obj)
@@ -76,14 +100,14 @@ MainBlock ParseMainBlock(const UniValue& obj)
     for (const UniValue& entry : obj["deposits"].getValues()) {
         MainDeposit deposit;
         deposit.destination = entry["destination"].get_str();
-        deposit.amount = AmountFromValue(entry["amount"]);
+        deposit.amount = ParseAmount(entry["amount"]);
         deposit.txid = Hash256(entry["txid"]);
         deposit.burn_index = entry["burnindex"].getInt<uint32_t>();
         if (entry.exists("bundle")) deposit.bundle = Hash256(entry["bundle"]);
         if (entry.exists("payouts")) {
             for (const UniValue& payout : entry["payouts"].getValues()) {
                 const std::vector<unsigned char> script{ParseHex(payout["script"].get_str())};
-                deposit.payouts.emplace_back(AmountFromValue(payout["amount"]), CScript{script.begin(), script.end()});
+                deposit.payouts.emplace_back(ParseAmount(payout["amount"]), CScript{script.begin(), script.end()});
             }
         }
         block.deposits.push_back(std::move(deposit));
@@ -92,6 +116,7 @@ MainBlock ParseMainBlock(const UniValue& obj)
         block.bundles.push_back({Hash256(entry["hash"]), entry["paid"].get_bool()});
     }
     block.proposed = ParseProposed(obj);
+    block.pending = ParsePending(obj);
     return block;
 }
 } // namespace
@@ -137,6 +162,43 @@ bool Follower::UpdateRecord(bool may_drop)
     }};
 
     bool changed{false};
+    // Before blocks on record are dropped, which cannot be taken back, the slot is checked to hold the
+    // sidechain this node follows (after the mainchain node answered, so that what it answered is no
+    // newer than what the check sees). Blocks added are checked after (Sync), before anything acts on
+    // them: a node that finds another sidechain stops, and asking first would hold up every new block.
+    bool slot_checked{false};
+    const auto before_change{[&] {
+        if (slot_checked) return;
+        CheckSlot(/*record_changed=*/true);
+        slot_checked = true;
+    }};
+    // Before blocks are dropped: the mainchain node has to be on the chain of the record (its first
+    // block the same), and a drop that takes more commitments than a reorg of this chain can undo
+    // waits for the operator (syncmainchain with allowdeepreorg): a wrong or lying mainchain node
+    // could otherwise make this node drop its chain.
+    const auto before_drop{[&](int keep) {
+        const UniValue first{fetch(0, 1)};
+        const auto genesis{record.GetBlock(0)};
+        if (first.empty() || !genesis || Hash256(first[0]["hash"]) != genesis->hash) {
+            throw std::runtime_error(strprintf("The mainchain node is on another chain than the one on record (its first block is %s, the record's %s); "
+                                               "check -mainchainrpcconnect and -mainchainrpcport",
+                                               first.empty() ? "missing" : first[0]["hash"].getValStr(), genesis ? genesis->hash.ToString() : "missing"));
+        }
+        int commitments{0};
+        for (int h{keep + 1}; h <= record.Height(); ++h) {
+            if (record.BmmAt(h)) ++commitments;
+        }
+        if (commitments > DRIVECHAIN_UNDO_DEPTH && !m_allow_deep_reorg) {
+            throw std::runtime_error(strprintf("The mainchain node no longer has the %d blocks on record above height %d, with %d commitments to blocks of this chain: "
+                                               "more than this node can take back (%d). If the mainchain really did reorganise this deep, call syncmainchain true",
+                                               record.Height() - keep, keep, commitments, DRIVECHAIN_UNDO_DEPTH));
+        }
+        before_change();
+        if (commitments > DRIVECHAIN_UNDO_DEPTH) {
+            LogWarning("Dropping %d commitments of the mainchain record, as the operator allowed", commitments);
+            m_allow_deep_reorg = false;
+        }
+    }};
     // A record written before it kept proposed bundles gets them, block by block, before anything
     // else. Blocks are only filled in, never dropped: no commitment goes missing meanwhile. A block
     // the mainchain no longer has stops it; the loop below then drops it and those above it, and
@@ -150,7 +212,7 @@ bool Follower::UpdateRecord(bool may_drop)
             const UniValue batch{fetch(from, BATCH)};
             for (size_t i{0}; i < batch.size() && from + static_cast<int>(i) <= record.Height(); ++i) {
                 const int h{from + static_cast<int>(i)};
-                if (!record.Backfill(h, Hash256(batch[i]["hash"]), ParseProposed(batch[i]))) {
+                if (!record.Backfill(h, Hash256(batch[i]["hash"]), ParseProposed(batch[i]), ParsePending(batch[i]))) {
                     moved = h;
                     break;
                 }
@@ -162,6 +224,7 @@ bool Follower::UpdateRecord(bool may_drop)
         if (moved) {
             // The mainchain left the record at this height: what is above goes, and comes back, proposals
             // included, from the mainchain as it is now.
+            before_drop(*moved - 1);
             const std::vector<MainBlock> removed{record.Truncate(*moved - 1)};
             LOCK(m_mutex);
             for (const MainBlock& block : removed) {
@@ -210,6 +273,7 @@ bool Follower::UpdateRecord(bool may_drop)
                     }
                     common = from - 1;
                 }
+                before_drop(common);
                 const std::vector<MainBlock> removed{record.Truncate(common)};
                 LogInfo("The mainchain dropped %d blocks above height %d", removed.size(), common);
                 LOCK(m_mutex);
@@ -224,8 +288,11 @@ bool Follower::UpdateRecord(bool may_drop)
             first_new = 1;
         }
         if (events.size() <= first_new) break;
+        // All of the answer is read first: one that cannot be read changes nothing.
+        std::vector<MainBlock> blocks;
+        for (size_t i{first_new}; i < events.size(); ++i) blocks.push_back(ParseMainBlock(events[i]));
         for (size_t i{first_new}; i < events.size(); ++i) {
-            const MainBlock block{ParseMainBlock(events[i])};
+            const MainBlock& block{blocks[i - first_new]};
             if (!record.Append(block)) {
                 // Not the block that follows. Blocks of the answer taken before it: the next call starts
                 // after them and finds out. None: the answer starts at the tip on record, then does not
@@ -266,6 +333,7 @@ void Follower::Poll()
 bool Follower::Sync(std::string& error)
 {
     AssertLockNotHeld(::cs_main);
+    bool failed{false};
     try {
         bool changed;
         {
@@ -274,6 +342,7 @@ bool Follower::Sync(std::string& error)
         }
         // Stopping cut the update short: the record may be partial, nothing to act on.
         if (m_stop) return false;
+        // Blocks added: checked before anything acts on them (UpdateRecord checks before it drops any).
         CheckSlot(changed);
         {
             // One at a time: two callers acting on the same changes could otherwise invalidate a
@@ -284,7 +353,14 @@ bool Follower::Sync(std::string& error)
         }
         SendBundle();
     } catch (const std::exception& e) {
+        failed = true;
         error = e.what();
+    } catch (const UniValue& e) {
+        // An RPC error object thrown on the way (as AmountFromValue does): a bad answer like any other.
+        failed = true;
+        error = strprintf("Unexpected answer from the mainchain node: %s", e.find_value("message").getValStr());
+    }
+    if (failed) {
         LOCK(m_mutex);
         if (m_status.connected || m_status.error != error) {
             LogWarning("%s", error);
@@ -367,7 +443,13 @@ void Follower::Act()
         // A candidate can only be committed to by the block after the one it was built on.
         std::erase_if(m_candidates, [&](const auto& entry) { return entry.second.main_prev_height < record.Height(); });
     }
-    if (uncommitted.empty() && committed.empty()) return;
+    // Headers that came before the commitment to them was on record (see below).
+    const auto waiting_ready{[&] {
+        LOCK(::cs_main);
+        const Mainchain& record{*chainman.m_mainchain};
+        return std::any_of(chainman.m_bmm_waiting.begin(), chainman.m_bmm_waiting.end(), [&](const auto& entry) { return record.CommittedHeight(entry.first).has_value(); });
+    }};
+    if (uncommitted.empty() && committed.empty() && !waiting_ready()) return;
 
     // A block that lost its commitment is no longer valid, and neither is what was built on it.
     // That includes a block whose commitment moved to another mainchain block in the same update:
@@ -391,20 +473,36 @@ void Follower::Act()
             }
         }
     }
-    // Headers that came before the commitment to them was on record. With the
-    // header accepted, the block is fetched from the peers that announced it.
-    for (const uint256& hash : committed) {
-        std::optional<CBlockHeader> header;
-        {
-            LOCK(::cs_main);
-            if (const auto it{chainman.m_bmm_waiting.find(hash)}; it != chainman.m_bmm_waiting.end()) {
-                header = it->second.header;
-                chainman.m_bmm_waiting.erase(it);
+    // Headers that came before the commitment to them was on record. With the header accepted, the
+    // block is fetched from the peers that announced it. Every one whose commitment is on record now,
+    // not only those of the blocks just added: a header that came while the record was being updated
+    // would otherwise wait for ever.
+    // In the order of their commitments, which is that of the chain: each header follows the one before.
+    std::map<int, std::pair<CBlockHeader, int64_t>> headers;
+    {
+        LOCK(::cs_main);
+        const Mainchain& record{*chainman.m_mainchain};
+        for (auto it{chainman.m_bmm_waiting.begin()}; it != chainman.m_bmm_waiting.end();) {
+            if (const auto height{record.CommittedHeight(it->first)}) {
+                headers.emplace(*height, std::make_pair(it->second.header, it->second.peer));
+                it = chainman.m_bmm_waiting.erase(it);
+            } else {
+                ++it;
             }
         }
-        if (!header) continue;
+    }
+    for (const auto& [_, entry] : headers) {
+        const auto& [header, peer]{entry};
         BlockValidationState state;
-        chainman.ProcessNewBlockHeaders({{*header}}, /*min_pow_checked=*/true, state);
+        const CBlockIndex* pindex{nullptr};
+        if (!chainman.ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, &pindex) || !pindex || peer < 0 || !m_node.peerman) continue;
+        // The block, from the peer that announced it: a header with less work than what the peer
+        // announced before (blocks the record made invalid) would not be fetched otherwise.
+        if (!WITH_LOCK(::cs_main, return pindex->nStatus & BLOCK_HAVE_DATA)) {
+            if (const auto fetched{m_node.peerman->FetchBlock(peer, *pindex)}; !fetched) {
+                LogDebug(BCLog::NET, "Block %s, now committed to, not fetched from peer=%d: %s", header.GetHash().ToString(), peer, fetched.error());
+            }
+        }
     }
     for (const auto& block : to_submit) {
         bool new_block{false};
@@ -528,7 +626,13 @@ bool Follower::CatchingUp() const
         const auto bmm{record.BmmAt(height)};
         if (!bmm) continue;
         const CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(*bmm)};
-        return !pindex || (!(pindex->nStatus & BLOCK_FAILED_VALID) && !chainman.ActiveChain().Contains(*pindex) && pindex->nChainWork > tip->nChainWork);
+        if (!pindex) {
+            // A block not known yet counts only if a peer announced its header, which waits for the
+            // commitment: anyone can have the mainchain commit to a hash that is no block at all.
+            if (chainman.m_bmm_waiting.contains(*bmm)) return true;
+            continue;
+        }
+        return !(pindex->nStatus & BLOCK_FAILED_VALID) && !chainman.ActiveChain().Contains(*pindex) && pindex->nChainWork > tip->nChainWork;
     }
     return false;
 }
@@ -541,12 +645,32 @@ void Follower::SendBundle()
     if (CatchingUp()) return;
     std::optional<CMutableTransaction> tx;
     uint256 hash;
+    int side_main_height{-1};
     {
         LOCK(::cs_main);
         const State side{chainman.ActiveChainstate().SideState()};
         if (const auto pending{side.Bundle()}) {
             hash = pending->hash;
             tx = side.BundleTx();
+        }
+        side_main_height = side.MainHeight();
+    }
+    // The record may already say what the next block of this chain will learn: that the bundle was
+    // closed, or that the mainchain paid another bundle of the slot, which can hold the same
+    // withdrawals. The bundle is not vouched for meanwhile: paid after the other, it would pay them a
+    // second time, and a chain without a new block for a while would otherwise keep it upvoted.
+    if (!hash.IsNull()) {
+        const Mainchain& record{*Assert(chainman.m_mainchain)};
+        for (int h{side_main_height + 1}; h <= record.Height() && !hash.IsNull(); ++h) {
+            const auto block{record.GetBlock(h)};
+            if (!block) break;
+            for (const MainBundleEvent& event : block->bundles) {
+                if (event.hash == hash || event.paid) {
+                    hash.SetNull();
+                    tx.reset();
+                    break;
+                }
+            }
         }
     }
     const uint64_t slot{chainman.GetConsensus().sidechain.slot};
@@ -766,11 +890,21 @@ void Follower::Mine()
 
 void Follower::Run()
 {
+    int failures{0};
     while (!m_stop) {
         std::string error;
-        if (Sync(error)) Mine();
+        if (Sync(error)) {
+            failures = 0;
+            Mine();
+        } else {
+            ++failures;
+        }
+        // After failures, longer and longer waits: a mainchain node that answers wrong is not asked
+        // the same again and again.
+        const auto wait{failures <= 1 ? std::chrono::duration_cast<std::chrono::seconds>(POLL_INTERVAL) :
+                                        std::min<std::chrono::seconds>(std::chrono::seconds{int64_t{1} << std::min(failures - 1, 4)}, MAX_RETRY_INTERVAL)};
         WAIT_LOCK(m_mutex, lock);
-        m_wake.wait_for(lock, POLL_INTERVAL, [this]() EXCLUSIVE_LOCKS_REQUIRED(m_mutex) { return m_stop.load() || m_woken; });
+        m_wake.wait_for(lock, wait, [this]() EXCLUSIVE_LOCKS_REQUIRED(m_mutex) { return m_stop.load() || m_woken; });
         m_woken = false;
     }
 }

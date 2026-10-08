@@ -40,6 +40,19 @@ using Done = std::function<void(std::optional<UniValue> result, const QString& e
 void CallAsync(QObject* receiver, ClientModel* client_model, const std::string& method, const UniValue& params, Done done,
                const std::optional<QString>& wallet = std::nullopt);
 
+/**
+ * Run `work` on the thread of CallAsync, after the calls queued before it. What it returns runs on
+ * the GUI thread afterwards, unless `receiver` was deleted meanwhile. `work` must not touch widgets.
+ */
+void RunAsync(QObject* receiver, std::function<std::function<void()>()> work);
+
+/**
+ * Stop the thread of CallAsync, before the node shuts down (BitcoinApplication::requestShutdown):
+ * the calls still queued are skipped, the one under way is waited for, and later ones are dropped.
+ * GUI thread only.
+ */
+void Stop();
+
 /** The parameters of a call. */
 UniValue Args(std::initializer_list<UniValue> values);
 /** Text of a string or number. */

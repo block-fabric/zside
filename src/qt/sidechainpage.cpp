@@ -12,6 +12,7 @@
 #include <qt/sidebarmining.h>
 #include <qt/walletmodel.h>
 
+#include <QDebug>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -37,7 +38,8 @@ constexpr int REFRESH_INTERVAL_MS{5000};
 //! Columns of the table of withdrawals.
 enum { COL_STATUS, COL_AMOUNT, COL_FEE, COL_HEIGHT, COL_REFUND, COL_TXID, COL_VOUT };
 
-QString Amount(const UniValue& value) { return QString::number(value.get_real(), 'f', 8); }
+//! An amount of a reply; one of another type is shown as it is (get_real would throw out of a slot).
+QString Amount(const UniValue& value) { return value.isNum() ? QString::number(value.get_real(), 'f', 8) : Text(value); }
 
 bool IsAmount(const QString& text)
 {
@@ -254,13 +256,18 @@ void SidechainPage::callAsync(const std::string& method, const UniValue& params,
         }
         wallet_name = m_wallet_model->getWalletName();
     }
-    NodeRpc::CallAsync(this, m_client_model, method, params, [this, success = std::move(success), finally = std::move(finally)](std::optional<UniValue> result, const QString& error) {
+    NodeRpc::CallAsync(this, m_client_model, method, params, [this, method, success = std::move(success), finally = std::move(finally)](std::optional<UniValue> result, const QString& error) {
         finally();
         if (!result) {
             QMessageBox::warning(this, tr("Mainchain"), error);
             return;
         }
-        success(*result);
+        // A reply of an unexpected shape makes the UniValue getters throw: not out of this slot.
+        try {
+            success(*result);
+        } catch (const std::exception& e) {
+            QMessageBox::warning(this, tr("Mainchain"), tr("Unexpected reply to %1: %2").arg(QString::fromStdString(method), QString::fromStdString(e.what())));
+        }
     }, wallet_name);
 }
 
@@ -341,6 +348,7 @@ void SidechainPage::mineOnce()
     params.push_back(amount.toStdString());
     m_mine_once->setEnabled(false);
     callAsync("requestbmmblock", params, [this](const UniValue& result) {
+        // (callAsync catches what the getters throw.)
         m_mining_once = tr("Asked for one block with %1 transactions and %2 of fees, offering %3. It is mined if the next block of the mainchain takes the offer.")
                             .arg(QString::number(result["transactions"].getInt<int>() - 1), Amount(result["fees"]), Amount(result["amount"]));
     }, [this] {
@@ -351,6 +359,17 @@ void SidechainPage::mineOnce()
 
 void SidechainPage::refresh()
 {
+    // A reply of an unexpected shape makes the UniValue getters throw, which would terminate the
+    // program from a slot: what is left is shown as it was.
+    try {
+        refreshPage();
+    } catch (const std::exception& e) {
+        qWarning() << "SidechainPage::refresh:" << e.what();
+    }
+}
+
+void SidechainPage::refreshPage()
+{
     const auto info{call("getmainchaininfo", Args({}), /*wallet=*/false, /*quiet=*/true)};
     if (!info) {
         m_summary->setText(tr("This chain is not running as a sidechain, so there is nothing to show here."));
@@ -358,8 +377,8 @@ void SidechainPage::refresh()
         return;
     }
     m_tabs->setEnabled(true);
-    m_slot = (*info)["slot"].getInt<int>();
-    const bool connected{(*info)["connected"].get_bool()};
+    m_slot = (*info)["slot"].isNum() ? (*info)["slot"].getInt<int>() : -1;
+    const bool connected{(*info)["connected"].isTrue()};
     m_summary->setText(connected
                            ? tr("Following the mainchain node at %1, which is at block %2. This chain is the sidechain in slot %3 of the mainchain.")
                                  .arg(Text((*info)["node"]), Text((*info)["height"])).arg(m_slot)
@@ -377,7 +396,7 @@ void SidechainPage::refresh()
         } else if (status == "next") {
             text = tr("The next block can start a bundle of %1 withdrawal(s) paying %2.").arg(Text((*bundle)["withdrawals"]), Amount((*bundle)["amount"]));
         } else {
-            text = bundle->exists("lastfailureheight") && (*bundle)["waiting"].getInt<int>() > 0
+            text = bundle->exists("lastfailureheight") && (*bundle)["waiting"].isNum() && (*bundle)["waiting"].getInt<int>() > 0
                        ? tr("The last bundle failed on the mainchain; a new one can be made after a waiting time.")
                        : tr("No bundle is being voted on.");
         }
@@ -400,12 +419,12 @@ void SidechainPage::refresh()
         m_withdrawals->resizeColumnsToContents();
     }
     if (const auto mining{call("getbmminfo", Args({}), false, true)}) {
-        const bool on{(*mining)["mining"].get_bool()};
+        const bool on{(*mining)["mining"].isTrue()};
         m_mining_start->setEnabled(!on);
         m_mining_stop->setEnabled(on);
         m_mining_address->setEnabled(!on);
         QString text{on ? tr("Automatic mining is on. Blocks asked for: %1. Blocks mined: %2. Outbid by other nodes: %3.").arg(Text((*mining)["requests"]), Text((*mining)["blocks"]), Text((*mining)["outbid"])) : tr("Automatic mining is off.")};
-        if (on && mining->exists("idle") && (*mining)["idle"].get_bool()) text += QStringLiteral(" ") + tr("Waiting for transactions whose fees pay for a block.");
+        if (on && (*mining)["idle"].isTrue()) text += QStringLiteral(" ") + tr("Waiting for transactions whose fees pay for a block.");
         if (on && mining->exists("lastoffer")) text += QStringLiteral(" ") + tr("Last block asked for: %1 of fees, %2 offered.").arg(Amount((*mining)["lastfees"]), Amount((*mining)["lastoffer"]));
         if (!m_mining_once.isEmpty()) text += QStringLiteral("\n") + m_mining_once;
         if (mining->exists("error")) text += ' ' + tr("Last attempt failed: %1").arg(Text((*mining)["error"]));

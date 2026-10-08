@@ -32,8 +32,10 @@
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
+#include <thread>
 
 #include <QAbstractButton>
 #include <QAction>
@@ -433,6 +435,41 @@ void TestGUIWatchOnly(interfaces::Node& node, TestChain100Setup& test)
     QVERIFY(psbt);
 }
 
+//! The wallet notifies from other threads (validation callbacks, RPCs) while the GUI deletes the
+//! models of a wallet being unloaded: a call in flight must not reach a deleted model. Deletes the
+//! models over and over while another thread fires every notification they listen to.
+void TestModelDeletedWhileNotified(interfaces::Node& node, TestChain100Setup& test)
+{
+    const std::shared_ptr<CWallet> wallet = SetupDescriptorsWallet(node, test);
+    const Txid txid{WITH_LOCK(wallet->cs_wallet, return wallet->mapWallet.begin()->first)};
+    std::unique_ptr<const PlatformStyle> platform_style(PlatformStyle::instantiate("other"));
+    MiniGUI mini_gui(node, platform_style.get());
+    WalletContext& context = *node.walletLoader().context();
+    for (int round = 0; round < 20; ++round) {
+        auto model{std::make_unique<WalletModel>(interfaces::MakeWallet(context, wallet), *mini_gui.clientModel, platform_style.get())};
+        std::atomic<bool> stop{false};
+        std::atomic<int> fired{0};
+        std::thread notifier([&] {
+            while (!stop) {
+                wallet->NotifyTransactionChanged(txid, CT_UPDATED);
+                wallet->ShowProgress("", fired % 2 ? 50 : 100);
+                wallet->NotifyStatusChanged(wallet.get());
+                wallet->NotifyCanGetAddressesChanged();
+                ++fired;
+            }
+        });
+        while (fired < 10) std::this_thread::yield();
+        model.reset();
+        // Still notifying for a while after the models are gone.
+        const int deleted_at{fired};
+        while (fired < deleted_at + 10) std::this_thread::yield();
+        stop = true;
+        notifier.join();
+        // What was posted to the deleted models was dropped with them.
+        QCoreApplication::processEvents();
+    }
+}
+
 void TestGUI(interfaces::Node& node)
 {
     // Set up wallet and chain with 105 blocks (5 mature blocks for spending).
@@ -451,6 +488,8 @@ void TestGUI(interfaces::Node& node)
     // Legacy watch-only wallet test
     // Verify PSBT creation.
     TestGUIWatchOnly(node, test);
+
+    TestModelDeletedWhileNotified(node, test);
 }
 
 } // namespace

@@ -12,6 +12,7 @@
 #include <uint256.h>
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -26,6 +27,17 @@ struct BlockEvents {
     std::vector<BlockUndo::Closed> closed;
     //! Bundles the block proposed (M3) that became pending.
     std::vector<std::pair<SidechainId, uint256>> proposed;
+    //! The bundles pending after the block, with their score after it, in vote order, per sidechain that has any.
+    std::vector<std::pair<SidechainId, std::vector<std::pair<uint256, uint32_t>>>> pending;
+};
+
+/** A block that closed a bundle. */
+struct Closure {
+    uint256 block_hash;
+    int32_t height{0};
+    bool paid{false};
+
+    SERIALIZE_METHODS(Closure, obj) { READWRITE(obj.block_hash, obj.height, obj.paid); }
 };
 
 /**
@@ -38,32 +50,57 @@ struct BlockEvents {
  *    the chainstate is flushed,
  *  - an index of the escrow changes of each sidechain, which sidechain
  *    software reads to credit deposits,
+ *  - an index of the blocks that closed each bundle, for good: a bundle the sidechain database
+ *    forgot (see SidechainDB::ForgetFailedBundles) is still known to have failed,
  *  - on a chain that is itself a sidechain, the store of its state (SideStore), one entry per key.
  */
 class Database
 {
 public:
-    explicit Database(const DBParams& params);
+    /**
+     * @param[in] params_fingerprint  ParamsFingerprint() of the drivechain parameters of the chain: all
+     *                                of the data is derived under them
+     */
+    Database(const DBParams& params, const uint256& params_fingerprint);
 
     /** Version of the way the data is laid out; a database of another version is wiped and built anew from the blocks. */
-    static constexpr uint32_t FORMAT_VERSION{3};
-    bool IsCurrentFormat() const;
+    static constexpr uint32_t FORMAT_VERSION{7};
+    enum class Format {
+        CURRENT,
+        //! Laid out another way (by an older version of this software), or not marked at all.
+        OTHER_VERSION,
+        //! Derived under other drivechain parameters (another activation height, say).
+        OTHER_PARAMS,
+    };
+    Format CheckFormat() const;
+    bool IsCurrentFormat() const { return CheckFormat() == Format::CURRENT; }
+    /** Mark the database as being of the current format, derived under the current parameters. */
     void WriteFormatVersion();
     /** Erase everything (the stores of the sidechain state too), a batch at a time. */
     void Wipe();
 
     /**
      * Store what a block at `height` did: its undo data, unless `keep_undo` is false, its events,
-     * and the escrow changes it made (`deposits`).
+     * and the escrow changes it made (`deposits`). `after` is the sidechain database the block left,
+     * whose pending bundles go with the events.
      */
-    bool WriteBlock(const uint256& block_hash, int height, const BlockUndo& undo, const std::vector<Deposit>& deposits, bool keep_undo = true);
+    bool WriteBlock(const uint256& block_hash, int height, const BlockUndo& undo, const std::vector<Deposit>& deposits,
+                    const SidechainDB& after, bool keep_undo = true);
     bool ReadBlockUndo(const uint256& block_hash, BlockUndo& undo) const;
     bool HasBlockUndo(const uint256& block_hash) const;
     /** Erase the undo data of a block (not its events), once no reorg can take it back. */
     void EraseBlockUndo(const uint256& block_hash);
+    /** The same for several blocks, in one batch. */
+    void EraseBlockUndo(const std::vector<uint256>& block_hashes);
     bool ReadBlockEvents(const uint256& block_hash, BlockEvents& events) const;
     /** Remove the escrow changes of a block that is no longer in the active chain from the index. */
     bool EraseBlockDeposits(const uint256& block_hash);
+
+    /**
+     * The last closure of a bundle by a block that `in_active_chain` accepts (the blocks of the active
+     * chain); nullopt if there is none. Records of blocks that left the chain are kept, and skipped here.
+     */
+    std::optional<Closure> FindClosure(SidechainId slot, const uint256& bundle_hash, const std::function<bool(const uint256&)>& in_active_chain) const;
 
     /**
      * Store the sidechain database of the chainstate named `chainstate`, and with it, in the same
@@ -71,7 +108,10 @@ public:
      */
     bool WriteState(const std::string& chainstate, const SidechainDB& scdb, const sidechain::DbStore* side_db = nullptr,
                     const std::map<sidechain::StoreBytes, std::optional<sidechain::StoreBytes>>* side_changes = nullptr);
-    /** Read it; false, with `scdb` empty, if there is none or it cannot be read (in an unknown format, say). */
+    /**
+     * Read it; false, with `scdb` empty, if there is none or it cannot be read (in an unknown format, say),
+     * or if it was derived under other drivechain parameters.
+     */
     bool ReadState(const std::string& chainstate, SidechainDB& scdb) const;
     /** Erase the stored sidechain state, and any state of the format before it (to rebuild from blocks). */
     void WipeState(const std::string& chainstate, const sidechain::DbStore& side_db);
@@ -79,18 +119,22 @@ public:
     std::unique_ptr<sidechain::DbStore> SideStore(const std::string& chainstate);
 
     /**
-     * Escrow changes of a sidechain in chain order.
+     * Escrow changes of a sidechain in chain order, of the blocks `in_active_chain` accepts. Records
+     * of other blocks (a crash between a reorg and the next flush can leave some) are skipped, and
+     * do not count towards `count`.
      *
      * @param[in] after  if set, the txid of the last change the caller knows about; only later ones are returned
      * @param[in] count  maximum number of changes to return, zero for no limit
-     * @return nullopt if `after` is not a known escrow change of the sidechain
+     * @return nullopt if `after` is not an escrow change of the sidechain in an accepted block
      */
-    std::optional<std::vector<Deposit>> ListDeposits(SidechainId slot, const std::optional<uint256>& after, size_t count) const;
+    std::optional<std::vector<Deposit>> ListDeposits(SidechainId slot, const std::optional<uint256>& after, size_t count,
+                                                     const std::function<bool(const uint256&)>& in_active_chain) const;
     /** Escrow changes of a sidechain made by the block of the active chain at `height`, in block order. */
     std::vector<Deposit> ListBlockDeposits(SidechainId slot, int height) const;
 
 private:
     mutable CDBWrapper m_db;
+    const uint256 m_params_fingerprint;
 };
 
 } // namespace drivechain

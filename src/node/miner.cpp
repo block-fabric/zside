@@ -11,6 +11,7 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/merkle.h>
+#include <drivechain/db.h>
 #include <drivechain/miner.h>
 #include <consensus/params.h>
 #include <consensus/tx_verify.h>
@@ -184,7 +185,18 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     // withdrawal bundles that can be paid out. Withdrawals go last, so that
     // they spend the escrow output as the deposits in the block leave it.
     ChainstateManager& chainman{m_chainstate.m_chainman};
-    chainman.m_drivechain_miner.Prune(m_chainstate.m_scdb, pindexPrev->nHeight + 1);
+    // What the active chain closed, for good: a failed bundle the sidechain database forgot is not proposed again.
+    const auto history{[&](drivechain::SidechainId slot, const uint256& hash) -> std::optional<int> {
+        AssertLockHeld(::cs_main);
+        const auto closure{chainman.m_blockman.m_drivechain_db->FindClosure(slot, hash, [&](const uint256& block_hash) {
+            AssertLockHeld(::cs_main);
+            const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(block_hash)};
+            return index && m_chainstate.m_chain.Contains(*index);
+        })};
+        if (!closure) return std::nullopt;
+        return closure->height;
+    }};
+    chainman.m_drivechain_miner.Prune(m_chainstate.m_scdb, pindexPrev->nHeight + 1, history);
     const drivechain::BlockAdditions drivechain_additions{chainman.m_drivechain_miner.CreateBlockAdditions(
         m_chainstate.m_scdb, chainparams.GetConsensus().drivechain, pindexPrev->GetBlockHash(),
         std::vector<CTransactionRef>{pblock->vtx.begin() + 1, pblock->vtx.end()})};

@@ -63,9 +63,23 @@ A sidechain has no miners and no coins of its own.
   bundle it paid out paid (`getsidechainevents`). A branch of the sidechain
   that never had that bundle takes the withdrawals it paid as paid: for every
   payout, the oldest withdrawal paying the same output with the same amount.
-  Without this, the branch would pay them again. A withdrawal that the branch
-  refunded before, or a competing bundle that is voted through as well, can
-  still be paid twice: that is for the mainchain miners not to let happen.
+  Without this, the branch would pay them again. The mainchain pays one bundle
+  per slot and fails the others pending (its `single_payout_height`), so from
+  `audit2_height` a bundle of another branch pending on the mainchain does not
+  hold back a new bundle of this one: only one of them is paid.
+- **Refunds and pending bundles.** A bundle of another branch pending on the
+  mainchain may hold a withdrawal that this branch would refund. From
+  `audit2_height`, refunds wait while such a bundle has a work score of
+  `pending_min_score` or more (`getsidechainevents` reports the bundles pending
+  after each block with their scores); below it, anyone could freeze refunds by
+  proposing a bundle. A withdrawal refunded while a bundle that holds it has
+  less than that can still be paid twice if a majority of mainchain miners
+  votes that bundle through over the downvotes of those who vouch for this
+  chain's own: that is the drivechain security model.
+- **Bundles nobody proposes.** From `audit2_height`, a bundle the mainchain has
+  not proposed `unproposed_expiry_blocks` mainchain blocks after the block that
+  committed to it fails, and its withdrawals go in a later one or can be taken
+  back.
 - **Committed twice.** A mainchain miner can commit to a sidechain block again
   later. The block keeps its first commitment; losing the second, in a reorg
   of the mainchain, changes nothing for it.
@@ -166,7 +180,14 @@ chains-cli -regtest listwithdrawalbundles 3
    `src/kernel/chainparams.cpp` (message of the first block, magic bytes,
    port, address prefix), and the RPC ports in `src/chainparamsbase.cpp`. The
    first block is derived from the message, so a new message is a new chain.
-   The slot is the one the mainchain activates your sidechain in.
+   The slot is the one the mainchain activates your sidechain in. Once it is
+   activated, set `main_activation_height` to the height of the mainchain
+   block that activated it (`activationheight` in the mainchain's
+   `getsidechain`): a main network release with a slot and no such height
+   refuses to start, a testnet one warns. Set `audit2_height` (at or above the
+   mainchain's `single_payout_height`), `pending_min_score` (a tenth of the
+   mainchain's `withdrawal_min_score`: 6480 on main and signet, 30 on testnet)
+   and `unproposed_expiry_blocks` (1440 on main and signet, 60 on testnet).
 4. Bring the tests along:
    - `contrib/sidechain/rename-hrp.py <old> <new>` re-encodes the addresses in
      the tests for each address prefix you changed;

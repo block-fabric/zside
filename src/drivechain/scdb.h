@@ -24,14 +24,28 @@
 
 namespace drivechain {
 
+/**
+ * A hash of the drivechain parameters that decide what the sidechain database becomes for a chain
+ * of blocks: all of them. Whatever was derived under other parameters (another activation height,
+ * say) is derived anew.
+ */
+uint256 ParamsFingerprint(const Consensus::DrivechainParams& params);
+/**
+ * On a chain that is itself a sidechain, with the parameters of its own rules as well: the state of
+ * this chain as a sidechain (its store) is derived under them. The same as above on any other chain.
+ */
+uint256 ParamsFingerprint(const Consensus::DrivechainParams& params, const Consensus::SidechainParams& sidechain);
+
 /** What became of a bundle that is no longer pending. */
 struct ClosedBundle {
     //! Whether it was paid out; if not, it failed.
     bool paid{false};
     //! Height of the block that closed it.
     int32_t height{0};
+    //! Whether a block ever upvoted it; a failed bundle nobody upvoted is forgotten sooner.
+    bool upvoted{true};
 
-    SERIALIZE_METHODS(ClosedBundle, obj) { READWRITE(obj.paid, obj.height); }
+    SERIALIZE_METHODS(ClosedBundle, obj) { READWRITE(obj.paid, obj.height, obj.upvoted); }
 
     friend bool operator==(const ClosedBundle&, const ClosedBundle&) = default;
 };
@@ -247,6 +261,12 @@ public:
         const auto it{m_closed.find({id, bundle_hash})};
         return it == m_closed.end() ? std::nullopt : std::optional<bool>{it->second.paid};
     }
+    /** What became of a bundle, if it is remembered as closed. */
+    std::optional<ClosedBundle> GetClosed(SidechainId id, const uint256& bundle_hash) const
+    {
+        const auto it{m_closed.find({id, bundle_hash})};
+        return it == m_closed.end() ? std::nullopt : std::optional<ClosedBundle>{it->second};
+    }
     /** Number of bundles remembered as paid out or failed. */
     size_t ClosedCount() const { return m_closed.size(); }
 
@@ -288,8 +308,9 @@ public:
     {
         s >> m_block_hash >> m_slots >> m_proposals >> m_closed >> m_last_votes;
         m_failed_by_height.clear();
+        m_unvoted_failed_by_height.clear();
         for (const auto& [key, closed] : m_closed) {
-            if (!closed.paid) m_failed_by_height.emplace(closed.height, key.first, key.second);
+            if (!closed.paid) FailedByHeight(closed).emplace(closed.height, key.first, key.second);
         }
     }
 
@@ -299,7 +320,10 @@ private:
     /** Remember the value of a slot before its first change in a block. */
     BlockUndo::SlotUndo& SaveSlot(SidechainId id, BlockUndo& undo) const;
     void EraseBundle(Slot& slot, SidechainId id, size_t index, BlockUndo& undo);
-    void CloseBundle(SidechainId id, const uint256& hash, bool paid, int height, BlockUndo& undo);
+    /** Close a bundle; `bundle` is the pending bundle it was, if it was one (whether it was ever upvoted). */
+    void CloseBundle(SidechainId id, const Bundle& bundle, bool paid, int height, BlockUndo& undo);
+    using FailedSet = std::set<std::tuple<int32_t, SidechainId, uint256>>;
+    FailedSet& FailedByHeight(const ClosedBundle& closed) { return closed.upvoted ? m_failed_by_height : m_unvoted_failed_by_height; }
     void RemoveProposal(size_t index, BlockUndo& undo);
     /**
      * Forget the bundles that failed withdrawal_period blocks or more before `height` (from
@@ -307,8 +331,15 @@ private:
      * sidechain that refunded its withdrawals would not expect; by then it has had a whole
      * withdrawal period to act on the failure, the bundle is older than any bundle can be while
      * pending, and paying it out again would take the same majority of the hashrate, upvoting for as
-     * long, as paying out any bundle nobody vouches for. Forgetting bounds what a miner can add to
-     * the state by proposing bundles nobody votes for: one per sidechain per block, for one period.
+     * long, as paying out any bundle nobody vouches for.
+     *
+     * A failed bundle that no block ever upvoted goes after unvoted_forget_blocks. Those are what a
+     * miner adds by proposing bundles nobody votes for, one per sidechain per block; remembering
+     * them for a whole period would let it grow the state by that much for as long as it keeps at
+     * it. Proposed again, such a bundle is where it was the first time: it starts from the same score
+     * and needs every one of its votes, from miners whose sidechain node does not vouch for it (it
+     * refunded it), and the record of its failure is kept for good outside the state (the closure
+     * index, getsidechainevents, the miner's own record), so no node mistakes it for a new one.
      */
     void ForgetFailedBundles(int height, const Consensus::DrivechainParams& params, BlockUndo& undo);
 
@@ -322,7 +353,9 @@ private:
     //! The votes the last block cast: an upvote of a bundle or a downvote, per sidechain.
     std::map<SidechainId, Vote> m_last_votes;
     //! The failed bundles of m_closed by the height they failed at, oldest first; not stored, rebuilt on load.
-    std::set<std::tuple<int32_t, SidechainId, uint256>> m_failed_by_height;
+    //! Those no block upvoted are apart, being forgotten sooner.
+    FailedSet m_failed_by_height;
+    FailedSet m_unvoted_failed_by_height;
 };
 
 } // namespace drivechain

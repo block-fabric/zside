@@ -165,12 +165,13 @@ void SidebarMining::refresh()
     }
     // What was said of the last action holds until the chain moves on.
     if (!m_note.isEmpty() && m_client_model->getNumBlocks() != m_note_blocks) m_note.clear();
-    m_mining = (*info)["mining"].get_bool();
+    // isTrue(): a field missing or of another type is false (get_bool would throw out of this slot).
+    m_mining = (*info)["mining"].isTrue();
     m_auto->setChecked(m_mining);
     m_auto->setText(m_mining ? tr("Auto mining: on") : tr("Auto mining: off"));
     QString status;
     if (m_mining) {
-        const bool idle{info->exists("idle") && (*info)["idle"].get_bool()};
+        const bool idle{(*info)["idle"].isTrue()};
         status = idle ? tr("Waiting for fees.") : tr("Asking for a block.");
         status += QLatin1Char(' ') + tr("Mined: %1.").arg(Text((*info)["blocks"]));
     }

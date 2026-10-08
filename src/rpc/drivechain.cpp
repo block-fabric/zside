@@ -637,8 +637,9 @@ RPCMethod getwithdrawalbundle()
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
-            {RPCResult::Type::STR, "status", "\"pending\" while miners vote on the bundle, \"paid\" once it was paid out, \"failed\" if it did not get the votes in time, \"unknown\" if no block proposed it\n"
-                                          "(or it failed more than a withdrawal period ago: getsidechainevents tells what became of every bundle for good)"},
+            {RPCResult::Type::STR, "status", "\"pending\" while miners vote on the bundle, \"paid\" once it was paid out, \"failed\" if it did not get the votes in time\n"
+                                          "(also once the sidechain database forgot it, a withdrawal period later: the blocks that closed it are kept for good),\n"
+                                          "\"unknown\" if no block of the active chain proposed it. A bundle proposed again after it was forgotten is \"pending\" again"},
             {RPCResult::Type::NUM, "score", /*optional=*/true, "The work score of a pending bundle"},
             {RPCResult::Type::NUM, "lastupvote", /*optional=*/true, "Height of the last block that upvoted a pending bundle, or of the block that proposed it"},
             {RPCResult::Type::NUM, "blocksleft", /*optional=*/true, "Number of blocks a pending bundle has left to reach the minimum work score"},
@@ -674,6 +675,16 @@ RPCMethod getwithdrawalbundle()
             PushBundlePayouts(result, chainman.m_drivechain_miner.GetBundle(id, hash));
             return result;
         }
+    }
+    // Forgotten by the sidechain database: the record of the block of the active chain that closed it.
+    const auto closure{chainman.m_blockman.m_drivechain_db->FindClosure(id, hash, [&](const uint256& block_hash) {
+        AssertLockHeld(::cs_main);
+        const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(block_hash)};
+        return index && chainman.ActiveChain().Contains(*index);
+    })};
+    if (closure) {
+        result.pushKV("status", closure->paid ? "paid" : "failed");
+        return result;
     }
     result.pushKV("status", "unknown");
     return result;
@@ -844,15 +855,19 @@ RPCMethod listsidechaindeposits()
     if (count == 0) count = MAX_DEPOSITS_LISTED;
 
     LOCK(::cs_main);
-    const auto deposits{chainman.m_blockman.m_drivechain_db->ListDeposits(id, after, static_cast<size_t>(count))};
+    // Records left by blocks the active chain no longer has (a crash between a reorg and the next
+    // flush can leave some) are neither listed nor counted, nor taken as the place to go on from.
+    const auto in_active_chain{[&](const uint256& block_hash) {
+        AssertLockHeld(::cs_main);
+        const CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(block_hash)};
+        return pindex && chainman.ActiveChain().Contains(*pindex);
+    }};
+    const auto deposits{chainman.m_blockman.m_drivechain_db->ListDeposits(id, after, static_cast<size_t>(count), in_active_chain)};
     if (!deposits) throw JSONRPCError(RPC_INVALID_PARAMETER, "The transaction given in 'after' is not an escrow change of this sidechain in the active chain");
 
     UniValue result(UniValue::VARR);
     for (const drivechain::Deposit& deposit : *deposits) {
-        const CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(deposit.block_hash)};
-        // A record left by a block the active chain no longer has (a crash between a reorg and the
-        // next write of the state can leave one) is not a deposit.
-        if (!pindex || !chainman.ActiveChain().Contains(*pindex)) continue;
+        const CBlockIndex* pindex{Assert(chainman.m_blockman.LookupBlockIndex(deposit.block_hash))};
         UniValue obj(UniValue::VOBJ);
         obj.pushKV("slot", deposit.slot);
         obj.pushKV("destination", deposit.destination);
@@ -862,7 +877,7 @@ RPCMethod listsidechaindeposits()
         obj.pushKV("burnindex", deposit.burn_index);
         obj.pushKV("txindex", deposit.tx_index);
         obj.pushKV("blockhash", deposit.block_hash.GetHex());
-        obj.pushKV("confirmations", pindex && chainman.ActiveChain().Contains(*pindex) ? chainman.ActiveHeight() - pindex->nHeight + 1 : 0);
+        obj.pushKV("confirmations", chainman.ActiveHeight() - pindex->nHeight + 1);
         obj.pushKV("hex", EncodeHexTx(*deposit.tx));
         result.push_back(std::move(obj));
     }
@@ -876,7 +891,8 @@ RPCMethod getsidechainevents()
     return RPCMethod{
         "getsidechainevents",
         "Returns everything that blocks of the active chain did that concerns one sidechain: the sidechain block they\n"
-        "committed to (blind merged mining), the changes they made to its escrow, and the withdrawal bundles they closed.\n"
+        "committed to (blind merged mining), the changes they made to its escrow, the withdrawal bundles they proposed\n"
+        "and closed, and the bundles pending after each of them.\n"
         "Sidechain software follows this chain with it, block by block.",
         {
             {"slot", RPCArg::Type::NUM, RPCArg::Optional::NO, "The sidechain slot number"},
@@ -921,6 +937,15 @@ RPCMethod getsidechainevents()
                 {RPCResult::Type::ARR, "proposed", "The withdrawal bundles the block proposed (BIP300 M3): pending from it until a block closes them",
                 {
                     {RPCResult::Type::STR_HEX, "", "The hash of the bundle"},
+                }},
+                {RPCResult::Type::ARR, "pending", "The withdrawal bundles of the sidechain that are pending after the block (proposed, and not closed yet),\n"
+                                                  "in the order vote messages number them. Recorded when the block was connected: the same for any height, at any time",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "hash", "The hash of the bundle"},
+                        {RPCResult::Type::NUM, "score", "Its work score after the block"},
+                    }},
                 }},
             }},
         }},
@@ -1023,6 +1048,20 @@ RPCMethod getsidechainevents()
             if (slot == id) proposed.push_back(hash.GetHex());
         }
         obj.pushKV("proposed", std::move(proposed));
+
+        // What is pending after the block, as the block left it: a sidechain that saw a block
+        // propose or close a bundle knows from this, at any height, what it may still have to pay.
+        UniValue pending(UniValue::VARR);
+        for (const auto& [slot, bundles] : events.pending) {
+            if (slot != id) continue;
+            for (const auto& [hash, score] : bundles) {
+                UniValue entry(UniValue::VOBJ);
+                entry.pushKV("hash", hash.GetHex());
+                entry.pushKV("score", score);
+                pending.push_back(std::move(entry));
+            }
+        }
+        obj.pushKV("pending", std::move(pending));
         result.push_back(std::move(obj));
     }
     return result;

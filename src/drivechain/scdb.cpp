@@ -10,6 +10,7 @@
 #include <script/script.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <limits>
 #include <optional>
 
@@ -21,6 +22,36 @@ namespace {
 int Age(int proposed_height, int height) { return height - proposed_height + 1; }
 
 } // namespace
+
+uint256 ParamsFingerprint(const Consensus::DrivechainParams& params)
+{
+    // Every field: a parameter added later has to be added here as well.
+    static_assert(sizeof(Consensus::DrivechainParams) == 13 * sizeof(int32_t), "a new drivechain parameter goes into the fingerprint");
+    HashWriter hasher{};
+    hasher << std::string{"Chains drivechain parameters"} << params.max_sidechains << params.activation_period << params.activation_max_failures
+           << params.replacement_period << params.withdrawal_period << params.withdrawal_min_score << params.max_pending_bundles
+           << params.single_payout_height << params.idle_expiry_height << params.idle_expiry_blocks << params.audit2_height
+           << params.upvote_expiry_blocks << params.unvoted_forget_blocks;
+    return hasher.GetHash();
+}
+
+uint256 ParamsFingerprint(const Consensus::DrivechainParams& params, const Consensus::SidechainParams& sidechain)
+{
+    // A chain that is no sidechain has nothing of it in the database.
+    if (!sidechain.enabled) return ParamsFingerprint(params);
+    // Every field: a parameter added later has to be added here as well.
+    // zSide: ZsideParams included (its fields as well). It takes the 4 bytes of padding the
+    // template's fields left at the end, so the size alone would not see it: it is the last field.
+    static_assert(sizeof(Consensus::ZsideParams) == sizeof(int32_t), "a new zSide parameter goes into the fingerprint");
+    static_assert(offsetof(Consensus::SidechainParams, zside) + sizeof(Consensus::ZsideParams) == 48, "a new sidechain parameter goes into the fingerprint");
+    static_assert(sizeof(Consensus::SidechainParams) == 48, "a new sidechain parameter goes into the fingerprint");
+    HashWriter hasher{};
+    hasher << std::string{"Sidechain parameters"} << ParamsFingerprint(params) << sidechain.slot << sidechain.min_withdrawal
+           << sidechain.max_bundle_withdrawals << sidechain.bundle_retry_delay << sidechain.single_bundle_height
+           << sidechain.main_activation_height << sidechain.audit2_height << sidechain.pending_min_score
+           << sidechain.unproposed_expiry_blocks << std::string{"zSide parameters"} << sidechain.zside.audit2_height;
+    return hasher.GetHash();
+}
 
 const Slot* SidechainDB::GetSlot(SidechainId id) const
 {
@@ -111,24 +142,31 @@ void SidechainDB::EraseBundle(Slot& slot, SidechainId id, size_t index, BlockUnd
     slot.bundles.erase(slot.bundles.begin() + index);
 }
 
-void SidechainDB::CloseBundle(SidechainId id, const uint256& hash, bool paid, int height, BlockUndo& undo)
+void SidechainDB::CloseBundle(SidechainId id, const Bundle& bundle, bool paid, int height, BlockUndo& undo)
 {
-    if (!m_closed.emplace(std::pair{id, hash}, ClosedBundle{paid, height}).second) return;
-    undo.closed.push_back({id, hash, paid});
-    if (!paid) m_failed_by_height.emplace(height, id, hash);
+    // The block that proposed a bundle cannot upvote it: a later upvote moved last_upvote.
+    const ClosedBundle closed{paid, height, /*upvoted=*/bundle.last_upvote != bundle.height};
+    if (!m_closed.emplace(std::pair{id, bundle.hash}, closed).second) return;
+    undo.closed.push_back({id, bundle.hash, paid});
+    if (!paid) FailedByHeight(closed).emplace(height, id, bundle.hash);
 }
 
 void SidechainDB::ForgetFailedBundles(int height, const Consensus::DrivechainParams& params, BlockUndo& undo)
 {
     if (height < params.audit2_height) return;
-    const int64_t last{int64_t{height} - std::max(1, params.withdrawal_period)};
-    while (!m_failed_by_height.empty() && std::get<0>(*m_failed_by_height.begin()) <= last) {
-        const auto& [failed_height, id, hash]{*m_failed_by_height.begin()};
-        const auto closed{m_closed.find({id, hash})};
-        undo.forgotten.emplace_back(closed->first, closed->second);
-        m_closed.erase(closed);
-        m_failed_by_height.erase(m_failed_by_height.begin());
-    }
+    const auto forget{[&](FailedSet& failed, int window) {
+        const int64_t last{int64_t{height} - std::max(1, window)};
+        while (!failed.empty() && std::get<0>(*failed.begin()) <= last) {
+            const auto& [failed_height, id, hash]{*failed.begin()};
+            const auto closed{m_closed.find({id, hash})};
+            undo.forgotten.emplace_back(closed->first, closed->second);
+            m_closed.erase(closed);
+            failed.erase(failed.begin());
+        }
+    }};
+    forget(m_failed_by_height, params.withdrawal_period);
+    // Never later than the others.
+    forget(m_unvoted_failed_by_height, std::min(params.unvoted_forget_blocks, params.withdrawal_period));
 }
 
 void SidechainDB::RemoveProposal(size_t index, BlockUndo& undo)
@@ -225,11 +263,11 @@ bool SidechainDB::ConnectTx(const CTransaction& tx, const Consensus::DrivechainP
         if (bundle == slot.bundles.end()) return invalid("bad-dc-withdrawal-unknown");
         if (bundle->score < static_cast<uint32_t>(params.withdrawal_min_score)) return invalid("bad-dc-withdrawal-score");
 
+        CloseBundle(id, *bundle, /*paid=*/true, height, undo);
         EraseBundle(slot, id, bundle - slot.bundles.begin(), undo);
-        CloseBundle(id, *blind_hash, /*paid=*/true, height, undo);
         if (height >= params.single_payout_height) {
             // The other bundles of the sidechain are copies holding the same withdrawals: they fail.
-            for (const Bundle& other : slot.bundles) CloseBundle(id, other.hash, /*paid=*/false, height, undo);
+            for (const Bundle& other : slot.bundles) CloseBundle(id, other, /*paid=*/false, height, undo);
             for (size_t i{slot.bundles.size()}; i-- > 0;) EraseBundle(slot, id, i, undo);
         }
         destination = WITHDRAWAL_RETURN_DEST;
@@ -421,7 +459,7 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
         if (saved.existed && !saved.sidechain) saved.sidechain = slot.sidechain;
         // A sidechain that replaces another one takes over its escrow, but not its pending
         // withdrawals: they fail, so that the software of the old sidechain gives them back.
-        for (const Bundle& bundle : slot.bundles) CloseBundle(id, bundle.hash, /*paid=*/false, height, undo);
+        for (const Bundle& bundle : slot.bundles) CloseBundle(id, bundle, /*paid=*/false, height, undo);
         for (size_t b{slot.bundles.size()}; b-- > 0;) EraseBundle(slot, id, b, undo);
         slot.sidechain = m_proposals[i].sidechain;
         slot.activation_height = height;
@@ -444,7 +482,7 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
                 ++i;
                 continue;
             }
-            CloseBundle(id, bundle.hash, /*paid=*/false, height, undo);
+            CloseBundle(id, bundle, /*paid=*/false, height, undo);
             EraseBundle(slot, id, i, undo);
         }
     }
@@ -546,7 +584,7 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
             // honest bundle out. A bundle the miners vote for is never pushed out.
             const auto weakest{WeakestBundle(slot.bundles)};
             if (weakest == slot.bundles.end() || weakest->score > NEW_BUNDLE_SCORE) return invalid("bad-dc-too-many-bundles");
-            CloseBundle(id, weakest->hash, /*paid=*/false, height, undo);
+            CloseBundle(id, *weakest, /*paid=*/false, height, undo);
             EraseBundle(slot, id, weakest - slot.bundles.begin(), undo);
         }
         Bundle bundle;
@@ -572,7 +610,7 @@ void SidechainDB::DisconnectBlock(const BlockUndo& undo)
     // The sidechain state is reverted by whoever holds its store, with undo.side.
     for (const auto& [key, closed] : undo.forgotten) {
         m_closed.emplace(key, closed);
-        if (!closed.paid) m_failed_by_height.emplace(closed.height, key.first, key.second);
+        if (!closed.paid) FailedByHeight(closed).emplace(closed.height, key.first, key.second);
     }
     // The bundles, from the last change back; the slots they belong to still exist.
     for (auto it{undo.bundle_changes.rbegin()}; it != undo.bundle_changes.rend(); ++it) {
@@ -616,7 +654,7 @@ void SidechainDB::DisconnectBlock(const BlockUndo& undo)
     for (const BlockUndo::Closed& closed : undo.closed) {
         const auto it{m_closed.find({closed.id, closed.hash})};
         if (it == m_closed.end()) continue;
-        if (!it->second.paid) m_failed_by_height.erase({it->second.height, closed.id, closed.hash});
+        if (!it->second.paid) FailedByHeight(it->second).erase({it->second.height, closed.id, closed.hash});
         m_closed.erase(it);
     }
     for (auto it{undo.removed.rbegin()}; it != undo.removed.rend(); ++it) {

@@ -20,6 +20,7 @@
 #include <test/fuzz/util.h>
 #include <test/util/setup_common.h>
 
+#include <algorithm>
 #include <cassert>
 #include <optional>
 #include <string>
@@ -72,6 +73,9 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
     params.max_bundle_withdrawals = fdp.ConsumeIntegralInRange<uint32_t>(1, 4);
     params.bundle_retry_delay = fdp.ConsumeIntegralInRange<int>(0, 5);
     params.single_bundle_height = fdp.ConsumeIntegralInRange<int>(0, 30);
+    params.audit2_height = fdp.ConsumeIntegralInRange<int>(0, 40);
+    params.pending_min_score = fdp.ConsumeIntegralInRange<uint32_t>(0, 4);
+    params.unproposed_expiry_blocks = fdp.ConsumeIntegralInRange<int>(1, 8);
 
     CKey key;
     const std::vector<unsigned char> secret(32, 0x42);
@@ -106,6 +110,12 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
             main.bundles.push_back({proposed_hashes[fdp.ConsumeIntegralInRange<size_t>(0, proposed_hashes.size() - 1)], fdp.ConsumeBool()});
         }
         if (const auto bundle{tip_state.Bundle()}; bundle && fdp.ConsumeBool()) main.bundles.push_back({bundle->hash, fdp.ConsumeBool()});
+        if (const auto bundle{tip_state.Bundle()}; bundle && fdp.ConsumeBool()) main.proposed.push_back(bundle->hash);
+        // The bundles pending after the block, as the mainchain says, with scores.
+        for (const uint256& hash : proposed_hashes) {
+            if (fdp.ConsumeBool()) main.pending.push_back({hash, fdp.ConsumeIntegralInRange<uint32_t>(0, 6)});
+        }
+        if (const auto bundle{tip_state.Bundle()}; bundle && fdp.ConsumeBool()) main.pending.push_back({bundle->hash, fdp.ConsumeIntegralInRange<uint32_t>(0, 6)});
         if (fdp.ConsumeBool()) {
             sidechain::MainDeposit change;
             change.destination = drivechain::WITHDRAWAL_RETURN_DEST;
@@ -122,7 +132,21 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
         std::string reason;
         if (!state.ApplyMainEvents(mainchain.Height(), mainchain, height, params, payouts, reason)) continue;
         const bool main_pending{state.MainPending(mainchain, height, params)};
-        if (main_pending) assert(!state.NextBundle(height, uint256{static_cast<uint8_t>(height)}, params, nullptr, main_pending));
+        // Before audit2_height, a pending bundle holds a new one back; from it, the mainchain's single
+        // payout sees to it. From it, a pending bundle is one with support, and not this chain's own.
+        if (main_pending && height < params.audit2_height) assert(!state.NextBundle(height, uint256{static_cast<uint8_t>(height)}, params, nullptr, main_pending));
+        if (height >= params.audit2_height) {
+            const auto ours{state.Bundle()};
+            const auto last{*mainchain.GetBlock(state.MainHeight())};
+            const bool supported{std::any_of(last.pending.begin(), last.pending.end(), [&](const sidechain::MainPendingBundle& b) {
+                return b.score >= params.pending_min_score && (!ours || b.hash != ours->hash);
+            })};
+            assert(main_pending == supported);
+            // A bundle left pending is one the mainchain proposed in time, or that is still in time.
+            if (ours && state.BundleMainHeight() >= 0 && state.MainHeight() - state.BundleMainHeight() >= params.unproposed_expiry_blocks) {
+                assert(mainchain.ProposedBetween(ours->hash, state.BundleMainHeight(), state.MainHeight()));
+            }
+        }
         if (const auto bundle{state.NextBundle(height, uint256{static_cast<uint8_t>(height)}, params, nullptr, main_pending)}; bundle && fdp.ConsumeBool()) {
             assert(state.StartBundle(bundle->GetHash().ToUint256(), height, uint256{static_cast<uint8_t>(height)}, params, reason, main_pending));
         }

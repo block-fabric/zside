@@ -6,14 +6,17 @@
 
 #include <logging.h>
 
+#include <algorithm>
+#include <iterator>
 #include <set>
 
 namespace sidechain {
 namespace {
 constexpr uint8_t DB_BLOCK{'b'};
-//! Version of the record: 2 since blocks keep the bundles they proposed.
+//! Version of the record: 2 since blocks keep the bundles they proposed, 3 since they keep the
+//! bundles pending after them with their scores.
 constexpr uint8_t DB_VERSION{'v'};
-constexpr uint32_t RECORD_VERSION{2};
+constexpr uint32_t RECORD_VERSION{3};
 //! The sidechain found in the slot (SlotIdentity).
 constexpr uint8_t DB_SLOT_IDENTITY{'i'};
 //! Set while blocks connected before the backfill are to be checked again.
@@ -52,8 +55,7 @@ Mainchain::Mainchain(const std::optional<DBParams>& db_params)
         // The record is only as long as it is consistent.
         if (!m_blocks.empty() && block.prev_hash != m_blocks.back().hash) break;
         if (block.bmm) m_bmm.emplace(*block.bmm, m_blocks.size());
-        for (const MainBundleEvent& event : block.bundles) m_closed.emplace(event.hash, m_blocks.size());
-        for (const uint256& hash : block.proposed) m_proposed.emplace(hash, m_blocks.size());
+        IndexEvents(block, m_blocks.size(), /*add=*/true);
         m_blocks.push_back(std::move(block));
     }
     if (SlotIdentity identity; m_db->Read(DB_SLOT_IDENTITY, identity)) m_slot_identity = identity;
@@ -117,31 +119,67 @@ std::optional<int> Mainchain::ClosedHeight(const uint256& hash) const
 {
     LOCK(m_mutex);
     const auto it{m_closed.find(hash)};
-    if (it == m_closed.end()) return std::nullopt;
-    return it->second;
+    if (it == m_closed.end() || it->second.empty()) return std::nullopt;
+    return *it->second.begin();
+}
+
+bool Mainchain::ProposedBetween(const uint256& hash, int from, int to) const
+{
+    LOCK(m_mutex);
+    const auto it{m_proposed.find(hash)};
+    if (it == m_proposed.end()) return false;
+    const auto at{it->second.lower_bound(from)};
+    return at != it->second.end() && *at <= to;
+}
+
+void Mainchain::IndexEvents(const MainBlock& block, int height, bool add)
+{
+    AssertLockHeld(m_mutex);
+    const auto index{[&](std::map<uint256, std::set<int>>& map, const uint256& hash) {
+        if (add) {
+            map[hash].insert(height);
+            return;
+        }
+        const auto it{map.find(hash)};
+        if (it == map.end()) return;
+        it->second.erase(height);
+        if (it->second.empty()) map.erase(it);
+    }};
+    for (const MainBundleEvent& event : block.bundles) index(m_closed, event.hash);
+    for (const uint256& hash : block.proposed) index(m_proposed, hash);
+}
+
+bool Mainchain::PendingAfter(const uint256& hash, int height) const
+{
+    AssertLockHeld(m_mutex);
+    // The last proposal at or below the height, and the last close: pending if the proposal is the
+    // later one, or in the same block (closes come first).
+    const auto last{[&](const std::map<uint256, std::set<int>>& map) -> std::optional<int> {
+        const auto it{map.find(hash)};
+        if (it == map.end()) return std::nullopt;
+        const auto above{it->second.upper_bound(height)};
+        if (above == it->second.begin()) return std::nullopt;
+        return *std::prev(above);
+    }};
+    const auto proposed{last(m_proposed)};
+    if (!proposed) return false;
+    const auto closed{last(m_closed)};
+    return !closed || *proposed >= *closed;
 }
 
 void Mainchain::UpdatePending() const
 {
     AssertLockHeld(m_mutex);
-    // Each block changes the count by the bundles it proposed first, less those it closed first that
-    // a block before it proposed first.
+    // Each block changes the count by the bundles whose proposal or close it holds: each one pending
+    // after it and not before, or the other way round.
     for (size_t h{m_pending.size()}; h < m_blocks.size(); ++h) {
         int64_t count{h == 0 ? 0 : int64_t{m_pending[h - 1]}};
         const int height{static_cast<int>(h)};
         std::set<uint256> seen;
-        for (const uint256& hash : m_blocks[h].proposed) {
-            const auto first{m_proposed.find(hash)};
-            if (!seen.insert(hash).second || first == m_proposed.end() || first->second != height) continue;
-            const auto closed{m_closed.find(hash)};
-            if (closed == m_closed.end() || closed->second > height) ++count;
-        }
-        seen.clear();
-        for (const MainBundleEvent& event : m_blocks[h].bundles) {
-            const auto first{m_closed.find(event.hash)};
-            if (!seen.insert(event.hash).second || first == m_closed.end() || first->second != height) continue;
-            const auto proposed{m_proposed.find(event.hash)};
-            if (proposed != m_proposed.end() && proposed->second < height) --count;
+        for (const MainBundleEvent& event : m_blocks[h].bundles) seen.insert(event.hash);
+        for (const uint256& hash : m_blocks[h].proposed) seen.insert(hash);
+        for (const uint256& hash : seen) {
+            count += int{PendingAfter(hash, height)} - int{PendingAfter(hash, height - 1)};
         }
         m_pending.push_back(static_cast<uint32_t>(std::max<int64_t>(count, 0)));
     }
@@ -153,6 +191,16 @@ bool Mainchain::BundlePending(int main_height) const
     if (main_height < 0 || m_blocks.empty()) return false;
     UpdatePending();
     return m_pending[std::min<size_t>(main_height, m_blocks.size() - 1)] > 0;
+}
+
+bool Mainchain::SupportedPending(int main_height, uint32_t min_score, const uint256& ours) const
+{
+    LOCK(m_mutex);
+    if (main_height < 0 || m_blocks.empty()) return false;
+    const MainBlock& block{m_blocks[std::min<size_t>(main_height, m_blocks.size() - 1)]};
+    return std::any_of(block.pending.begin(), block.pending.end(), [&](const MainPendingBundle& bundle) {
+        return bundle.hash != ours && bundle.score >= min_score;
+    });
 }
 
 std::optional<uint256> Mainchain::BmmAt(int height) const
@@ -168,24 +216,16 @@ bool Mainchain::NeedsBackfill() const
     return m_needs_backfill;
 }
 
-bool Mainchain::Backfill(int height, const uint256& hash, const std::vector<uint256>& proposed)
+bool Mainchain::Backfill(int height, const uint256& hash, const std::vector<uint256>& proposed, const std::vector<MainPendingBundle>& pending)
 {
     LOCK(m_mutex);
     if (height < 0 || height >= static_cast<int>(m_blocks.size()) || m_blocks[height].hash != hash) return false;
     MainBlock& block{m_blocks[height]};
-    for (const uint256& old : block.proposed) {
-        const auto it{m_proposed.find(old)};
-        if (it != m_proposed.end() && it->second == height) m_proposed.erase(it);
-    }
+    IndexEvents(block, height, /*add=*/false);
     block.proposed = proposed;
-    for (const uint256& p : proposed) {
-        // The first proposal counts, which a block filled in below a later one is.
-        const auto [it, added]{m_proposed.emplace(p, height)};
-        if (!added && it->second > height) {
-            InvalidatePending(it->second);
-            it->second = height;
-        }
-    }
+    block.pending = pending;
+    IndexEvents(block, height, /*add=*/true);
+    // Whether a bundle is pending after a block depends on the events up to it, not above it.
     InvalidatePending(height);
     if (m_db) m_db->Write(BlockKey{static_cast<uint32_t>(height)}, block);
     return true;
@@ -259,8 +299,7 @@ bool Mainchain::Append(const MainBlock& block)
     if (!m_blocks.empty() && block.prev_hash != m_blocks.back().hash) return false;
     // A sidechain block has one place in the mainchain; a second commitment to it means nothing.
     if (block.bmm) m_bmm.emplace(*block.bmm, m_blocks.size());
-    for (const MainBundleEvent& event : block.bundles) m_closed.emplace(event.hash, m_blocks.size());
-    for (const uint256& hash : block.proposed) m_proposed.emplace(hash, m_blocks.size());
+    IndexEvents(block, m_blocks.size(), /*add=*/true);
     if (m_db) m_db->Write(BlockKey{static_cast<uint32_t>(m_blocks.size())}, block);
     m_blocks.push_back(block);
     return true;
@@ -279,14 +318,7 @@ std::vector<MainBlock> Mainchain::Truncate(int height)
         m_db->WriteBatch(batch, /*fSync=*/true);
     }
     for (size_t i{keep}; i < m_blocks.size(); ++i) {
-        for (const MainBundleEvent& event : m_blocks[i].bundles) {
-            const auto it{m_closed.find(event.hash)};
-            if (it != m_closed.end() && it->second == static_cast<int>(i)) m_closed.erase(it);
-        }
-        for (const uint256& hash : m_blocks[i].proposed) {
-            const auto it{m_proposed.find(hash)};
-            if (it != m_proposed.end() && it->second == static_cast<int>(i)) m_proposed.erase(it);
-        }
+        IndexEvents(m_blocks[i], i, /*add=*/false);
         if (!m_blocks[i].bmm) continue;
         const auto it{m_bmm.find(*m_blocks[i].bmm)};
         if (it != m_bmm.end() && it->second == static_cast<int>(i)) m_bmm.erase(it);

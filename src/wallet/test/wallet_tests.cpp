@@ -862,6 +862,16 @@ BOOST_FIXTURE_TEST_CASE(drivechain_parents_not_selected, ListCoinsTestingSetup)
         BOOST_CHECK(res->tx->vin.at(0).prevout == COutPoint(request->GetHash(), 1));
         BOOST_CHECK_LE(GetTransactionWeight(*res->tx), TRUC_CHILD_MAX_WEIGHT);
     }
+    // Nothing else can when the outputs of BMM requests are left out (a deposit): it would leave the
+    // mempool with the request if that is not in the next block.
+    {
+        LOCK(wallet->cs_wallet);
+        CCoinControl coin_control;
+        coin_control.m_allow_drivechain_parents = true;
+        coin_control.m_allow_bmm_request_parents = false;
+        BOOST_CHECK_EQUAL(AvailableCoins(*wallet, &coin_control).Size(), 0U);
+        BOOST_CHECK(IsBmmRequest(*request));
+    }
     // Once confirmed, it is a coin like any other.
     {
         LOCK(wallet->cs_wallet);

@@ -238,6 +238,23 @@ BOOST_AUTO_TEST_CASE(database_reads_in_order)
     BOOST_CHECK(db.Exists(std::make_pair(uint8_t{'S'}, uint8_t{1})) && db.Exists(std::make_pair(uint8_t{'U'}, uint8_t{1})));
 }
 
+BOOST_AUTO_TEST_CASE(database_reads_from_below_the_prefix)
+{
+    // Read from a key below the prefix, a database store finds the first entry under the prefix, as
+    // an overlay does, not the entry below it that a seek lands on first.
+    CDBWrapper db{DBParams{.path = m_args.GetDataDirBase() / "store4", .cache_bytes = 1 << 20, .memory_only = true}};
+    DbStore store{db, B({'T', 0})};
+    CDBBatch batch{db};
+    store.Write(batch, {{B({1, 5}), B({1})}, {B({3, 2}), B({3})}});
+    db.WriteBatch(batch);
+    store.Reset();
+    const auto found{store.Next(B({0}), B({3}))};
+    BOOST_REQUIRE(found);
+    BOOST_CHECK(found->first == B({3, 2}));
+    BOOST_CHECK(StoreOverlay{store}.Next(B({0}), B({3})) == found);
+    BOOST_CHECK(!store.Next(B({0}), B({2})));
+}
+
 BOOST_AUTO_TEST_CASE(hash_with_entries)
 {
     EmptyStore empty;

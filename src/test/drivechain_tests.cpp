@@ -31,13 +31,16 @@
 #include <streams.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
+#include <validation.h>
 #include <crypto/common.h>
 #include <tinyformat.h>
 #include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <functional>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1368,8 +1371,9 @@ BOOST_AUTO_TEST_CASE(no_refund_while_a_bundle_is_pending_on_the_mainchain)
     // The double payout: a bundle committed on another branch of this chain is pending on the
     // mainchain. This branch never had it, so the withdrawals in it look free here. Refunded here and
     // then paid there, a withdrawal is paid twice. While a bundle of this sidechain is pending on the
-    // mainchain, nothing is refunded and no other bundle is started.
+    // mainchain, nothing is refunded and no other bundle is started (before audit2_height).
     Consensus::SidechainParams params;
+    params.audit2_height = 1000;
     SideStore side;
     sidechain::State& state{side.state};
     CKey key;
@@ -1427,6 +1431,225 @@ BOOST_AUTO_TEST_CASE(no_refund_while_a_bundle_is_pending_on_the_mainchain)
     BOOST_CHECK(!mainchain.BundlePending(1));
 }
 
+namespace {
+/** A withdrawal of COIN (less a fee of 1000) to `pay`, refundable by `key`, made at `height`. */
+COutPoint MakeWithdrawal(sidechain::State& state, const CKey& key, const CScript& pay, int height, const Consensus::SidechainParams& params, uint8_t salt = 0)
+{
+    CMutableTransaction tx;
+    tx.vin.resize(1);
+    tx.vin[0].prevout = COutPoint{Txid::FromUint256(uint256{salt}), 0};
+    tx.vout.emplace_back(COIN, sidechain::WithdrawalScript(1000, key.GetPubKey().GetID(), pay));
+    std::vector<CTxOut> payouts;
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, height, params, payouts, reason), reason);
+    return COutPoint{tx.GetHash(), 0};
+}
+
+sidechain::RefundRequest SignRefund(const CKey& key, const COutPoint& withdrawal)
+{
+    sidechain::RefundRequest refund;
+    refund.withdrawal = withdrawal;
+    BOOST_REQUIRE(key.SignCompact(MessageHash(sidechain::RefundMessage(withdrawal)), refund.signature));
+    return refund;
+}
+
+/** A mainchain record of `count` empty blocks. */
+void Extend(sidechain::Mainchain& mainchain, int count, const std::function<void(sidechain::MainBlock&)>& fill = {})
+{
+    for (int i{0}; i < count; ++i) {
+        sidechain::MainBlock block;
+        const int height{mainchain.Height() + 1};
+        block.hash = uint256{static_cast<uint8_t>(height + 1)};
+        block.hash.data()[30] = 0x5a;
+        block.prev_hash = mainchain.TipHash();
+        if (fill) fill(block);
+        BOOST_REQUIRE(mainchain.Append(block));
+    }
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(pending_bundle_holds_refunds_back_only_with_support)
+{
+    // From audit2_height: a bundle of another branch pending on the mainchain holds refunds back only
+    // with a score of pending_min_score or more, and never holds a new bundle back. Anyone can propose
+    // a bundle (a bare M3); miners who vouch for this chain's bundle downvote it, and it stays near 0.
+    Consensus::SidechainParams params;
+    params.pending_min_score = 3;
+    SideStore side;
+    sidechain::State& state{side.state};
+    CKey key;
+    key.MakeNewKey(/*fCompressed=*/true);
+    const CScript pay{GetScriptForDestination(WitnessV0KeyHash{key.GetPubKey().GetID()})};
+    const COutPoint withdrawal{MakeWithdrawal(state, key, pay, 1, params)};
+    const auto refund{SignRefund(key, withdrawal)};
+    std::string reason;
+    std::vector<CTxOut> payouts;
+
+    const uint256 foreign{0xf0};
+    sidechain::Mainchain mainchain;
+    Extend(mainchain, 1);
+    // Proposed: score 1, then 2, then 3.
+    for (uint32_t score{1}; score <= 3; ++score) Extend(mainchain, 1, [&](sidechain::MainBlock& b) {
+        if (score == 1) b.proposed.push_back(foreign);
+        b.pending.push_back({foreign, score});
+    });
+    BOOST_CHECK(mainchain.BundlePending(1));
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(2, mainchain, 2, params, payouts, reason), reason);
+    // Score 2: no support yet. The refund goes, and so would a bundle.
+    BOOST_CHECK(!state.MainPending(mainchain, 2, params));
+    BOOST_CHECK(state.CheckRefund(refund, reason, state.MainPending(mainchain, 2, params)));
+    BOOST_CHECK(state.NextBundle(2, uint256{0xa}, params, nullptr, state.MainPending(mainchain, 2, params)));
+    // Before audit2_height, any pending bundle held both back.
+    params.audit2_height = 1000;
+    BOOST_CHECK(state.MainPending(mainchain, 2, params));
+    BOOST_CHECK(!state.NextBundle(2, uint256{0xa}, params, nullptr, state.MainPending(mainchain, 2, params)));
+    params.audit2_height = 0;
+    // Score 3: refunds wait, but a bundle of this branch can start: the mainchain pays one of the two.
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(3, mainchain, 3, params, payouts, reason), reason);
+    const bool pending{state.MainPending(mainchain, 3, params)};
+    BOOST_CHECK(pending);
+    BOOST_CHECK(!state.CheckRefund(refund, reason, pending));
+    BOOST_CHECK_EQUAL(reason, "bad-sc-refund-bundle-pending");
+    BOOST_CHECK(state.MainPendingNext(mainchain, 4, params));
+    const auto ours{state.NextBundle(3, uint256{0xa}, params, nullptr, pending)};
+    BOOST_REQUIRE(ours);
+    BOOST_REQUIRE_MESSAGE(state.StartBundle(ours->GetHash().ToUint256(), 3, uint256{0xa}, params, reason, pending), reason);
+    BOOST_CHECK_EQUAL(state.BundleMainHeight(), 4);
+    // This chain's own bundle, however supported, holds back only its own withdrawals.
+    Extend(mainchain, 1, [&](sidechain::MainBlock& b) {
+        b.proposed.push_back(ours->GetHash().ToUint256());
+        b.pending.push_back({foreign, 0});
+        b.pending.push_back({ours->GetHash().ToUint256(), 40});
+    });
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(4, mainchain, 4, params, payouts, reason), reason);
+    BOOST_CHECK(!state.MainPending(mainchain, 4, params));
+    BOOST_CHECK(!state.CheckRefund(refund, reason, false));
+    BOOST_CHECK_EQUAL(reason, "bad-sc-refund-in-bundle");
+}
+
+BOOST_AUTO_TEST_CASE(foreign_bundle_paid_while_ours_pending)
+{
+    // Both pending, with the same withdrawal: the mainchain pays the other branch's bundle and fails
+    // this one (single payout). The withdrawal is paid once; this branch takes it as paid.
+    Consensus::SidechainParams params;
+    SideStore side;
+    sidechain::State& state{side.state};
+    CKey key;
+    key.MakeNewKey(/*fCompressed=*/true);
+    const CScript pay{GetScriptForDestination(WitnessV0KeyHash{key.GetPubKey().GetID()})};
+    const COutPoint withdrawal{MakeWithdrawal(state, key, pay, 1, params)};
+    std::string reason;
+    std::vector<CTxOut> payouts;
+    const uint256 foreign{0xf0};
+    for (const bool ours_proposed : {true, false}) {
+        SideStore copy;
+        sidechain::State& st{copy.state};
+        MakeWithdrawal(st, key, pay, 1, params);
+        sidechain::Mainchain mainchain;
+        Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.proposed.push_back(foreign); b.pending.push_back({foreign, 1}); });
+        BOOST_REQUIRE_MESSAGE(st.ApplyMainEvents(0, mainchain, 2, params, payouts, reason), reason);
+        const auto bundle{st.NextBundle(2, uint256{0xa}, params, nullptr, st.MainPending(mainchain, 2, params))};
+        BOOST_REQUIRE(bundle);
+        const uint256 ours{bundle->GetHash().ToUint256()};
+        BOOST_REQUIRE_MESSAGE(st.StartBundle(ours, 2, uint256{0xa}, params, reason, false), reason);
+        Extend(mainchain, 1, [&](sidechain::MainBlock& b) {
+            if (ours_proposed) b.proposed.push_back(ours);
+        });
+        // The other is paid: this one fails with it (if it was proposed), and the change of the payout
+        // says what it paid.
+        Extend(mainchain, 1, [&](sidechain::MainBlock& b) {
+            b.bundles.push_back({foreign, true});
+            if (ours_proposed) b.bundles.push_back({ours, false});
+            sidechain::MainDeposit change;
+            change.destination = WITHDRAWAL_RETURN_DEST;
+            change.bundle = foreign;
+            change.payouts.emplace_back(COIN - 1000, pay);
+            b.deposits.push_back(change);
+        });
+        BOOST_REQUIRE_MESSAGE(st.ApplyMainEvents(2, mainchain, 3, params, payouts, reason), reason);
+        BOOST_CHECK(!st.Bundle());
+        BOOST_CHECK_EQUAL(copy.Withdrawals(), 0U);
+        BOOST_CHECK(!st.GetWithdrawal(withdrawal));
+        BOOST_CHECK_EQUAL(st.BundleMainHeight(), -1);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(unproposed_bundle_fails)
+{
+    // From audit2_height: a bundle the mainchain does not propose unproposed_expiry_blocks blocks after
+    // the block that committed to it fails, and its withdrawals can be refunded or bundled again.
+    for (const bool proposed : {false, true}) {
+        for (const bool active : {true, false}) {
+            Consensus::SidechainParams params;
+            params.unproposed_expiry_blocks = 3;
+            params.bundle_retry_delay = 0;
+            if (!active) params.audit2_height = 1000;
+            SideStore side;
+            sidechain::State& state{side.state};
+            CKey key;
+            key.MakeNewKey(/*fCompressed=*/true);
+            const CScript pay{GetScriptForDestination(WitnessV0KeyHash{key.GetPubKey().GetID()})};
+            MakeWithdrawal(state, key, pay, 1, params);
+            sidechain::Mainchain mainchain;
+            Extend(mainchain, 1);
+            std::string reason;
+            std::vector<CTxOut> payouts;
+            BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(0, mainchain, 2, params, payouts, reason), reason);
+            const auto bundle{state.NextBundle(2, uint256{0xa}, params)};
+            BOOST_REQUIRE(bundle);
+            BOOST_REQUIRE_MESSAGE(state.StartBundle(bundle->GetHash().ToUint256(), 2, uint256{0xa}, params, reason), reason);
+            // Committed in mainchain block 1; proposed (or not) in block 3.
+            Extend(mainchain, 5, [&](sidechain::MainBlock& b) {
+                if (proposed && mainchain.Height() + 1 == 3) b.proposed.push_back(bundle->GetHash().ToUint256());
+            });
+            // Up to block 3, one short of the limit: pending either way.
+            BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(3, mainchain, 3, params, payouts, reason), reason);
+            BOOST_CHECK(state.Bundle());
+            BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(5, mainchain, 4, params, payouts, reason), reason);
+            const bool fails{active && !proposed};
+            BOOST_CHECK_EQUAL(state.Bundle().has_value(), !fails);
+            BOOST_CHECK_EQUAL(state.LastFailureHeight(), fails ? 4 : -1);
+            if (fails) BOOST_CHECK(state.NextBundle(5, uint256{0xb}, params));
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(every_proposal_and_close_counts)
+{
+    // A bundle closed, forgotten by the mainchain and proposed again is pending again; closes and
+    // proposals of one block: the close first.
+    sidechain::Mainchain mainchain;
+    const uint256 x{0x77};
+    Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.proposed.push_back(x); });
+    Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.bundles.push_back({x, false}); });
+    Extend(mainchain, 1);
+    Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.proposed.push_back(x); });
+    Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.bundles.push_back({x, false}); b.proposed.push_back(x); });
+    Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.bundles.push_back({x, true}); });
+    const std::vector<bool> expected{true, false, false, true, true, false};
+    for (int h{0}; h < 6; ++h) BOOST_CHECK_EQUAL(mainchain.BundlePending(h), expected[h]);
+    BOOST_CHECK(mainchain.ClosedHeight(x) == 1);
+    BOOST_CHECK(mainchain.ProposedBetween(x, 1, 3));
+    BOOST_CHECK(!mainchain.ProposedBetween(x, 1, 2));
+    // Truncated, the later events go, the earlier stay.
+    mainchain.Truncate(3);
+    BOOST_CHECK(mainchain.BundlePending(3));
+    BOOST_CHECK(!mainchain.BundlePending(2));
+    mainchain.Truncate(2);
+    BOOST_CHECK(!mainchain.BundlePending(2));
+    BOOST_CHECK(!mainchain.ProposedBetween(x, 1, 10));
+}
+
+BOOST_AUTO_TEST_CASE(record_independent_failures)
+{
+    BOOST_CHECK(sidechain::RecordIndependent("bad-sc-withdrawal-amount"));
+    BOOST_CHECK(sidechain::RecordIndependent("bad-sc-refund-signature"));
+    BOOST_CHECK(!sidechain::RecordIndependent("bmm-unknown"));
+    BOOST_CHECK(!sidechain::RecordIndependent("bad-sc-refund-bundle-pending"));
+    BOOST_CHECK(!sidechain::RecordIndependent("bad-sc-refund-unknown"));
+    BOOST_CHECK(!sidechain::RecordIndependent("bad-sc-payout"));
+}
+
 BOOST_AUTO_TEST_CASE(events_before_the_slot_activated_are_left_out)
 {
     // A slot used before by another sidechain: what the mainchain did for that one, up to the block
@@ -1480,17 +1703,13 @@ BOOST_AUTO_TEST_CASE(bundle_pending_index)
     sidechain::Mainchain mainchain;
     std::vector<sidechain::MainBlock> blocks;
     const auto scan{[&](int h) {
-        std::map<uint256, int> proposed, closed;
-        for (size_t i{0}; i < blocks.size(); ++i) {
-            for (const uint256& p : blocks[i].proposed) proposed.emplace(p, i);
-            for (const auto& e : blocks[i].bundles) closed.emplace(e.hash, i);
+        // Block by block: closes, then proposals.
+        std::set<uint256> pending;
+        for (int i{0}; i < static_cast<int>(blocks.size()) && i <= h; ++i) {
+            for (const auto& e : blocks[i].bundles) pending.erase(e.hash);
+            for (const uint256& p : blocks[i].proposed) pending.insert(p);
         }
-        for (const auto& [hash, p] : proposed) {
-            if (p > h) continue;
-            const auto c{closed.find(hash)};
-            if (c == closed.end() || c->second > h) return true;
-        }
-        return false;
+        return !pending.empty();
     }};
     uint8_t salt{0};
     for (int round{0}; round < 400; ++round) {
@@ -1560,8 +1779,15 @@ BOOST_AUTO_TEST_CASE(record_of_old_format_is_filled_in)
     old_format >> read;
     BOOST_CHECK(read == block);
     BOOST_CHECK(read.proposed.empty());
-    // The current format round-trips.
+    // So does one written before blocks kept the bundles pending after them.
     block.proposed.push_back(uint256{0xc});
+    DataStream version2{};
+    version2 << block.hash << block.prev_hash << block.time << false << block.deposits << block.bundles << block.proposed;
+    version2 >> read;
+    BOOST_CHECK(read == block);
+    BOOST_CHECK(read.pending.empty());
+    // The current format round-trips.
+    block.pending.push_back({uint256{0xc}, 12});
     DataStream current{};
     current << block;
     current >> read;
@@ -1572,8 +1798,14 @@ BOOST_AUTO_TEST_CASE(record_of_old_format_is_filled_in)
     first.hash = uint256{1};
     BOOST_REQUIRE(mainchain.Append(first));
     BOOST_CHECK(!mainchain.Backfill(0, uint256{9}, {uint256{0xd}}));
-    BOOST_CHECK(mainchain.Backfill(0, uint256{1}, {uint256{0xd}}));
+    BOOST_CHECK(mainchain.Backfill(0, uint256{1}, {uint256{0xd}}, {{uint256{0xd}, 5}}));
     BOOST_CHECK(mainchain.BundlePending(0));
+    BOOST_CHECK(mainchain.SupportedPending(0, 5, uint256{}));
+    BOOST_CHECK(!mainchain.SupportedPending(0, 6, uint256{}));
+    BOOST_CHECK(!mainchain.SupportedPending(0, 5, uint256{0xd}));
+    // Above the record: as after its last block.
+    BOOST_CHECK(mainchain.SupportedPending(7, 5, uint256{}));
+    BOOST_CHECK(!mainchain.SupportedPending(-1, 0, uint256{}));
 }
 
 BOOST_AUTO_TEST_CASE(duplicate_commitment_survives_reorg)
@@ -1899,6 +2131,126 @@ BOOST_AUTO_TEST_CASE(failed_bundles_are_forgotten)
     }
 }
 
+BOOST_AUTO_TEST_CASE(miner_never_reproposes_a_closed_bundle)
+{
+    // A bundle the chain closed once is not proposed or upvoted again by the miner, even after the
+    // sidechain database forgot that it failed and it looks new (a node that did not build blocks
+    // meanwhile, so whose miner never saw it closed, included).
+    TestChain chain;
+    chain.params.audit2_height = 0;
+    chain.params.upvote_expiry_blocks = 3;
+    chain.Activate(MakeSidechain(1));
+    BOOST_REQUIRE(chain.Connect({}, {chain.DepositTx(1, 10 * COIN)}));
+    MinerState miner;
+    std::string error;
+    const auto hash{miner.AddBundle(1, TestChain::BlindBundle(COIN, 1000), error)};
+    BOOST_REQUIRE(hash);
+    miner.Prune(chain.scdb, chain.height + 1);
+    BOOST_REQUIRE(chain.Connect(Scripts(miner.CreateBlockAdditions(chain.scdb, chain.params, chain.tip, {}))));
+    BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 1U);
+    // Other miners downvote it until it fails; this node builds no block meanwhile.
+    std::optional<int> closed_at;
+    while (!closed_at) {
+        BOOST_REQUIRE(chain.Connect({Votes({VOTE_DOWNVOTE})}));
+        if (chain.scdb.WasPaid(1, *hash) == std::optional<bool>{false}) closed_at = chain.height;
+    }
+    while (chain.scdb.IsClosed(1, *hash)) BOOST_REQUIRE(chain.Connect());
+    // Forgotten. What the chain's history says of it, as the index of closures would.
+    const MinerState::ClosureLookup history{[&](SidechainId slot, const uint256& h) -> std::optional<int> {
+        if (slot == 1 && h == *hash) return closed_at;
+        return std::nullopt;
+    }};
+    // Without the history it looks new, and would be proposed again.
+    {
+        MinerState blind_miner;
+        BOOST_REQUIRE(blind_miner.AddBundle(1, TestChain::BlindBundle(COIN, 1000), error));
+        blind_miner.Prune(chain.scdb, chain.height + 1);
+        BOOST_CHECK(Contains(Scripts(blind_miner.CreateBlockAdditions(chain.scdb, chain.params, chain.tip, {})), BundleScript(1, *hash)));
+    }
+    miner.Prune(chain.scdb, chain.height + 1, history);
+    BOOST_CHECK(!Contains(Scripts(miner.CreateBlockAdditions(chain.scdb, chain.params, chain.tip, {})), BundleScript(1, *hash)));
+    // Closed long enough ago: dropped.
+    BOOST_CHECK(!miner.GetBundle(1, *hash));
+
+    // Proposed again by someone else, it is not upvoted, by a miner that was just handed it either.
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, *hash)}));
+    MinerState handed_again;
+    BOOST_REQUIRE(handed_again.AddBundle(1, TestChain::BlindBundle(COIN, 1000), error));
+    BOOST_CHECK(handed_again.ResolveVote(1, chain.scdb.GetSlot(1)->bundles).type == Vote::Type::UPVOTE);
+    handed_again.Prune(chain.scdb, chain.height + 1, history);
+    BOOST_CHECK(handed_again.ResolveVote(1, chain.scdb.GetSlot(1)->bundles).type != Vote::Type::UPVOTE);
+    BOOST_CHECK(!Contains(Scripts(handed_again.CreateBlockAdditions(chain.scdb, chain.params, chain.tip, {})), Votes({0})));
+}
+
+BOOST_AUTO_TEST_CASE(miner_drops_bundles_never_proposed)
+{
+    // A handed bundle no block proposed goes after UNPROPOSED_EXPIRY blocks, unless it is the one the
+    // sidechain node vouches for; when it was handed is kept across restarts.
+    TestChain chain;
+    chain.Activate(MakeSidechain(1));
+    const fs::path path{m_path_root / "drivechain_miner.dat"};
+    std::string error;
+    std::optional<uint256> old_bundle, new_bundle;
+    {
+        MinerState miner;
+        BOOST_REQUIRE(miner.Load(path));
+        old_bundle = miner.AddBundle(1, TestChain::BlindBundle(COIN, 1000, 1), error);
+        new_bundle = miner.AddBundle(1, TestChain::BlindBundle(COIN, 1000, 2), error);
+        BOOST_REQUIRE(old_bundle && new_bundle);
+        miner.Prune(chain.scdb, 100);
+    }
+    MinerState miner;
+    BOOST_REQUIRE(miner.Load(path));
+    miner.Prune(chain.scdb, 100 + MinerState::UNPROPOSED_EXPIRY - 1);
+    BOOST_CHECK(miner.GetBundle(1, *old_bundle));
+    miner.Prune(chain.scdb, 100 + MinerState::UNPROPOSED_EXPIRY);
+    BOOST_CHECK(!miner.GetBundle(1, *old_bundle));
+    BOOST_CHECK(miner.GetBundle(1, *new_bundle));
+}
+
+BOOST_AUTO_TEST_CASE(unvoted_failed_bundles_are_forgotten_sooner)
+{
+    // From audit2_height, a failed bundle no block upvoted is forgotten unvoted_forget_blocks after it
+    // failed; one that was upvoted, a withdrawal period after.
+    for (const bool active : {false, true}) {
+        TestChain chain;
+        chain.params.audit2_height = active ? 0 : 1000;
+        chain.params.upvote_expiry_blocks = 3;
+        chain.params.unvoted_forget_blocks = 5;
+        chain.Activate(MakeSidechain(1));
+        const uint256 unvoted{0xd1}, upvoted{0xd2};
+        BOOST_REQUIRE(chain.Connect({BundleScript(1, unvoted)}));
+        BOOST_REQUIRE(chain.Connect({BundleScript(1, upvoted)}));
+        BOOST_REQUIRE(chain.Connect({Votes({1})}));
+        // Both fail: three blocks without an upvote (the downvotes take them to 0 meanwhile).
+        int failed{0}, failed_upvoted{0};
+        while (chain.scdb.GetSlot(1)->bundles.size() > 0) {
+            BOOST_REQUIRE(chain.Connect({Votes({VOTE_DOWNVOTE})}));
+            if (!failed && chain.scdb.IsClosed(1, unvoted)) failed = chain.height;
+            if (!failed_upvoted && chain.scdb.IsClosed(1, upvoted)) failed_upvoted = chain.height;
+        }
+        BOOST_REQUIRE(chain.scdb.GetClosed(1, unvoted) && !chain.scdb.GetClosed(1, unvoted)->upvoted);
+        BOOST_REQUIRE(chain.scdb.GetClosed(1, upvoted) && chain.scdb.GetClosed(1, upvoted)->upvoted);
+        while (chain.height < failed + chain.params.unvoted_forget_blocks - 1) BOOST_REQUIRE(chain.Connect());
+        BOOST_CHECK(chain.scdb.IsClosed(1, unvoted));
+        BOOST_REQUIRE(chain.Connect());
+        BOOST_CHECK_EQUAL(chain.scdb.IsClosed(1, unvoted), !active);
+        BOOST_CHECK(chain.scdb.IsClosed(1, upvoted));
+        // The snapshot keeps them apart: read back, it forgets the same.
+        DataStream stream{};
+        stream << chain.scdb;
+        SidechainDB read;
+        stream >> read;
+        BOOST_CHECK(read == chain.scdb);
+        chain.scdb = read;
+        while (chain.height < failed_upvoted + chain.params.withdrawal_period - 1) BOOST_REQUIRE(chain.Connect());
+        BOOST_CHECK(chain.scdb.IsClosed(1, upvoted));
+        BOOST_REQUIRE(chain.Connect());
+        BOOST_CHECK_EQUAL(chain.scdb.IsClosed(1, upvoted), !active);
+        BOOST_CHECK_EQUAL(chain.scdb.IsClosed(1, unvoted), !active);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(state_snapshot_and_index)
 {
     // The failed bundles by height are rebuilt when a snapshot is read: what is forgotten next is the same.
@@ -1919,7 +2271,7 @@ BOOST_AUTO_TEST_CASE(database_records)
 {
     // The drivechain database on its own: what each block keeps, the snapshot and its version, the
     // deposit index.
-    Database db{DBParams{.path = m_path_root / "drivechain_db", .cache_bytes = 1 << 20, .memory_only = true}};
+    Database db{DBParams{.path = m_path_root / "drivechain_db", .cache_bytes = 1 << 20, .memory_only = true}, ParamsFingerprint(TestParams())};
     // A new database is in the current format; one with data and no version is an older one.
     BOOST_CHECK(db.IsCurrentFormat());
 
@@ -1942,7 +2294,7 @@ BOOST_AUTO_TEST_CASE(database_records)
         ++chain.height;
         chain.tip = block.GetHash();
         // The last two keep their undo data; the others only what sidechains follow.
-        BOOST_REQUIRE(db.WriteBlock(block.GetHash(), chain.height, undo, deposits, /*keep_undo=*/i > 3));
+        BOOST_REQUIRE(db.WriteBlock(block.GetHash(), chain.height, undo, deposits, chain.scdb, /*keep_undo=*/i > 3));
         blocks.emplace_back(block.GetHash(), deposits);
         txids.push_back(block.vtx[1]->GetHash().ToUint256());
     }
@@ -1955,23 +2307,89 @@ BOOST_AUTO_TEST_CASE(database_records)
     db.EraseBlockUndo(blocks[4].first);
     BOOST_CHECK(!db.HasBlockUndo(blocks[4].first));
     BOOST_CHECK(db.ReadBlockEvents(blocks[4].first, events));
+    BOOST_CHECK(events.pending.empty());
 
+    // The bundles pending after a block go with its events, with their scores after it.
+    {
+        const uint256 bundle{0xb1};
+        const CBlock block{chain.MakeBlock({BundleScript(1, bundle)})};
+        BlockUndo block_undo;
+        std::vector<Deposit> none;
+        std::string reason;
+        BOOST_REQUIRE(chain.scdb.ConnectBlock(block, chain.height + 1, chain.params, block_undo, &none, reason));
+        ++chain.height;
+        chain.tip = block.GetHash();
+        BOOST_REQUIRE(db.WriteBlock(block.GetHash(), chain.height, block_undo, none, chain.scdb));
+        BlockEvents read_events;
+        BOOST_REQUIRE(db.ReadBlockEvents(block.GetHash(), read_events));
+        BOOST_CHECK_EQUAL(read_events.proposed.size(), 1U);
+        BOOST_REQUIRE_EQUAL(read_events.pending.size(), 1U);
+        BOOST_CHECK_EQUAL(read_events.pending[0].first, 1U);
+        BOOST_REQUIRE_EQUAL(read_events.pending[0].second.size(), 1U);
+        BOOST_CHECK(read_events.pending[0].second[0].first == bundle);
+        BOOST_CHECK_EQUAL(read_events.pending[0].second[0].second, NEW_BUNDLE_SCORE);
+    }
+
+    // The blocks that closed a bundle, for good; only those the caller takes for the active chain count.
+    {
+        BlockUndo closing;
+        closing.closed.push_back({1, uint256{0xc1}, false});
+        const uint256 a{0xa1}, b{0xa2};
+        BOOST_REQUIRE(db.WriteBlock(a, 50, closing, {}, chain.scdb));
+        BOOST_REQUIRE(db.WriteBlock(b, 60, closing, {}, chain.scdb));
+        BOOST_REQUIRE(db.WriteBlock(b, 60, closing, {}, chain.scdb));
+        const auto all{[](const uint256&) { return true; }};
+        BOOST_CHECK_EQUAL(db.FindClosure(1, uint256{0xc1}, all)->height, 60);
+        BOOST_CHECK(db.FindClosure(1, uint256{0xc1}, all)->block_hash == b);
+        BOOST_CHECK(!db.FindClosure(1, uint256{0xc1}, all)->paid);
+        BOOST_CHECK_EQUAL(db.FindClosure(1, uint256{0xc1}, [&](const uint256& h) { return h == a; })->height, 50);
+        BOOST_CHECK(!db.FindClosure(1, uint256{0xc1}, [](const uint256&) { return false; }));
+        BOOST_CHECK(!db.FindClosure(2, uint256{0xc1}, all));
+    }
+
+    const auto any{[](const uint256&) { return true; }};
     // Deposits after one, found by its txid, a few at a time.
-    const auto all{db.ListDeposits(1, std::nullopt, 0)};
+    const auto all{db.ListDeposits(1, std::nullopt, 0, any)};
     BOOST_REQUIRE(all);
     BOOST_CHECK_EQUAL(all->size(), 5U);
-    const auto after{db.ListDeposits(1, txids[1], 2)};
+    const auto after{db.ListDeposits(1, txids[1], 2, any)};
     BOOST_REQUIRE(after);
     BOOST_REQUIRE_EQUAL(after->size(), 2U);
     BOOST_CHECK((*after)[0].tx->GetHash().ToUint256() == txids[2]);
     BOOST_CHECK((*after)[1].tx->GetHash().ToUint256() == txids[3]);
-    BOOST_CHECK(db.ListDeposits(1, txids[4], 0)->empty());
-    BOOST_CHECK(!db.ListDeposits(1, uint256{0x77}, 0));
-    BOOST_CHECK(!db.ListDeposits(2, txids[0], 0));
+    BOOST_CHECK(db.ListDeposits(1, txids[4], 0, any)->empty());
+    BOOST_CHECK(!db.ListDeposits(1, uint256{0x77}, 0, any));
+    BOOST_CHECK(!db.ListDeposits(2, txids[0], 0, any));
+    // Records of blocks that are not in the active chain are skipped, and not counted.
+    {
+        const auto without_second{[&](const uint256& h) { return h != blocks[1].first; }};
+        const auto page{db.ListDeposits(1, txids[0], 2, without_second)};
+        BOOST_REQUIRE(page);
+        BOOST_REQUIRE_EQUAL(page->size(), 2U);
+        BOOST_CHECK((*page)[0].tx->GetHash().ToUint256() == txids[2]);
+        BOOST_CHECK((*page)[1].tx->GetHash().ToUint256() == txids[3]);
+        // Nor taken as the place to go on from.
+        BOOST_CHECK(!db.ListDeposits(1, txids[1], 0, without_second));
+    }
     // A block taken out of the chain takes its deposits, and their txids, with it.
     BOOST_CHECK(db.EraseBlockDeposits(blocks[4].first));
-    BOOST_CHECK(!db.ListDeposits(1, txids[4], 0));
-    BOOST_CHECK_EQUAL(db.ListDeposits(1, std::nullopt, 0)->size(), 4U);
+    BOOST_CHECK(!db.ListDeposits(1, txids[4], 0, any));
+    BOOST_CHECK_EQUAL(db.ListDeposits(1, std::nullopt, 0, any)->size(), 4U);
+    // The txid entry naming the record of a block that left the chain (the same transaction in a
+    // block of another branch, left by a crash): the place to go on from is its record in the active chain.
+    {
+        const uint256 stale{0x5e};
+        Deposit copy{blocks[2].second.at(0)};
+        copy.block_hash = stale;
+        BOOST_REQUIRE(db.WriteBlock(stale, 20, BlockUndo{}, {copy}, chain.scdb));
+        BOOST_CHECK(db.ListDeposits(1, txids[2], 0, any)->empty());
+        const auto active{[&](const uint256& h) { return h != stale; }};
+        const auto page{db.ListDeposits(1, txids[2], 0, active)};
+        BOOST_REQUIRE(page);
+        BOOST_REQUIRE_EQUAL(page->size(), 1U);
+        BOOST_CHECK((*page)[0].tx->GetHash().ToUint256() == txids[3]);
+        BOOST_CHECK(db.EraseBlockDeposits(stale));
+    }
 
     // The snapshot: read back as written; a missing or unreadable one leaves nothing behind.
     BOOST_REQUIRE(db.WriteState("", chain.scdb));
@@ -1987,7 +2405,108 @@ BOOST_AUTO_TEST_CASE(database_records)
     BOOST_CHECK(db.IsCurrentFormat());
     BOOST_CHECK(!db.ReadState("", read));
     BOOST_CHECK(!db.ReadBlockEvents(blocks[0].first, events));
-    BOOST_CHECK(!db.ListDeposits(1, txids[0], 0));
+    BOOST_CHECK(!db.ListDeposits(1, txids[0], 0, any));
+}
+
+BOOST_AUTO_TEST_CASE(database_params_fingerprint)
+{
+    // What was derived under other drivechain parameters is not used: not the format marker, not the snapshot.
+    const Consensus::DrivechainParams params{TestParams()};
+    const uint256 fingerprint{ParamsFingerprint(params)};
+    const auto changed{[&](auto change) {
+        Consensus::DrivechainParams other{params};
+        change(other);
+        return ParamsFingerprint(other);
+    }};
+    BOOST_CHECK(changed([](auto& p) { ++p.audit2_height; }) != fingerprint);
+    BOOST_CHECK(changed([](auto& p) { ++p.single_payout_height; }) != fingerprint);
+    BOOST_CHECK(changed([](auto& p) { ++p.idle_expiry_height; }) != fingerprint);
+    BOOST_CHECK(changed([](auto& p) { ++p.withdrawal_period; }) != fingerprint);
+    BOOST_CHECK(changed([](auto& p) { --p.max_sidechains; }) != fingerprint);
+    BOOST_CHECK(changed([](auto&) {}) == fingerprint);
+    const uint256 other{changed([](auto& p) { ++p.audit2_height; })};
+
+    // On a sidechain, the parameters of its own rules count too; on any other chain they do not.
+    Consensus::SidechainParams sidechain;
+    BOOST_CHECK(ParamsFingerprint(params, sidechain) == fingerprint);
+    sidechain.enabled = true;
+    const uint256 side_fingerprint{ParamsFingerprint(params, sidechain)};
+    BOOST_CHECK(side_fingerprint != fingerprint);
+    const auto side_changed{[&](auto change) {
+        Consensus::SidechainParams other_side{sidechain};
+        change(other_side);
+        return ParamsFingerprint(params, other_side);
+    }};
+    BOOST_CHECK(side_changed([](auto& p) { ++p.audit2_height; }) != side_fingerprint);
+    BOOST_CHECK(side_changed([](auto& p) { ++p.pending_min_score; }) != side_fingerprint);
+    BOOST_CHECK(side_changed([](auto& p) { ++p.unproposed_expiry_blocks; }) != side_fingerprint);
+    BOOST_CHECK(side_changed([](auto& p) { ++p.main_activation_height; }) != side_fingerprint);
+    BOOST_CHECK(side_changed([](auto&) {}) == side_fingerprint);
+    {
+        Consensus::DrivechainParams other_params{params};
+        ++other_params.audit2_height;
+        BOOST_CHECK(ParamsFingerprint(other_params, sidechain) != side_fingerprint);
+    }
+
+    const fs::path path{m_path_root / "drivechain_fingerprint"};
+    TestChain chain;
+    const sidechain::StoreBytes side_key{'x', 1};
+    {
+        Database db{DBParams{.path = path, .cache_bytes = 1 << 20}, fingerprint};
+        BOOST_CHECK(db.CheckFormat() == Database::Format::CURRENT);
+        // With an entry in the store of the sidechain state, written with the snapshot.
+        const auto side_db{db.SideStore("")};
+        const std::map<sidechain::StoreBytes, std::optional<sidechain::StoreBytes>> changes{{side_key, sidechain::StoreBytes{'v'}}};
+        BOOST_REQUIRE(db.WriteState("", chain.scdb, side_db.get(), &changes));
+        SidechainDB read;
+        BOOST_CHECK(db.ReadState("", read));
+        BOOST_CHECK(side_db->Get(side_key).has_value());
+    }
+    {
+        Database db{DBParams{.path = path, .cache_bytes = 1 << 20}, other};
+        BOOST_CHECK(db.CheckFormat() == Database::Format::OTHER_PARAMS);
+        SidechainDB read;
+        BOOST_CHECK(!db.ReadState("", read));
+        // The rebuild starts the store over with the rest.
+        const auto side_db{db.SideStore("")};
+        db.Wipe();
+        side_db->Reset();
+        BOOST_CHECK(!side_db->Get(side_key).has_value());
+        db.WriteFormatVersion();
+        BOOST_CHECK(db.IsCurrentFormat());
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(undo_erased_below_the_flushed_block, TestChain100Setup)
+{
+    // The drivechain undo data of a block goes once it is DRIVECHAIN_UNDO_DEPTH below the last
+    // flushed block, not below the tip: a node that stops uncleanly restarts from the flushed block,
+    // and a reorg from there must find the undo data of every block within reach.
+    Chainstate& chainstate{m_node.chainman->ActiveChainstate()};
+    const auto check{[&] {
+        LOCK(::cs_main);
+        const int flushed{chainstate.GetLastFlushedBlock()->nHeight};
+        for (int height{1}; height <= chainstate.m_chain.Height(); ++height) {
+            const bool kept{m_node.chainman->m_blockman.m_drivechain_db->HasBlockUndo(chainstate.m_chain[height]->GetBlockHash())};
+            BOOST_CHECK_MESSAGE(kept == (height > flushed - DRIVECHAIN_UNDO_DEPTH), strprintf("height %d, flushed %d", height, flushed));
+        }
+        return flushed;
+    }};
+    const auto flush{[&] {
+        LOCK(::cs_main);
+        BlockValidationState state;
+        BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::FORCE_FLUSH));
+    }};
+    flush();
+    const int flushed{check()};
+    mineBlocks(DRIVECHAIN_UNDO_DEPTH + 20);
+    // Unless a periodic flush came meanwhile, nothing was erased: the tip is far ahead of what is on disk.
+    if (check() == flushed) {
+        LOCK(::cs_main);
+        BOOST_CHECK(m_node.chainman->m_blockman.m_drivechain_db->HasBlockUndo(chainstate.m_chain[chainstate.m_chain.Height() - DRIVECHAIN_UNDO_DEPTH]->GetBlockHash()));
+    }
+    flush();
+    BOOST_CHECK_EQUAL(check(), WITH_LOCK(::cs_main, return chainstate.m_chain.Height()));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

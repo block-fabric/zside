@@ -19,6 +19,16 @@ namespace wallet {
 static const std::string WALLET_ENDPOINT_BASE = "/wallet/";
 const std::string HELP_REQUIRING_PASSPHRASE{"\nRequires wallet passphrase to be set with walletpassphrase call if wallet is encrypted.\n"};
 
+bool CommittedTransactionRefused(CWallet& wallet, const CTransactionRef& tx)
+{
+    if (wallet.chain().isInMempool(tx->GetHash())) return false;
+    // The wallet hears of the block that took it after the mempool dropped it.
+    wallet.BlockUntilSyncedToCurrentChain();
+    LOCK(wallet.cs_wallet);
+    const CWalletTx* wtx{wallet.GetWalletTx(tx->GetHash())};
+    return !wtx || wallet.GetTxDepthInMainChain(*wtx) <= 0;
+}
+
 bool GetAvoidReuseFlag(const CWallet& wallet, const UniValue& param) {
     bool can_avoid_reuse = wallet.IsWalletFlagSet(WALLET_FLAG_AVOID_REUSE);
     bool avoid_reuse = param.isNull() ? can_avoid_reuse : param.get_bool();

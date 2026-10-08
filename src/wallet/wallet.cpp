@@ -180,16 +180,20 @@ bool RemoveWallet(WalletContext& context, const std::shared_ptr<CWallet>& wallet
 
     interfaces::Chain& chain = wallet->chain();
     std::string name = wallet->GetName();
-    WITH_LOCK(wallet->cs_wallet, wallet->WriteBestBlock());
-
-    // Unregister with the validation interface which also drops shared pointers.
-    wallet->DisconnectChainNotifications();
+    // A wallet not (or no longer) in the context is left alone: it may still be loading (its GUI
+    // model can be registered before it is added) or another thread is removing it, and its chain
+    // notifications must stay connected.
     {
         LOCK(context.wallets_mutex);
         std::vector<std::shared_ptr<CWallet>>::iterator i = std::find(context.wallets.begin(), context.wallets.end(), wallet);
         if (i == context.wallets.end()) return false;
         context.wallets.erase(i);
     }
+    WITH_LOCK(wallet->cs_wallet, wallet->WriteBestBlock());
+
+    // Unregister with the validation interface which also drops shared pointers, and wait for a
+    // validation callback in flight (DisconnectChainNotifications drains the queue).
+    wallet->DisconnectChainNotifications();
     // Notify unload so that upper layers release the shared pointer.
     wallet->NotifyUnload();
 

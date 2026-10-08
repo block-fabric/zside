@@ -95,6 +95,8 @@ struct CoinFilterParams {
 
 /** Whether the unconfirmed outputs of a transaction can be spent only by small drivechain transactions: a BMM request or a treasury transaction. */
 bool IsDrivechainParent(const CTransaction& tx);
+/** Whether a transaction is a BMM request (BIP301 M8 in output 0). */
+bool IsBmmRequest(const CTransaction& tx);
 
 /**
  * Populate the CoinsResult struct with vectors of available COutputs, organized by OutputType.

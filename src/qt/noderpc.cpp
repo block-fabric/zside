@@ -14,6 +14,8 @@
 #include <QThread>
 #include <QUrl>
 
+#include <atomic>
+
 namespace NodeRpc {
 namespace {
 std::optional<UniValue> Execute(interfaces::Node& node, const std::string& method, const UniValue& params, QString& error, const std::optional<QString>& wallet)
@@ -30,6 +32,11 @@ std::optional<UniValue> Execute(interfaces::Node& node, const std::string& metho
     return std::nullopt;
 }
 
+//! Set by Stop (on the GUI thread): calls queued are skipped, and no new one is taken.
+std::atomic<bool> g_stopped{false};
+//! The thread of the worker, once made (GUI thread only).
+QPointer<QThread> g_thread;
+
 /** The object, on a thread of its own, that runs the calls of CallAsync. Made on first use, on the GUI thread. */
 QObject* Worker()
 {
@@ -40,11 +47,9 @@ QObject* Worker()
         worker = new QObject;
         worker->moveToThread(thread);
         QObject::connect(thread, &QThread::finished, worker.data(), &QObject::deleteLater);
-        // A call under way is waited for: it holds on to the node.
-        QObject::connect(qApp, &QCoreApplication::aboutToQuit, thread, [thread] {
-            thread->quit();
-            thread->wait();
-        });
+        // In case Stop was not called (it is, before the node shuts down).
+        QObject::connect(qApp, &QCoreApplication::aboutToQuit, thread, &Stop);
+        g_thread = thread;
         thread->start();
     }
     return worker;
@@ -67,15 +72,36 @@ void CallAsync(QObject* receiver, ClientModel* client_model, const std::string& 
         return;
     }
     interfaces::Node* node{&client_model->node()};
-    QPointer<QObject> guard{receiver};
-    QMetaObject::invokeMethod(Worker(), [node, method, params, wallet, guard, done = std::move(done)] {
+    RunAsync(receiver, [node, method, params, wallet, done = std::move(done)]() -> std::function<void()> {
         QString error;
         std::optional<UniValue> result{Execute(*node, method, params, error, wallet)};
+        return [done, result = std::move(result), error] { done(result, error); };
+    });
+}
+
+void RunAsync(QObject* receiver, std::function<std::function<void()>()> work)
+{
+    // Dropped once the node shuts down: the receiver never hears of it, which no longer matters.
+    if (g_stopped) return;
+    QPointer<QObject> guard{receiver};
+    QMetaObject::invokeMethod(Worker(), [guard, work = std::move(work)] {
+        // Queued before Stop: skipped, the node is shutting down.
+        if (g_stopped) return;
+        std::function<void()> then{work()};
         // Back on the GUI thread, for a receiver that is still there.
-        QMetaObject::invokeMethod(qApp, [guard, done, result = std::move(result), error] {
-            if (guard) done(result, error);
+        QMetaObject::invokeMethod(qApp, [guard, then = std::move(then)] {
+            if (guard && then) then();
         }, Qt::QueuedConnection);
     }, Qt::QueuedConnection);
+}
+
+void Stop()
+{
+    g_stopped = true;
+    if (!g_thread) return;
+    // A call under way is waited for: it holds on to the node.
+    g_thread->quit();
+    g_thread->wait();
 }
 
 UniValue Args(std::initializer_list<UniValue> values)

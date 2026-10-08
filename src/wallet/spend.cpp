@@ -314,6 +314,11 @@ util::Result<CoinsResult> FetchSelectedInputs(const CWallet& wallet, const CCoin
     return result;
 }
 
+bool IsBmmRequest(const CTransaction& tx)
+{
+    return drivechain::GetBmmRequest(tx).has_value();
+}
+
 bool IsDrivechainParent(const CTransaction& tx)
 {
     return drivechain::GetBmmRequest(tx).has_value() ||
@@ -338,6 +343,7 @@ CoinsResult AvailableCoins(const CWallet& wallet,
     const int max_depth = {coinControl ? coinControl->m_max_depth : DEFAULT_MAX_DEPTH};
     const bool only_safe = {coinControl ? !coinControl->m_include_unsafe_inputs : true};
     const bool skip_drivechain_parents{params.skip_drivechain_parents && !(coinControl && coinControl->m_allow_drivechain_parents)};
+    const bool skip_bmm_request_parents{params.skip_drivechain_parents && !skip_drivechain_parents && !coinControl->m_allow_bmm_request_parents};
     const bool can_grind_r = wallet.CanGrindR();
     std::vector<COutPoint> outpoints;
 
@@ -423,6 +429,10 @@ CoinsResult AvailableCoins(const CWallet& wallet,
 
             // A transaction spending them would be refused (MemPoolAccept::PreChecks).
             if (nDepth == 0 && skip_drivechain_parents && IsDrivechainParent(*wtx.GetTx())) {
+                continue;
+            }
+            // Allowed, but maybe not the outputs of a BMM request (see CCoinControl).
+            if (nDepth == 0 && skip_bmm_request_parents && IsBmmRequest(*wtx.GetTx())) {
                 continue;
             }
 

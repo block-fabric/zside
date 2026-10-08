@@ -71,6 +71,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "sendshielded", 2, "fee" },
     { "bumpshieldedfee", 1, "fee" },
     { "listshieldedtransactions", 0, "count" },
+    { "syncmainchain", 0, "allowdeepreorg" },
     { "setbmm", 0, "mine" },
     { "setbmm", 2, "always" },
     { "setbmm", 3, "amount" },

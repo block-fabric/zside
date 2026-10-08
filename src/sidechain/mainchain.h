@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,15 @@ struct MainBundleEvent {
     friend bool operator==(const MainBundleEvent&, const MainBundleEvent&) = default;
 };
 
+/** A withdrawal bundle of this sidechain pending on the mainchain after a block, with its work score then. */
+struct MainPendingBundle {
+    uint256 hash;
+    uint32_t score{0};
+
+    SERIALIZE_METHODS(MainPendingBundle, obj) { READWRITE(obj.hash, obj.score); }
+    friend bool operator==(const MainPendingBundle&, const MainPendingBundle&) = default;
+};
+
 /** What a mainchain block did that concerns this sidechain. */
 struct MainBlock {
     uint256 hash;
@@ -59,13 +69,15 @@ struct MainBlock {
     std::vector<MainBundleEvent> bundles;
     //! The withdrawal bundles of this sidechain that the block proposed (M3): pending until closed.
     std::vector<uint256> proposed;
+    //! The withdrawal bundles of this sidechain pending after the block, with their scores.
+    std::vector<MainPendingBundle> pending;
 
     template <typename Stream>
     void Serialize(Stream& s) const
     {
         s << hash << prev_hash << time << bmm.has_value();
         if (bmm) s << *bmm;
-        s << deposits << bundles << proposed;
+        s << deposits << bundles << proposed << pending;
     }
     template <typename Stream>
     void Unserialize(Stream& s)
@@ -74,12 +86,15 @@ struct MainBlock {
         s >> hash >> prev_hash >> time >> has_bmm;
         if (has_bmm) s >> bmm.emplace();
         s >> deposits >> bundles;
-        // Records written before proposals were kept end here: Mainchain fills them in (NeedsBackfill).
+        // Records written before proposals, then the pending bundles, were kept end here: Mainchain
+        // fills them in (NeedsBackfill).
         proposed.clear();
+        pending.clear();
         if constexpr (requires { s.empty(); }) {
             if (!s.empty()) s >> proposed;
+            if (!s.empty()) s >> pending;
         } else {
-            s >> proposed;
+            s >> proposed >> pending;
         }
     }
     friend bool operator==(const MainBlock&, const MainBlock&) = default;
@@ -124,14 +139,24 @@ public:
     std::optional<int> BmmHeight(const uint256& side_hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Like BmmHeight, but only what is on record: never a commitment assumed by AssumeCommitted. */
     std::optional<int> CommittedHeight(const uint256& side_hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /** Height of the mainchain block that closed (paid out or failed) the bundle `hash`, if any did. */
+    /** Height of the first mainchain block that closed (paid out or failed) the bundle `hash`, if any did. */
     std::optional<int> ClosedHeight(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Whether a mainchain block from `from` to `to` proposed the bundle `hash`. */
+    bool ProposedBetween(const uint256& hash, int from, int to) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
      * Whether a withdrawal bundle of this sidechain was pending on the mainchain after the block at
-     * `main_height`: proposed at or below it, and not closed at or below it. Such a bundle may hold
-     * any withdrawal, those of other branches of this chain too.
+     * `main_height`, as the proposals and closes on record say: proposed at or below it, and not
+     * closed since. Each proposal and each close counts: a bundle closed, forgotten by the mainchain
+     * and proposed again is pending again. Within a block, closes come before proposals. Such a
+     * bundle may hold any withdrawal, those of other branches of this chain too.
      */
     bool BundlePending(int main_height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Whether a bundle other than `ours` was pending on the mainchain after the block at
+     * `main_height` (the last one on record if above it) with a work score of `min_score` or more,
+     * as the mainchain said (MainBlock::pending).
+     */
+    bool SupportedPending(int main_height, uint32_t min_score, const uint256& ours) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** The sidechain block that the mainchain block at `height` committed to, if any. */
     std::optional<uint256> BmmAt(int height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
@@ -141,10 +166,10 @@ public:
      */
     bool NeedsBackfill() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
-     * Set the proposals of the block on record at `height`, if it is the block `hash`.
+     * Set the proposals and pending bundles of the block on record at `height`, if it is the block `hash`.
      * @return false if the record has another block there.
      */
-    bool Backfill(int height, const uint256& hash, const std::vector<uint256>& proposed) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    bool Backfill(int height, const uint256& hash, const std::vector<uint256>& proposed, const std::vector<MainPendingBundle>& pending = {}) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** The record is complete again: mark it so, with the blocks checked without it to be checked again (RecheckPending). */
     void BackfillDone() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
@@ -206,14 +231,17 @@ private:
     std::vector<MainBlock> m_blocks GUARDED_BY(m_mutex);
     //! Sidechain block hash to the height of the mainchain block that committed to it.
     std::map<uint256, int> m_bmm GUARDED_BY(m_mutex);
-    //! Bundle hash to the height of the mainchain block that closed it.
-    std::map<uint256, int> m_closed GUARDED_BY(m_mutex);
-    //! Bundle hash to the height of the mainchain block that proposed it.
-    std::map<uint256, int> m_proposed GUARDED_BY(m_mutex);
+    //! Bundle hash to the heights of the mainchain blocks that closed it.
+    std::map<uint256, std::set<int>> m_closed GUARDED_BY(m_mutex);
+    //! Bundle hash to the heights of the mainchain blocks that proposed it.
+    std::map<uint256, std::set<int>> m_proposed GUARDED_BY(m_mutex);
+    /** Note the bundles a block on record at `height` proposed and closed (`add`), or forget them. */
+    void IndexEvents(const MainBlock& block, int height, bool add) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    /** Whether the bundle `hash` was pending after the block at `height`, by its proposals and closes. */
+    bool PendingAfter(const uint256& hash, int height) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     /**
-     * Number of bundles pending after each block on record (BundlePending), up to m_pending_valid
-     * blocks; the rest is worked out again when asked for. A bundle is pending from the block that
-     * first proposed it to the one before the block that first closed it.
+     * Number of bundles pending after each block on record (BundlePending), up to its size; the rest
+     * is worked out again when asked for.
      */
     mutable std::vector<uint32_t> m_pending GUARDED_BY(m_mutex);
     void UpdatePending() const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);

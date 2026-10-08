@@ -88,14 +88,22 @@ RPCMethod syncmainchain()
         "syncmainchain",
         "Ask the mainchain node for its new blocks now, instead of waiting for the next time this node does so by itself,\n"
         "and act on them: connect the blocks of this chain that the mainchain committed to.",
-        {},
+        {
+            {"allowdeepreorg", RPCArg::Type::BOOL, RPCArg::Default{false}, "Follow the mainchain node even if it dropped more blocks with commitments\n"
+             "to this chain than a reorg of this chain can take back. A node refuses that otherwise, as it would take the word of a wrong\n"
+             "mainchain node for it: only for a mainchain that really did reorganise so deep."},
+        },
         RPCResult{RPCResult::Type::NUM, "", "Height of the last mainchain block on record"},
         RPCExamples{HelpExampleCli("syncmainchain", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
     NodeContext& node{EnsureAnyNodeContext(request.context)};
     std::string error;
-    if (!EnsureFollower(node).Sync(error)) throw JSONRPCError(RPC_MISC_ERROR, error);
+    const bool allow_deep{!request.params[0].isNull() && request.params[0].get_bool()};
+    if (allow_deep) EnsureFollower(node).AllowDeepReorg();
+    const bool synced{EnsureFollower(node).Sync(error)};
+    if (allow_deep) EnsureFollower(node).AllowDeepReorg(false);
+    if (!synced) throw JSONRPCError(RPC_MISC_ERROR, error);
     return EnsureChainman(node).m_mainchain->Height();
 },
     };

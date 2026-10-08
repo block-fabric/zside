@@ -39,6 +39,8 @@ WITHDRAWAL_MIN_SCORE = 30
 # What a block pays can be spent in the next.
 COINBASE_MATURITY = 0
 BUNDLE_RETRY_DELAY = 5
+# Score with which a bundle of another branch, pending on the mainchain, holds refunds back.
+PENDING_MIN_SCORE = 3
 
 
 
@@ -531,19 +533,21 @@ class SidechainTest(BitcoinTestFramework):
         payout_address = main.getnewaddress()
         withdrawal = side.createwithdrawal(payout_address, 2)
         self.bmm()
+        # The mainchain block that commits to the sidechain block with the withdrawal.
+        withdrawal_commitment = main.getbestblockhash()
         fee = side.listwithdrawals()[0]["mainchainfee"]
         # The block that commits to bundle X, and the mainchain block that commits to that block.
         committed = self.bmm()
         x = side.getwithdrawalbundle()
         assert_equal(x["status"], "pending")
-        commitment = main.getbestblockhash()
         # The mainchain node got X from its sidechain node, and proposes it.
         self.mine_main()
         assert_equal([b["hash"] for b in main.listwithdrawalbundles(SLOT)], [x["hash"]])
 
-        # The mainchain drops the block that committed to the sidechain block with X: the sidechain
-        # block goes, and with it X, on this sidechain.
-        main.invalidateblock(commitment)
+        # The mainchain drops the blocks that committed to the sidechain blocks with the withdrawal and
+        # with X: those go, and with them X, on this sidechain. (Only the block with X gone, the next
+        # block on its parent would commit to X again, the same bundle.)
+        main.invalidateblock(withdrawal_commitment)
         # The nodes of this chain learn it, and tell the mainchain node that their chain has no bundle
         # any more. (Their followers may have done so already, on their own: they poll every second.)
         for node in self.nodes:
@@ -562,27 +566,35 @@ class SidechainTest(BitcoinTestFramework):
             assert committed != node.getbestblockhash()
         self.mine_main()
         assert_equal([b["hash"] for b in main.listwithdrawalbundles(SLOT)], [x["hash"]])
+        # The withdrawal is made again on the new branch, from the mempool.
+        self.sync_mempools()
+        self.bmm()
         assert_equal(side.listwithdrawals()[0]["status"], "waiting")
 
-        # X may hold the withdrawal: it cannot be refunded, nor put in another bundle, while X is pending.
-        assert_raises_rpc_error(-4, "not accepted into the mempool", side.refundwithdrawal, withdrawal["txid"], withdrawal["vout"])
-        self.bmm()
-        assert_equal(side.getwithdrawalbundle()["status"], "none")
-        # This chain has no bundle: its node says so, and the mainchain node downvotes X, which fails.
-        assert_equal(main.listwithdrawalbundles(SLOT)[0]["vote"], "downvote")
-        escrow = main.getsidechain(SLOT)["escrow"]["amount"]
-        while main.getwithdrawalbundle(SLOT, x["hash"])["status"] == "pending":
+        # X may hold the withdrawal. Nobody vouches for it: its score stays low, and it holds nothing back.
+        # A bundle of this branch can start (the mainchain pays one of the two and fails the other).
+        assert main.getwithdrawalbundle(SLOT, x["hash"])["score"] < PENDING_MIN_SCORE
+        assert_equal(side.getwithdrawalbundle()["status"], "next")
+        # With support -- here the mainchain node is told to vouch for it -- X holds refunds back.
+        main.vouchwithdrawalbundle(SLOT, x["hash"])
+        while main.getwithdrawalbundle(SLOT, x["hash"])["score"] < PENDING_MIN_SCORE:
             self.mine_main()
-        assert_equal(main.getwithdrawalbundle(SLOT, x["hash"])["status"], "failed")
-        # Then the withdrawal goes in a bundle of this chain, which is paid: once.
-        for _ in range(BUNDLE_RETRY_DELAY + 2):
-            self.bmm()
+        assert_raises_rpc_error(-4, "not accepted into the mempool", side.refundwithdrawal, withdrawal["txid"], withdrawal["vout"])
+        # Not a new bundle: this branch commits to Y, with the same withdrawal, while X is pending.
+        self.bmm()
         y = side.getwithdrawalbundle()
         assert_equal(y["status"], "pending")
         assert y["hash"] != x["hash"]
+        # The sidechain nodes vouch for Y: their mainchain node upvotes it and downvotes X.
+        main.vouchwithdrawalbundle(SLOT, y["hash"])
+        escrow = main.getsidechain(SLOT)["escrow"]["amount"]
+        self.mine_main()
+        assert_equal(sorted(b["hash"] for b in main.listwithdrawalbundles(SLOT)), sorted([x["hash"], y["hash"]]))
         while main.getwithdrawalbundle(SLOT, y["hash"])["status"] == "pending":
             self.mine_main()
+        # Y is paid, X fails: the withdrawal is paid once.
         assert_equal(main.getwithdrawalbundle(SLOT, y["hash"])["status"], "paid")
+        assert_equal(main.getwithdrawalbundle(SLOT, x["hash"])["status"], "failed")
         self.mine_main()
         self.bmm()
         assert_equal(side.listwithdrawals(), [])
@@ -590,7 +602,7 @@ class SidechainTest(BitcoinTestFramework):
             self.mine_main()
         assert_equal(main.getreceivedbyaddress(payout_address), 2)
         assert_equal(main.getsidechain(SLOT)["escrow"]["amount"], escrow - 2 - fee)
-        main.reconsiderblock(commitment)
+        main.reconsiderblock(withdrawal_commitment)
         self.bmm()
         self.check_in_sync()
 

@@ -19,6 +19,7 @@
 #include <node/cpuminer.h>
 #include <qt/bitcoinamountfield.h>
 #include <qt/blockexplorer.h>
+#include <qt/chainactivity.h>
 #include <qt/cryptotoolsdialog.h>
 #include <qt/miningdialog.h>
 #include <qt/multisigdialog.h>
@@ -62,6 +63,7 @@
 #include <QTemporaryFile>
 #include <QTimer>
 
+#include <map>
 #include <memory>
 
 using wallet::AddWallet;
@@ -424,6 +426,69 @@ void TestSidechainPage(interfaces::Node& node)
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }
 
+//! ChainActivity::Fetch looks up only what it does not know yet, and a reply of an unexpected shape
+//! leaves a table as it was instead of throwing out of a Qt slot (which terminates).
+void TestChainActivityFetch()
+{
+    std::map<std::string, int> calls;
+    bool malformed{false};
+    const ChainActivity::CallFn call{[&](const std::string& method, const UniValue& params) -> std::optional<UniValue> {
+        ++calls[method];
+        UniValue result;
+        if (method == "getbestblockhash") return UniValue{"b2"};
+        if (method == "getblockheader") {
+            const std::string hash{params[0].get_str()};
+            if (!result.read(hash == "b3" ? (malformed ? R"({"height":3,"time":"soon","nTx":1,"previousblockhash":"b2"})" : R"({"height":3,"time":300,"nTx":1,"previousblockhash":"b2"})")
+                      : hash == "b2" ? R"({"height":2,"time":200,"nTx":2,"previousblockhash":"b1"})"
+                                     : R"({"height":1,"time":100,"nTx":1})")) return std::nullopt;
+            return result;
+        }
+        if (method == "getrawmempool") {
+            if (!result.read(R"(["t1", 5, "t2"])")) return std::nullopt;
+            return result;
+        }
+        if (method == "getmempoolentry") {
+            if (!result.read(params[0].get_str() == "t1" ? R"({"time":10,"fees":{"base":0.0001},"vsize":150})" : R"({"time":"x"})")) return std::nullopt;
+            return result;
+        }
+        return std::nullopt;
+    }};
+    ChainActivity::Snapshot first{ChainActivity::Fetch(call, {})};
+    QCOMPARE(first.blocks.size(), size_t{2});
+    QCOMPARE(first.blocks[0].hash, QString{"b2"});
+    QCOMPARE(first.blocks[1].height, QString{"1"});
+    QCOMPARE(calls["getblockheader"], 2);
+    // The malformed entry is left out.
+    QCOMPARE(first.mempool.size(), size_t{1});
+    QVERIFY(first.mempool.contains("t1"));
+    QCOMPARE(calls["getmempoolentry"], 2);
+
+    // Nothing new: no block and no transaction looked up again (t2 is, being still unknown).
+    calls.clear();
+    const ChainActivity::Snapshot second{ChainActivity::Fetch(call, first)};
+    QCOMPARE(second.blocks.size(), size_t{2});
+    QCOMPARE(calls["getblockheader"], 0);
+    QCOMPARE(calls["getmempoolentry"], 1);
+    QCOMPARE(second.mempool.size(), size_t{1});
+
+    // A malformed header keeps the blocks shown last time.
+    malformed = true;
+    const ChainActivity::CallFn new_tip{[&](const std::string& method, const UniValue& params) -> std::optional<UniValue> {
+        if (method == "getbestblockhash") return UniValue{"b3"};
+        return call(method, params);
+    }};
+    const ChainActivity::Snapshot third{ChainActivity::Fetch(new_tip, second)};
+    QCOMPARE(third.blocks.size(), size_t{2});
+    QCOMPARE(third.blocks[0].hash, QString{"b2"});
+    malformed = false;
+    calls.clear();
+    const ChainActivity::Snapshot fourth{ChainActivity::Fetch(new_tip, second)};
+    QCOMPARE(fourth.blocks.size(), size_t{3});
+    QCOMPARE(fourth.blocks[0].height, QString{"3"});
+    // Only the new block was looked up.
+    QCOMPARE(calls["getblockheader"], 1);
+}
+
 } // namespace
 
 void SidechainTests::sidechainTests()
@@ -433,5 +498,6 @@ void SidechainTests::sidechainTests()
     // is open when they fire and store its text through a pointer that is no
     // longer valid. Let them fire now, while there is no message box.
     QTest::qWait(500);
+    TestChainActivityFetch();
     TestSidechainPage(m_node);
 }

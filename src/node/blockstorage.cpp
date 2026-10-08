@@ -1250,7 +1250,7 @@ BlockManager::BlockManager(const util::SignalInterrupt& interrupt, Options opts)
     DBParams drivechain_db_params{m_opts.block_tree_db_params};
     drivechain_db_params.path = m_opts.block_tree_db_params.path.parent_path() / "drivechain";
     drivechain_db_params.cache_bytes = 2_MiB;
-    m_drivechain_db = std::make_unique<drivechain::Database>(drivechain_db_params);
+    m_drivechain_db = std::make_unique<drivechain::Database>(drivechain_db_params, drivechain::ParamsFingerprint(m_opts.chainparams.GetConsensus().drivechain, m_opts.chainparams.GetConsensus().sidechain));
 
     if (m_opts.block_tree_db_params.wipe_data) {
         m_block_tree_db->WriteReindexing(true);

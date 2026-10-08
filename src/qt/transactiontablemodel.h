@@ -20,6 +20,7 @@ class PlatformStyle;
 class TransactionRecord;
 class TransactionTablePriv;
 class WalletModel;
+struct TransactionTableNotificationGuard;
 
 /** UI model for the transaction table of a wallet.
  */
@@ -84,6 +85,9 @@ private:
     std::unique_ptr<interfaces::Handler> m_handler_show_progress;
     QStringList columns;
     TransactionTablePriv *priv;
+    /** Shared with the wallet notification handlers, which may run on other threads while this
+     *  model is deleted: they reach priv only through it, under its lock. */
+    std::shared_ptr<TransactionTableNotificationGuard> m_notification_guard;
     bool fProcessingQueuedTransactions{false};
     const PlatformStyle *platformStyle;
 

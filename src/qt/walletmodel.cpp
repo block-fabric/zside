@@ -21,6 +21,7 @@
 #include <node/interface_ui.h>
 #include <node/types.h>
 #include <psbt.h>
+#include <sync.h>
 #include <util/translation.h>
 #include <wallet/coincontrol.h>
 #include <wallet/types.h>
@@ -34,20 +35,56 @@
 #include <QDebug>
 #include <QMessageBox>
 #include <QSet>
+#include <QThread>
 #include <QTimer>
 
 using wallet::CCoinControl;
 using wallet::CRecipient;
 using wallet::DEFAULT_DISABLE_WALLET;
 
+/** Lets the wallet notification handlers reach the model only while it exists. Disconnecting a
+ *  handler does not wait for a call already running on another thread (a validation callback, an
+ *  RPC unloading the wallet), so the model's destructor clears the pointer under this lock, after
+ *  which a call in flight finds nothing to notify. Only calls from other threads take it (see
+ *  Guarded), and those only post queued calls under it. Lock order: cs_wallet, then this; the GUI thread takes this one alone. */
+struct WalletModelNotificationGuard {
+    Mutex m_mutex;
+    WalletModel* model GUARDED_BY(m_mutex){nullptr};
+};
+
+//! Wraps a handler so that it gets the model only while it exists (see WalletModelNotificationGuard).
+template <typename Fn>
+static auto Guarded(std::shared_ptr<WalletModelNotificationGuard> guard, Fn fn)
+{
+    return [guard = std::move(guard), fn](auto&&... args) {
+        WalletModel* model;
+        {
+            LOCK(guard->m_mutex);
+            model = guard->model;
+            if (!model) return;
+            // From another thread: under the lock, which the destructor waits for. The handlers
+            // only post queued calls then, so nothing else is locked under it.
+            if (model->thread() != QThread::currentThread()) {
+                fn(model, args...);
+                return;
+            }
+        }
+        // On the model's own thread (the GUI thread), where it is deleted: not meanwhile. Not
+        // under the lock, since the call may be direct and lock the wallet.
+        fn(model, args...);
+    };
+}
+
 WalletModel::WalletModel(std::unique_ptr<interfaces::Wallet> wallet, ClientModel& client_model, const PlatformStyle *platformStyle, QObject *parent) :
     QObject(parent),
     m_wallet(std::move(wallet)),
+    m_notification_guard(std::make_shared<WalletModelNotificationGuard>()),
     m_client_model(&client_model),
     m_node(client_model.node()),
     optionsModel(client_model.getOptionsModel()),
     timer(new QTimer(this))
 {
+    WITH_LOCK(m_notification_guard->m_mutex, m_notification_guard->model = this);
     addressTableModel = new AddressTableModel(this);
     transactionTableModel = new TransactionTableModel(platformStyle, this);
     recentRequestsTableModel = new RecentRequestsTableModel(this);
@@ -58,6 +95,8 @@ WalletModel::WalletModel(std::unique_ptr<interfaces::Wallet> wallet, ClientModel
 WalletModel::~WalletModel()
 {
     unsubscribeFromCoreSignals();
+    // Waits for a notification in flight, and no later one reaches this model.
+    WITH_LOCK(m_notification_guard->m_mutex, m_notification_guard->model = nullptr);
 }
 
 void WalletModel::startPollBalance()
@@ -406,12 +445,13 @@ static void NotifyCanGetAddressesChanged(WalletModel* walletmodel)
 void WalletModel::subscribeToCoreSignals()
 {
     // Connect signals to wallet
-    m_handler_unload = m_wallet->handleUnload(std::bind_front(&NotifyUnload, this));
-    m_handler_status_changed = m_wallet->handleStatusChanged(std::bind_front(&NotifyKeyStoreStatusChanged, this));
-    m_handler_address_book_changed = m_wallet->handleAddressBookChanged(std::bind_front(NotifyAddressBookChanged, this));
-    m_handler_transaction_changed = m_wallet->handleTransactionChanged(std::bind_front(NotifyTransactionChanged, this));
-    m_handler_show_progress = m_wallet->handleShowProgress(std::bind_front(ShowProgress, this));
-    m_handler_can_get_addrs_changed = m_wallet->handleCanGetAddressesChanged(std::bind_front(NotifyCanGetAddressesChanged, this));
+    // The handlers own a reference to the guard, never to this model.
+    m_handler_unload = m_wallet->handleUnload(Guarded(m_notification_guard, &NotifyUnload));
+    m_handler_status_changed = m_wallet->handleStatusChanged(Guarded(m_notification_guard, &NotifyKeyStoreStatusChanged));
+    m_handler_address_book_changed = m_wallet->handleAddressBookChanged(Guarded(m_notification_guard, &NotifyAddressBookChanged));
+    m_handler_transaction_changed = m_wallet->handleTransactionChanged(Guarded(m_notification_guard, &NotifyTransactionChanged));
+    m_handler_show_progress = m_wallet->handleShowProgress(Guarded(m_notification_guard, &ShowProgress));
+    m_handler_can_get_addrs_changed = m_wallet->handleCanGetAddressesChanged(Guarded(m_notification_guard, &NotifyCanGetAddressesChanged));
 }
 
 void WalletModel::unsubscribeFromCoreSignals()

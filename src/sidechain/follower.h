@@ -125,6 +125,13 @@ public:
 
     const MainClient& Client() const { return m_client; }
 
+    /**
+     * Let the next update of the record drop more commitments than a reorg of this chain can take
+     * back (DRIVECHAIN_UNDO_DEPTH), once: the operator's word that the mainchain did reorganise so deep.
+     * syncmainchain sets it for its update, and takes it back after.
+     */
+    void AllowDeepReorg(bool allow = true) { m_allow_deep_reorg = allow; }
+
 private:
     void Run() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
     /** Update the record. @return whether it changed */
@@ -165,6 +172,9 @@ private:
     std::condition_variable_any m_wake;
     std::thread m_thread GUARDED_BY(m_mutex);
     std::atomic<bool> m_stop{false};
+    std::atomic<bool> m_allow_deep_reorg{false};
+    //! Longest wait between two tries after the mainchain node failed to answer, or answered wrong.
+    static constexpr auto MAX_RETRY_INTERVAL{std::chrono::seconds{10}};
     //! Set when the thread has something to do before its next regular round.
     bool m_woken GUARDED_BY(m_mutex){false};
     Status m_status GUARDED_BY(m_mutex);

@@ -125,8 +125,30 @@ struct SidechainParams {
     /**
      * From this height, the rules of the second audit (2026-10-07): the mainchain's events up to
      * main_activation_height are left out, and each payout queue gets its share of a block.
+     *
+     * And those of the third (2026-10-08), which takes for granted that the mainchain pays one bundle
+     * per slot and fails the others (its drivechain.single_payout_height, which must be at or below the
+     * mainchain block this height follows):
+     *  - a bundle of another branch of this chain pending on the mainchain no longer holds back a new
+     *    bundle: paying one fails the other, and the withdrawals the other pays are matched here
+     *    (State::ApplyMainEvents);
+     *  - it holds back refunds only with a score of pending_min_score or more on the mainchain, so
+     *    that a bundle proposed by anyone (a bare M3) does not freeze them;
+     *  - a bundle this chain committed to that the mainchain has not proposed unproposed_expiry_blocks
+     *    mainchain blocks after the commitment fails here.
      */
     int audit2_height{0};
+    /**
+     * Least mainchain work score with which a bundle pending on the mainchain, other than the one of
+     * this chain, holds back refunds (from audit2_height). A tenth of the mainchain's
+     * withdrawal_min_score: a bundle that miners downvote stays near 0, and one that nobody downvotes
+     * needs about a tenth of the hashrate upvoting it to get there before it expires. Below it, a
+     * bundle is far from being paid: paying it would take a majority of the hashrate upvoting it over
+     * the downvotes of the miners who vouch for this chain's bundle.
+     */
+    uint32_t pending_min_score{6480};
+    /** Mainchain blocks after its commitment in which the mainchain has to propose a bundle (from audit2_height). */
+    int unproposed_expiry_blocks{1440};
     /** zSide: the shielded pool. */
     ZsideParams zside;
 };
@@ -171,10 +193,12 @@ struct DrivechainParams {
      *    for (to stall the withdrawals and refunds of a sidechain, whose software waits on what is
      *    pending) has to keep upvoting it to keep it, rather than wait for the idle expiry;
      *  - a failed bundle is forgotten withdrawal_period blocks after it failed, so that proposals
-     *    nobody votes for do not add to the state forever (see SidechainDB::ForgetFailedBundles).
+     *    nobody votes for do not add to the state forever (see SidechainDB::ForgetFailedBundles);
+     *    one that no block ever upvoted, unvoted_forget_blocks blocks after it failed.
      */
     int audit2_height{0};
     int upvote_expiry_blocks{144};
+    int unvoted_forget_blocks{1008};
 };
 
 /**

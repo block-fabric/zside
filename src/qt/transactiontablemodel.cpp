@@ -252,12 +252,24 @@ public:
     }
 };
 
+/** Lets the wallet notification handlers reach the model's private part only while it exists.
+ *  Disconnecting a handler does not wait for a call already running on another thread (a
+ *  validation callback or an RPC), so the model's destructor clears priv under this lock, after
+ *  which a call in flight finds nothing to notify. Lock order: cs_wallet, then this, then
+ *  TransactionTablePriv::m_notifications_mutex; the GUI thread takes this one alone. */
+struct TransactionTableNotificationGuard {
+    Mutex m_mutex;
+    TransactionTablePriv* priv GUARDED_BY(m_mutex){nullptr};
+};
+
 TransactionTableModel::TransactionTableModel(const PlatformStyle *_platformStyle, WalletModel *parent):
         QAbstractTableModel(parent),
         walletModel(parent),
         priv(new TransactionTablePriv(this)),
+        m_notification_guard(std::make_shared<TransactionTableNotificationGuard>()),
         platformStyle(_platformStyle)
 {
+    WITH_LOCK(m_notification_guard->m_mutex, m_notification_guard->priv = priv);
     subscribeToCoreSignals();
 
     columns << QString() << tr("Date") << tr("Type") << tr("Label") << BitcoinUnits::getAmountColumnTitle(walletModel->getOptionsModel()->getDisplayUnit());
@@ -269,6 +281,8 @@ TransactionTableModel::TransactionTableModel(const PlatformStyle *_platformStyle
 TransactionTableModel::~TransactionTableModel()
 {
     unsubscribeFromCoreSignals();
+    // Waits for a notification in flight, and no later one reaches priv.
+    WITH_LOCK(m_notification_guard->m_mutex, m_notification_guard->priv = nullptr);
     delete priv;
 }
 
@@ -727,11 +741,14 @@ void TransactionTablePriv::DispatchNotifications()
 void TransactionTableModel::subscribeToCoreSignals()
 {
     // Connect signals to wallet
-    m_handler_transaction_changed = walletModel->wallet().handleTransactionChanged([this](const Txid& hash, ChangeType status) {
-        priv->NotifyTransactionChanged(hash, status);
+    // The handlers own a reference to the guard, never to this model (see TransactionTableNotificationGuard).
+    m_handler_transaction_changed = walletModel->wallet().handleTransactionChanged([guard = m_notification_guard](const Txid& hash, ChangeType status) {
+        LOCK(guard->m_mutex);
+        if (guard->priv) guard->priv->NotifyTransactionChanged(hash, status);
     });
-    m_handler_show_progress = walletModel->wallet().handleShowProgress([this](const std::string&, int progress) {
-        priv->NotifyShowProgress(progress);
+    m_handler_show_progress = walletModel->wallet().handleShowProgress([guard = m_notification_guard](const std::string&, int progress) {
+        LOCK(guard->m_mutex);
+        if (guard->priv) guard->priv->NotifyShowProgress(progress);
     });
 }
 

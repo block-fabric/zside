@@ -14,7 +14,7 @@ namespace drivechain {
 
 namespace {
 //! Version of the file the state is kept in.
-constexpr uint32_t MINER_STATE_VERSION{4};
+constexpr uint32_t MINER_STATE_VERSION{5};
 } // namespace
 
 bool MinerState::Load(const fs::path& path)
@@ -26,7 +26,7 @@ bool MinerState::Load(const fs::path& path)
     try {
         uint32_t version;
         file >> version;
-        if (version != MINER_STATE_VERSION && version != 3) throw std::ios_base::failure("unknown version");
+        if (version != MINER_STATE_VERSION && version != 4 && version != 3) throw std::ios_base::failure("unknown version");
         std::vector<std::pair<std::pair<SidechainId, uint256>, CMutableTransaction>> bundles;
         uint64_t bundle_count;
         uint8_t default_vote;
@@ -50,6 +50,9 @@ bool MinerState::Load(const fs::path& path)
             file >> slot >> TX_NO_WITNESS(tx);
             m_bundles.emplace(std::make_pair(slot, tx.GetHash().ToUint256()), std::move(tx));
         }
+        m_bundle_info.clear();
+        // (Before version 5 nothing was kept of them: the next Prune finds it out from the chain.)
+        if (version >= 5) file >> m_bundle_info;
     } catch (const std::exception& e) {
         LogError("Failed to read the drivechain miner state from %s: %s", fs::PathToString(path), e.what());
         m_proposals.clear();
@@ -57,6 +60,7 @@ bool MinerState::Load(const fs::path& path)
         m_votes.clear();
         m_bundles.clear();
         m_latest_bundle.clear();
+        m_bundle_info.clear();
         m_default_vote = Vote::Type::ABSTAIN;
         m_follow = false;
         return false;
@@ -79,6 +83,7 @@ void MinerState::Save() const
         for (const auto& [key, tx] : m_bundles) {
             file << key.first << TX_NO_WITNESS(tx);
         }
+        file << m_bundle_info;
         if (!file.Commit()) throw std::runtime_error("commit failed");
         if (file.fclose() != 0) throw std::runtime_error("close failed");
         if (!RenameOver(tmp_path, m_path)) throw std::runtime_error("rename failed");
@@ -231,12 +236,15 @@ Vote MinerState::ResolveVote(SidechainId slot, const std::vector<Bundle>& pendin
             vote.type = pending.empty() ? Vote::Type::ABSTAIN : Vote::Type::DOWNVOTE;
             return vote;
         }
-        if (std::any_of(pending.begin(), pending.end(), [&](const Bundle& b) { return b.hash == latest->second; })) {
+        // A bundle the chain closed once is not upvoted again, should it be proposed again (once
+        // the chain forgot that it failed): the sidechain refunded its withdrawals.
+        const bool closed_once{WasClosedLocked(slot, latest->second)};
+        if (!closed_once && std::any_of(pending.begin(), pending.end(), [&](const Bundle& b) { return b.hash == latest->second; })) {
             vote.bundle = latest->second;
             return vote;
         }
         // Handed but not pending yet (it is proposed in the next block), or no longer pending.
-        if (m_bundles.contains({slot, latest->second}) && !m_closed_seen.contains({slot, latest->second})) {
+        if (m_bundles.contains({slot, latest->second}) && !closed_once) {
             vote.type = Vote::Type::ABSTAIN;
             return vote;
         }
@@ -299,7 +307,7 @@ Vote::Type MinerState::GetDefaultVote() const
     return m_default_vote;
 }
 
-void MinerState::Prune(const SidechainDB& scdb, int height)
+void MinerState::Prune(const SidechainDB& scdb, int height, const ClosureLookup& history)
 {
     LOCK(m_mutex);
     bool changed{false};
@@ -311,19 +319,64 @@ void MinerState::Prune(const SidechainDB& scdb, int height)
     }};
     changed |= std::erase_if(m_proposals, [&](const Sidechain& s) { return active(s.slot, s.GetHash()); }) > 0;
     changed |= std::erase_if(m_acks, [&](const auto& ack) { return active(ack.first, ack.second); }) > 0;
-    // Closed bundles go once they are closed deep enough that a reorg is unlikely to reopen them.
-    std::erase_if(m_closed_seen, [&](const auto& entry) { return !scdb.IsClosed(entry.first.first, entry.first.second); });
+    // What the chain did with each handed bundle: proposed it, closed it (and when).
     for (const auto& [key, tx] : m_bundles) {
-        if (scdb.IsClosed(key.first, key.second)) m_closed_seen.try_emplace(key, height);
+        const auto& [slot, hash]{key};
+        BundleInfo info{m_bundle_info[key]};
+        if (info.handed < 0) info.handed = height;
+        const Slot* state{scdb.GetSlot(slot)};
+        const Bundle* pending{nullptr};
+        if (state) {
+            for (const Bundle& bundle : state->bundles) {
+                if (bundle.hash == hash) pending = &bundle;
+            }
+        }
+        // Closed, as the sidechain database remembers it or, once it forgot a failed bundle, as
+        // the blocks of the active chain say: those are the record whatever reorg came before.
+        std::optional<int> closed;
+        if (const auto remembered{scdb.GetClosed(slot, hash)}) {
+            closed = remembered->height;
+        } else if (history) {
+            closed = history(slot, hash);
+        }
+        if (pending || closed) info.proposed = true;
+        // Pending again after it was closed: proposed anew once it was forgotten if the proposal is
+        // the later, still closed for this node; otherwise a reorg took the closure back.
+        if (pending && closed && pending->height <= *closed) closed.reset();
+        info.closed = closed.value_or(-1);
+        if (!(info == m_bundle_info[key])) {
+            m_bundle_info[key] = info;
+            changed = true;
+        }
     }
+    const auto vouched{[&](SidechainId slot, const uint256& hash) {
+        const auto latest{m_latest_bundle.find(slot)};
+        return latest != m_latest_bundle.end() && latest->second == hash;
+    }};
     changed |= std::erase_if(m_bundles, [&](const auto& entry) {
-        const auto seen{m_closed_seen.find(entry.first)};
-        return seen != m_closed_seen.end() && height - seen->second >= PRUNE_DEPTH;
+        const BundleInfo& info{m_bundle_info.at(entry.first)};
+        // Closed deep enough that a reorg is unlikely to reopen it.
+        if (info.closed >= 0) return height - info.closed >= PRUNE_DEPTH;
+        // Handed long ago, never proposed, and the sidechain node moved on to another one.
+        return !info.proposed && height - info.handed >= UNPROPOSED_EXPIRY && !vouched(entry.first.first, entry.first.second);
     }) > 0;
-    std::erase_if(m_closed_seen, [&](const auto& entry) { return !m_bundles.contains(entry.first); });
+    std::erase_if(m_bundle_info, [&](const auto& entry) { return !m_bundles.contains(entry.first); });
     // (A null bundle is the word that the sidechain has none: it stays.)
     std::erase_if(m_latest_bundle, [&](const auto& entry) { return !entry.second.IsNull() && !m_bundles.contains({entry.first, entry.second}); });
     if (changed) Save();
+}
+
+bool MinerState::WasClosedLocked(SidechainId slot, const uint256& hash) const
+{
+    AssertLockHeld(m_mutex);
+    const auto it{m_bundle_info.find({slot, hash})};
+    return it != m_bundle_info.end() && it->second.closed >= 0;
+}
+
+bool MinerState::WasClosed(SidechainId slot, const uint256& hash) const
+{
+    LOCK(m_mutex);
+    return WasClosedLocked(slot, hash);
 }
 
 BlockAdditions MinerState::CreateBlockAdditions(const SidechainDB& scdb, const Consensus::DrivechainParams& params,
@@ -384,7 +437,7 @@ BlockAdditions MinerState::CreateBlockAdditions(const SidechainDB& scdb, const C
         // Only the bundle the sidechain node vouches for, if it said: one handed before is one its
         // chain gave up.
         if (const auto vouched{Vouched(slot)}; vouched && *vouched != hash) continue;
-        if (scdb.IsClosed(slot, hash)) continue;
+        if (scdb.IsClosed(slot, hash) || WasClosed(slot, hash)) continue;
         if (std::any_of(state->bundles.begin(), state->bundles.end(), [&](const Bundle& b) { return b.hash == hash; })) continue;
         if (state->bundles.size() >= params.max_pending_bundles) {
             // The block's votes count before its new bundles: the queue makes room only if its

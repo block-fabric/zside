@@ -121,6 +121,9 @@ void WalletController::closeAllWallets(QWidget* parent)
 
     QMutexLocker locker(&m_mutex);
     for (WalletModel* wallet_model : m_wallets) {
+        // A model not yet given its parent was registered while its wallet is still being
+        // added to the node (see getOrCreateWallet): it is not shown, so not closed either.
+        if (wallet_model->parent() != this) continue;
         removeWallet(wallet_model);
     }
 }

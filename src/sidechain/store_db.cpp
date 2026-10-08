@@ -97,6 +97,9 @@ std::optional<StoreBytes> DbStore::Get(std::span<const unsigned char> key) const
 
 std::optional<std::pair<StoreBytes, StoreBytes>> DbStore::Next(std::span<const unsigned char> from, std::span<const unsigned char> prefix) const
 {
+    // Nothing below the prefix can match: sought from there, the first entry found could be one
+    // below it, not the first one in it.
+    if (std::lexicographical_compare(from.begin(), from.end(), prefix.begin(), prefix.end())) from = prefix;
     const StoreBytes start{Full(from)};
     const StoreBytes full_prefix{Full(prefix)};
     std::lock_guard lock{m_cursor_mutex};

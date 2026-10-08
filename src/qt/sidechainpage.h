@@ -61,6 +61,8 @@ private Q_SLOTS:
     QString miningAddress();
 
 private:
+    //! What refresh does; it may throw on a reply of an unexpected shape.
+    void refreshPage();
     /**
      * Run an RPC command. Returns nothing after showing the error to the user
      * if the command fails.

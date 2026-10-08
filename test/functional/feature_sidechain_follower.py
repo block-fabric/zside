@@ -5,8 +5,9 @@
 """Test how a sidechain node follows a mainchain node that answers what the test wants.
 
 The mainchain node is a stand-in, an RPC server of the test, so that answers no real node gives can
-be tried: blocks that do not follow each other, blocks without their median time, another sidechain
-in the slot.
+be tried: blocks that do not follow each other, blocks without their median time or pending bundles,
+amounts that are none, a node on another chain, a reorg deeper than the node can take back,
+commitments to blocks nobody has, another sidechain in the slot.
 """
 
 import json
@@ -34,24 +35,29 @@ class Mainchain:
         self.sidechain = {"activationheight": 1, "proposalhash": "aa" * 32}
         # Answers that a real node does not give.
         self.no_mediantime = False
+        self.no_pending = False
+        self.bad_amount = False
         self.broken_after = None
         self.calls = {}
         for _ in range(3):
             self.add_block()
 
-    def add_block(self):
+    def add_block(self, branch=0, bmm=None):
         height = len(self.blocks)
         block = {
             "height": height,
-            "hash": block_hash(height),
+            "hash": block_hash(height, branch),
             "time": 1790900000 + height,
             "mediantime": 1790900000 + height,
             "deposits": [],
             "bundles": [],
             "proposed": [],
+            "pending": [],
         }
         if height > 0:
-            block["previousblockhash"] = block_hash(height - 1)
+            block["previousblockhash"] = self.blocks[-1]["hash"]
+        if bmm is not None:
+            block["bmm"] = bmm
         self.blocks.append(block)
 
     def events(self, height, count):
@@ -59,6 +65,12 @@ class Mainchain:
         if self.no_mediantime:
             for block in answer:
                 block.pop("mediantime")
+        if self.no_pending:
+            for block in answer:
+                block.pop("pending")
+        if self.bad_amount and answer:
+            # An amount that is none: AmountFromValue throws, which must not stop the node.
+            answer[-1]["deposits"] = [{"destination": "x", "amount": "lots", "txid": "11" * 32, "burnindex": 0}]
         if self.broken_after is not None and answer and answer[0]["height"] == self.broken_after:
             # The block on record, then one that does not follow it.
             stray = dict(self.blocks[0])
@@ -155,6 +167,68 @@ class SidechainFollowerTest(BitcoinTestFramework):
         with main.lock:
             main.no_mediantime = False
         self.on_record(5)
+
+        self.log.info("Blocks without the bundles pending after them: the mainchain node is too old to follow")
+        with main.lock:
+            main.add_block()
+            main.no_pending = True
+        self.wait_until(lambda: "pending after blocks" in node.getmainchaininfo().get("error", ""))
+        assert_equal(node.getmainchaininfo()["height"], 5)
+        with main.lock:
+            main.no_pending = False
+        self.on_record(6)
+
+        self.log.info("An amount that is none: a bad answer, asked again later; the node keeps running")
+        with main.lock:
+            main.add_block()
+            main.bad_amount = True
+        self.wait_until(lambda: "not an amount" in node.getmainchaininfo().get("error", ""))
+        time.sleep(2)
+        assert_equal(node.getmainchaininfo()["height"], 6)
+        assert_equal(node.getblockcount(), 0)
+        with main.lock:
+            main.bad_amount = False
+        self.on_record(7)
+
+        self.log.info("Commitments to blocks nobody announced do not make the node think it is catching up")
+        with main.lock:
+            for i in range(3):
+                main.add_block(bmm=f"{0xee:02x}{i:062x}")
+            main.calls = {}
+        # A node that has just started tells its mainchain node what it vouches for (none here), once it
+        # has caught up; one that takes junk commitments for blocks to catch up with never does.
+        self.restart_node(0, extra_args=self.extra_args[0] + ["-maxtipage=2000000000"])
+        self.on_record(10)
+        self.wait_until(lambda: main.calls.get("vouchwithdrawalbundle", 0) > 0)
+
+        self.log.info("A mainchain node on another chain: the record is not dropped")
+        with main.lock:
+            good = main.blocks
+            main.blocks = []
+            for _ in range(12):
+                main.add_block(branch=5)
+        self.wait_until(lambda: "on another chain" in node.getmainchaininfo().get("error", ""))
+        assert_equal(node.getmainchaininfo()["height"], 10)
+        assert_equal(node.getmainchaininfo()["bestblockhash"], block_hash(10, 0))
+        with main.lock:
+            main.blocks = good
+        self.on_record(10)
+
+        self.log.info("A reorg that drops more commitments than the node can take back waits for the operator")
+        with main.lock:
+            for i in range(2885):
+                main.add_block(bmm=f"{0xdd:02x}{i:062x}")
+        self.on_record(10 + 2885)
+        with main.lock:
+            # The mainchain node says the blocks above height 8 are gone, replaced by a shorter branch.
+            main.blocks = main.blocks[:9]
+            for _ in range(5):
+                main.add_block(branch=3)
+        self.wait_until(lambda: "call syncmainchain true" in node.getmainchaininfo().get("error", ""))
+        assert_equal(node.getmainchaininfo()["height"], 10 + 2885)
+        assert_equal(node.syncmainchain(True), 13)
+        assert_equal(node.getmainchaininfo()["bestblockhash"], block_hash(13, 3))
+        self.on_record(13)
 
         self.log.info("Another sidechain in the slot: the node stops rather than follow it")
         with main.lock:

@@ -209,6 +209,8 @@ public:
     std::optional<CMutableTransaction> BundleTx() const;
     bool InBundle(const COutPoint& withdrawal) const;
     int32_t LastFailureHeight() const;
+    /** Height of the mainchain block that committed to the pending bundle; -1 if unknown (before audit2_height) or none. */
+    int32_t BundleMainHeight() const;
 
     /** The shielded pool, read only. */
     zside::ShieldedState Shielded() const { return zside::ShieldedState{*m_view}; }
@@ -259,6 +261,13 @@ std::string RefundMessage(const COutPoint& withdrawal);
 /** Coinbase output committing to a withdrawal bundle: BUNDLE_COMMIT_TAG | bundle hash */
 CScript BundleCommitScript(const uint256& hash);
 std::optional<uint256> ParseBundleCommitScript(const CScript& script);
+
+/**
+ * Whether a block that failed for `reject_reason` (from State::ConnectBlock) fails whatever the
+ * record of the mainchain says. Unknown reasons, those of a sidechain's own rules included, are
+ * taken to depend on it.
+ */
+bool RecordIndependent(const std::string& reject_reason);
 
 /**
  * Script that pays a deposit. The depositor names a deposit address of this

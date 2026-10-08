@@ -15,6 +15,7 @@
 #include <uint256.h>
 #include <util/fs.h>
 
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -106,13 +107,25 @@ public:
     void SetFollow(bool follow) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     bool GetFollow() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
+    /** The height of the last block of the active chain that closed a bundle, if any (see Database::FindClosure). */
+    using ClosureLookup = std::function<std::optional<int>(SidechainId, const uint256&)>;
+
     /**
-     * Drop what the chain has made obsolete: proposals and acks of sidechains that activated, and
+     * Drop what the chain has made obsolete: proposals and acks of sidechains that activated,
      * bundles closed (paid out or failed) PRUNE_DEPTH blocks ago, kept until then in case a reorg
-     * makes them pending again.
+     * makes them pending again, and bundles handed UNPROPOSED_EXPIRY blocks ago that no block ever
+     * proposed (but the one the sidechain node vouches for).
+     *
+     * Which handed bundles the chain closed is kept, with the height: a bundle the chain closed
+     * once is never proposed or upvoted again, even once the sidechain database forgot that it
+     * failed (SidechainDB::ForgetFailedBundles) and it looks new; `history` tells about those.
+     * The vote and proposal decisions follow what the last call found.
      */
-    void Prune(const SidechainDB& scdb, int height) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    void Prune(const SidechainDB& scdb, int height, const ClosureLookup& history = {}) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     static constexpr int PRUNE_DEPTH{6};
+    static constexpr int UNPROPOSED_EXPIRY{1008};
+    /** Whether the chain closed a handed bundle once, as of the last Prune (a reorg that reopens it excepted). */
+    bool WasClosed(SidechainId slot, const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
      * What to add to a block built on top of the block `scdb` belongs to.
@@ -133,8 +146,20 @@ private:
     std::map<std::pair<SidechainId, uint256>, CMutableTransaction> m_bundles GUARDED_BY(m_mutex);
     //! The bundle a sidechain node handed last, per slot: the one its chain commits to now.
     std::map<SidechainId, uint256> m_latest_bundle GUARDED_BY(m_mutex);
-    //! When bundles were first seen closed, for Prune (not saved: a restart only delays pruning).
-    std::map<std::pair<SidechainId, uint256>, int> m_closed_seen GUARDED_BY(m_mutex);
+    /** What Prune learnt of a handed bundle; saved with it. */
+    struct BundleInfo {
+        //! Height of the first Prune that saw it.
+        int32_t handed{-1};
+        //! Whether a block ever proposed it.
+        bool proposed{false};
+        //! Height of the block that closed it, or -1.
+        int32_t closed{-1};
+
+        SERIALIZE_METHODS(BundleInfo, obj) { READWRITE(obj.handed, obj.proposed, obj.closed); }
+        friend bool operator==(const BundleInfo&, const BundleInfo&) = default;
+    };
+    std::map<std::pair<SidechainId, uint256>, BundleInfo> m_bundle_info GUARDED_BY(m_mutex);
+    bool WasClosedLocked(SidechainId slot, const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     std::map<SidechainId, Vote> m_votes GUARDED_BY(m_mutex);
     //! To upvote is to upvote what the sidechain node of the operator vouches for, and nothing else.
     Vote::Type m_default_vote GUARDED_BY(m_mutex){Vote::Type::UPVOTE};

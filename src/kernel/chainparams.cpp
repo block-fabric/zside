@@ -239,6 +239,9 @@ public:
         // Set when the slot activates on the mainchain: the height of the block that activated it.
         consensus.sidechain.main_activation_height = 0;
         consensus.sidechain.audit2_height = 0;
+        // A tenth of the mainchain's withdrawal_min_score (64800); proposals within a day.
+        consensus.sidechain.pending_min_score = 6480;
+        consensus.sidechain.unproposed_expiry_blocks = 1440;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
         consensus.sidechain.zside.audit2_height = 0;
     }
@@ -346,6 +349,9 @@ public:
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
         consensus.sidechain.main_activation_height = 4900;
         consensus.sidechain.audit2_height = 3419; // audit 2 rules on the test network: moved out while the third audit's fixes are made
+        // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
+        consensus.sidechain.pending_min_score = 30;
+        consensus.sidechain.unproposed_expiry_blocks = 60;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
         consensus.sidechain.zside.audit2_height = 3419; // audit 2 rules on the test network: moved out while the third audit's fixes are made
     }
@@ -457,6 +463,9 @@ public:
                        .message_start = {0x7a, 0x73, 0x64, 0x03}, .default_port = 39455, .bech32_hrp = "tzs"});
         consensus.sidechain.main_activation_height = 0;
         consensus.sidechain.audit2_height = 0;
+        // The Chains signet has the rules of its main network.
+        consensus.sidechain.pending_min_score = 6480;
+        consensus.sidechain.unproposed_expiry_blocks = 1440;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
         consensus.sidechain.zside.audit2_height = 0;
     }
@@ -482,6 +491,39 @@ public:
         consensus.drivechain.withdrawal_period = 60;
         consensus.drivechain.withdrawal_min_score = 30;
         consensus.drivechain.upvote_expiry_blocks = 20;
+        consensus.drivechain.unvoted_forget_blocks = 20;
+        for (const auto& [name, value] : opts.drivechain_params) {
+            auto& dc{consensus.drivechain};
+            if (name == "max_sidechains") {
+                dc.max_sidechains = value;
+            } else if (name == "activation_period") {
+                dc.activation_period = value;
+            } else if (name == "activation_max_failures") {
+                dc.activation_max_failures = value;
+            } else if (name == "replacement_period") {
+                dc.replacement_period = value;
+            } else if (name == "withdrawal_period") {
+                dc.withdrawal_period = value;
+            } else if (name == "withdrawal_min_score") {
+                dc.withdrawal_min_score = value;
+            } else if (name == "max_pending_bundles") {
+                dc.max_pending_bundles = value;
+            } else if (name == "single_payout_height") {
+                dc.single_payout_height = value;
+            } else if (name == "idle_expiry_height") {
+                dc.idle_expiry_height = value;
+            } else if (name == "idle_expiry_blocks") {
+                dc.idle_expiry_blocks = value;
+            } else if (name == "audit2_height") {
+                dc.audit2_height = value;
+            } else if (name == "upvote_expiry_blocks") {
+                dc.upvote_expiry_blocks = value;
+            } else if (name == "unvoted_forget_blocks") {
+                dc.unvoted_forget_blocks = value;
+            } else {
+                throw std::runtime_error(strprintf("Invalid name (%s) for -testdrivechainparam=name@value.", name));
+            }
+        }
         consensus.BIP34Height = 1; // Always active unless overridden
         consensus.BIP34Hash = uint256();
         consensus.BIP65Height = 1;  // Always active unless overridden
@@ -519,6 +561,9 @@ public:
             consensus.sidechain.slot = *opts.sidechain_slot;
             consensus.sidechain.bundle_retry_delay = 5;
             consensus.sidechain.audit2_height = 0;
+            // A tenth of the regtest mainchain's withdrawal_min_score (30).
+            consensus.sidechain.pending_min_score = 3;
+            consensus.sidechain.unproposed_expiry_blocks = 20;
             // A sidechain has no sidechains of its own.
             consensus.drivechain.max_sidechains = 0;
             consensus.coinbase_maturity = 0;

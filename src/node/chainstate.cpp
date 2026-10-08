@@ -125,6 +125,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
             }
             assert(chainstate->m_chain.Tip() != nullptr);
             if (auto loaded{chainstate->LoadDrivechainState()}; !loaded) {
+                if (chainman.m_interrupt) return {ChainstateLoadStatus::INTERRUPTED, {}};
                 return {ChainstateLoadStatus::FAILURE, Untranslated(strprintf("Error loading the sidechain database: %s", util::ErrorString(loaded).original))};
             }
         } else {

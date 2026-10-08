@@ -982,6 +982,23 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         InitWarning(_("Option '-limitdescendantsize' is given but descendant size limits have been replaced with cluster size limits (see -limitclustersize). This option has no effect."));
     }
 
+    // A sidechain built from the template names its slot; then it has to name the mainchain block that
+    // activated it there (SidechainParams::main_activation_height). Without it, the deposits the
+    // mainchain made to whatever held the slot before are credited on this chain, and a node that first
+    // meets the mainchain after a replacement follows the wrong sidechain. On the main network that is
+    // a release that must not run; a test network is launched before its slot activates, so it is said
+    // loudly instead. (The template's own networks have no slot: slot 0, never activated.)
+    if (const Consensus::SidechainParams& side{chainparams.GetConsensus().sidechain}; side.enabled && side.slot > 0 && side.main_activation_height == 0) {
+        if (chainparams.GetChainType() == ChainType::MAIN) {
+            return InitError(Untranslated(strprintf("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
+                                                    "(SidechainParams::main_activation_height): it must not run on the main network.", side.slot)));
+        }
+        if (chainparams.GetChainType() == ChainType::TESTNET) {
+            InitWarning(Untranslated(strprintf("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
+                                               "(SidechainParams::main_activation_height): set it once the slot activates.", side.slot)));
+        }
+    }
+
     // Error if network-specific options (-addnode, -connect, etc) are
     // specified in default section of config file, but not overridden
     // on the command line or in this chain's section of the config file.

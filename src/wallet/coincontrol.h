@@ -121,6 +121,10 @@ public:
     //! mempool takes a transaction that spends them only if it is a small BMM request or treasury
     //! transaction itself (dc-unconfirmed-parent): set for those only, with m_max_tx_weight.
     bool m_allow_drivechain_parents{false};
+    //! With m_allow_drivechain_parents: whether that includes the unconfirmed outputs of BMM requests.
+    //! The mempool drops a request that is not in the next block, and every transaction spending
+    //! its outputs with it: only another BMM request (which expires with it anyway) should spend them.
+    bool m_allow_bmm_request_parents{true};
 
     CCoinControl();
 
