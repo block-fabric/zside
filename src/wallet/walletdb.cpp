@@ -64,6 +64,8 @@ const std::string WATCHS{"watchs"};
 const std::string ORCHARDFVK{"zsfvk"};
 const std::string MELTCAST{"zsjob"};
 const std::string ORCHARDRESCAN{"zsrescan"};
+const std::string ORCHARDKEYVERSION{"zskeyver"};
+const std::string ORCHARDLEGACYFVK{"zsfvk1"};
 const std::unordered_set<std::string> LEGACY_TYPES{CRYPTED_KEY, CSCRIPT, DEFAULTKEY, HDCHAIN, KEYMETA, KEY, OLD_KEY, POOL, WATCHMETA, WATCHS};
 } // namespace DBKeys
 
@@ -1182,6 +1184,17 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
             OrchardFvk key;
             std::copy(fvk.begin(), fvk.end(), key.begin());
             pwallet->m_shielded.fvk = key;
+            // Its version: none written, the account was set up before version 2, and keeps its keys.
+            int version{KEY_ANY_CHAIN};
+            if (m_batch->Read(DBKeys::ORCHARDKEYVERSION, version) && version != KEY_ANY_CHAIN && version != KEY_THIS_CHAIN) {
+                pwallet->WalletLogPrintf("Error: the shielded account has keys of an unknown version (%d)\n", version);
+                return DBErrors::TOO_NEW;
+            }
+            pwallet->m_shielded.key_version = version;
+            if (std::vector<unsigned char> legacy; version == KEY_THIS_CHAIN && m_batch->Read(DBKeys::ORCHARDLEGACYFVK, legacy) && legacy.size() == zside::FVK_SIZE) {
+                std::copy(legacy.begin(), legacy.end(), key.begin());
+                pwallet->m_shielded.legacy_fvk = key;
+            }
         }
         if (int height; m_batch->Read(DBKeys::ORCHARDRESCAN, height)) pwallet->m_shielded.rescan_from = height;
         // zSide: the melt/cast plan.

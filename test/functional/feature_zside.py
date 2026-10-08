@@ -138,6 +138,7 @@ class ZSideTest(SidechainTest):
         self.run_concurrent_test()
         self.run_conflict_test()
         self.run_rescan_test()
+        self.run_key_version_test()
         self.run_meltcast_test()
         self.run_unshield_test()
 
@@ -386,6 +387,52 @@ class ZSideTest(SidechainTest):
             other.loadwallet("locked")
             assert_equal(other.get_wallet_rpc("locked").getshieldedbalance()["available"], Decimal("0.3"))
         other.unloadwallet("locked")
+        self.check_in_sync()
+
+    def run_key_version_test(self):
+        side, other = self.nodes
+        self.log.info("An account set up before the keys were bound to the chain keeps its keys; restored from its descriptor, its notes are found and spent")
+        # An account of version 1, as an older release set up (the option stands in for it).
+        self.restart_node(1, extra_args=self.extra_args[1] + ["-zsidekeyversion=1"])
+        self.connect_nodes(0, 1)
+        other.createwallet("old")
+        old = other.get_wallet_rpc("old")
+        old_address = old.getshieldedaddress()
+        side.sendshielded({old_address: Decimal("0.2")}, "to a key of version 1")
+        self.mine_txs()
+        assert_equal(old.getshieldedbalance()["available"], Decimal("0.2"))
+        descriptors = []
+        for d in old.listdescriptors(True)["descriptors"]:
+            request = {"desc": d["desc"], "timestamp": 0, "active": d["active"], "internal": d.get("internal", False)}
+            if "range" in d:
+                request["range"] = d["range"]
+                request["next_index"] = d["next_index"]
+            descriptors.append(request)
+        # The release of today: the account keeps its keys.
+        self.restart_node(1)
+        self.connect_nodes(0, 1)
+        other.loadwallet("old")
+        old = other.get_wallet_rpc("old")
+        assert_equal(old.getshieldedaddress(), old_address)
+        assert_equal(old.getshieldedbalance()["available"], Decimal("0.2"))
+        # The same descriptor in a new wallet: keys of version 2 (another address), and the note paid
+        # to the key of version 1 is its own.
+        other.createwallet("restored", blank=True)
+        restored = other.get_wallet_rpc("restored")
+        assert all(r["success"] for r in restored.importdescriptors(descriptors))
+        assert restored.getshieldedaddress() != old_address
+        assert_equal(restored.getshieldedbalance()["available"], Decimal("0.2"))
+        assert_equal(restored.listshieldednotes()[0]["memo"], "to a key of version 1")
+        # It spends it; the change goes to its own keys.
+        spend = restored.sendshielded({side.getshieldedaddress(): Decimal("0.1")})["txid"]
+        self.mine_txs()
+        assert_equal(restored.gettransaction(spend)["confirmations"], 1)
+        left = restored.getshieldedbalance()["available"]
+        assert Decimal("0.09") < left < Decimal("0.1"), left
+        # The account of version 1 sees its note spent (by its nullifier), not the change of version 2.
+        assert_equal(old.getshieldedbalance()["available"], 0)
+        other.unloadwallet("old")
+        other.unloadwallet("restored")
         self.check_in_sync()
 
     def run_unshield_test(self):

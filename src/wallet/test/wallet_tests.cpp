@@ -1086,6 +1086,55 @@ BOOST_FIXTURE_TEST_CASE(shielded_note_carried_by_another_tx, TestChain100Setup)
     BOOST_CHECK_EQUAL(GetShieldedBalance(wallet).notes, 0);
 }
 
+BOOST_FIXTURE_TEST_CASE(shielded_keys_of_the_chain, ListCoinsTestingSetup)
+{
+    // zSide: an account set up now has keys of version 2, bound to the chain (its genesis block and
+    // slot): one seed makes unrelated keys on each chain. It watches the keys of version 1 of the same
+    // descriptor too, the same on every chain, so that what was paid to them is found.
+    LOCK(wallet->cs_wallet);
+    BOOST_REQUIRE(SetupShieldedAccount(*wallet));
+    const ShieldedAccount& account{wallet->m_shielded};
+    BOOST_CHECK_EQUAL(account.key_version, KEY_THIS_CHAIN);
+    BOOST_REQUIRE(account.fvk);
+    BOOST_REQUIRE(account.legacy_fvk);
+    const auto fvk_of{[](const std::optional<ShieldedKey>& sk) {
+        BOOST_REQUIRE(sk);
+        OrchardFvk fvk;
+        BOOST_REQUIRE_EQUAL(zo_full_viewing_key(sk->data(), fvk.data()), ZO_OK);
+        return fvk;
+    }};
+    const Consensus::Params& consensus{Params().GetConsensus()};
+    const uint256& genesis{consensus.hashGenesisBlock};
+    const uint32_t slot{consensus.sidechain.slot};
+    BOOST_CHECK(fvk_of(ShieldedSpendingKey(*wallet, KEY_THIS_CHAIN)) == *account.fvk);
+    BOOST_CHECK(fvk_of(ShieldedSpendingKey(*wallet, KEY_ANY_CHAIN)) == *account.legacy_fvk);
+    // Another genesis block, another slot: other keys of version 2; version 1 is the same everywhere.
+    const std::set<OrchardFvk> keys{*account.fvk, *account.legacy_fvk,
+                                    fvk_of(ShieldedSpendingKey(*wallet, KEY_THIS_CHAIN, uint256::ONE, slot)),
+                                    fvk_of(ShieldedSpendingKey(*wallet, KEY_THIS_CHAIN, genesis, slot + 1))};
+    BOOST_CHECK_EQUAL(keys.size(), 4U);
+    BOOST_CHECK(fvk_of(ShieldedSpendingKey(*wallet, KEY_ANY_CHAIN, uint256::ONE, slot + 1)) == *account.legacy_fvk);
+    BOOST_CHECK(!ShieldedSpendingKey(*wallet, 3));
+
+    // Its addresses are of version 2; one of version 1 is its own too, and what it was paid is found.
+    OrchardAddress legacy_address;
+    BOOST_REQUIRE_EQUAL(zo_address(account.legacy_fvk->data(), 0, false, legacy_address.data()), ZO_OK);
+    BOOST_CHECK(*ShieldedAddress(*wallet, 0) != legacy_address);
+    BOOST_CHECK_EQUAL(ShieldedAddressScope(account, *ShieldedAddress(*wallet, 0)), 1);
+    BOOST_CHECK_EQUAL(ShieldedAddressScope(account, legacy_address), 1);
+    BOOST_CHECK_EQUAL(ShieldedAddressScope(account, *ShieldedAddress(*wallet, 0, /*internal=*/true)), 2);
+    BOOST_CHECK_EQUAL(ShieldedAddressScope(account, ShieldedKeyOf(4).second), 0);
+    const CTransactionRef paid{MakeTransactionRef(ShieldingTxTo(ShieldedKeyOf(4).first, legacy_address, COIN))};
+    BOOST_CHECK(IsShieldedMine(*wallet, *paid));
+    BOOST_REQUIRE(wallet->AddToWallet(paid, TxStateInMempool{}));
+    const auto notes{ShieldedNotes(*wallet)};
+    BOOST_REQUIRE_EQUAL(notes.size(), 1U);
+    BOOST_CHECK(notes[0].note->legacy);
+    BOOST_CHECK_EQUAL(notes[0].note->value, COIN);
+    // One to another key is not.
+    BOOST_CHECK(!IsShieldedMine(*wallet, CTransaction{ShieldingTxTo(ShieldedKeyOf(4).first, ShieldedKeyOf(4).second, COIN)}));
+}
+
 BOOST_FIXTURE_TEST_CASE(meltcast_stops_between_steps, ListCoinsTestingSetup)
 {
     // zSide: each step of a melt/cast plan proves for seconds; shutting down, or unloading the wallet,

@@ -8,6 +8,7 @@
 #include <chain.h>
 #include <interfaces/chain.h>
 #include <chainparams.h>
+#include <common/args.h>
 #include <hash.h>
 #include <key_io.h>
 #include <policy/policy.h>
@@ -108,8 +109,15 @@ std::optional<OrchardMemo> MemoFromText(const std::string& text)
     return memo;
 }
 
-std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet)
+std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet, int version)
 {
+    const Consensus::Params& consensus{Params().GetConsensus()};
+    return ShieldedSpendingKey(wallet, version, consensus.hashGenesisBlock, consensus.sidechain.slot);
+}
+
+std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet, int version, const uint256& genesis, uint32_t slot)
+{
+    if (version != KEY_ANY_CHAIN && version != KEY_THIS_CHAIN) return std::nullopt;
     const auto* spkm{dynamic_cast<const DescriptorScriptPubKeyMan*>(wallet.GetScriptPubKeyMan(OutputType::BECH32, /*internal=*/false))};
     if (!spkm) return std::nullopt;
     // The descriptor with its private keys, and all made of it, wiped once read.
@@ -129,8 +137,11 @@ std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet)
             if (!extkey.key.IsValid()) break;
             std::array<unsigned char, BIP32_EXTKEY_SIZE> code;
             extkey.Encode(code.data());
-            HashWriter seed{TaggedHash("zSide/Orchard seed")};
+            // Version 1: of the extended key alone, the same on every chain. Version 2: of the chain
+            // too (its genesis block and slot), so that one seed makes unrelated keys on each.
+            HashWriter seed{TaggedHash(version == KEY_ANY_CHAIN ? "zSide/Orchard seed" : "zSide/Orchard seed/chain")};
             seed.write(std::as_bytes(std::span{code}));
+            if (version == KEY_THIS_CHAIN) seed << genesis << slot;
             memory_cleanse(code.data(), code.size());
             uint256 seed_hash{seed.GetSHA256()};
             ShieldedKey sk(32);
@@ -144,17 +155,70 @@ std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet)
     return out;
 }
 
+namespace {
+std::optional<OrchardFvk> ViewingKeyOf(const CWallet& wallet, int version)
+{
+    const auto sk{ShieldedSpendingKey(wallet, version)};
+    if (!sk) return std::nullopt;
+    OrchardFvk fvk;
+    if (zo_full_viewing_key(sk->data(), fvk.data()) != ZO_OK) return std::nullopt;
+    return fvk;
+}
+
+/** The version of the keys of an account set up now: 2 (on regtest, -zsidekeyversion may say 1, for tests). */
+int NewKeyVersion()
+{
+    if (Params().GetChainType() != ChainType::REGTEST) return KEY_THIS_CHAIN;
+    return gArgs.GetIntArg("-zsidekeyversion", KEY_THIS_CHAIN) == KEY_ANY_CHAIN ? KEY_ANY_CHAIN : KEY_THIS_CHAIN;
+}
+} // namespace
+
+std::vector<std::pair<const OrchardFvk*, bool>> ShieldedViewingKeys(const ShieldedAccount& account)
+{
+    std::vector<std::pair<const OrchardFvk*, bool>> keys;
+    if (account.fvk) keys.emplace_back(&*account.fvk, false);
+    if (account.legacy_fvk) keys.emplace_back(&*account.legacy_fvk, true);
+    return keys;
+}
+
+int ShieldedAddressScope(const ShieldedAccount& account, const OrchardAddress& address)
+{
+    for (const auto& [fvk, legacy] : ShieldedViewingKeys(account)) {
+        if (const int scope{zo_address_scope(fvk->data(), address.data())}) return scope;
+    }
+    return 0;
+}
+
 bool SetupShieldedAccount(CWallet& wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
     if (wallet.m_shielded.fvk) return true;
-    const auto sk{ShieldedSpendingKey(wallet)};
-    if (!sk) return false;
-    OrchardFvk fvk;
-    if (zo_full_viewing_key(sk->data(), fvk.data()) != ZO_OK) return false;
+    // An account set up now has keys of this chain (version 2). The keys of version 1 of the same
+    // descriptor are watched too: a copy of the wallet set up before (or the wallet whose descriptor
+    // this one was restored from) may have been paid at them, and their notes are the account's.
+    // An account set up before keeps its keys of version 1, and no others (WalletBatch::LoadWallet).
+    const int version{NewKeyVersion()};
+    const auto fvk{ViewingKeyOf(wallet, version)};
+    if (!fvk) return false;
+    std::optional<OrchardFvk> legacy;
+    if (version != KEY_ANY_CHAIN) {
+        legacy = ViewingKeyOf(wallet, KEY_ANY_CHAIN);
+        if (!legacy) return false;
+    }
     WalletBatch batch{wallet.GetDatabase()};
-    batch.WriteOrchardViewingKey(std::vector<unsigned char>(fvk.begin(), fvk.end()));
+    // All or nothing: a viewing key kept without its version would be taken for one of version 1.
+    if (!batch.TxnBegin()) return false;
+    bool written{batch.WriteOrchardKeyVersion(version)};
+    if (legacy) written = written && batch.WriteOrchardLegacyViewingKey(std::vector<unsigned char>(legacy->begin(), legacy->end()));
+    written = written && batch.WriteOrchardViewingKey(std::vector<unsigned char>(fvk->begin(), fvk->end()));
+    if (!written) {
+        batch.TxnAbort();
+        return false;
+    }
+    if (!batch.TxnCommit()) return false;
     wallet.m_shielded.fvk = fvk;
+    wallet.m_shielded.key_version = version;
+    wallet.m_shielded.legacy_fvk = legacy;
     // What the wallet keeps already may pay the account.
     for (const auto& [txid, wtx] : wallet.mapWallet) ShieldedTxAdded(wallet, wtx);
     // Blocks the wallet scanned without the account may have paid it alone, with nothing the wallet
@@ -236,11 +300,13 @@ void ShieldedTxAdded(CWallet& wallet, const CWalletTx& wtx)
         const auto range{account.spends.equal_range(nf)};
         if (std::none_of(range.first, range.second, [&](const auto& e) { return e.second == txid; })) account.spends.emplace(nf, txid);
     }
-    if (!account.fvk) return;
-    const uint8_t* fvk{account.fvk->data()};
+    const auto keys{ShieldedViewingKeys(account)};
     for (uint32_t i{0}; i < bundle->NumActions(); ++i) {
-        ShieldedNote note;
-        if (zo_bundle_decrypt(bundle->get(), i, fvk, note.note.data(), note.memo.data(), &note.internal)) {
+        for (const auto& [key, legacy] : keys) {
+            const uint8_t* fvk{key->data()};
+            ShieldedNote note;
+            if (!zo_bundle_decrypt(bundle->get(), i, fvk, note.note.data(), note.memo.data(), &note.internal)) continue;
+            note.legacy = legacy;
             note.value = static_cast<CAmount>(zo_note_value(note.note.data()));
             zo_note_nullifier(note.note.data(), fvk, note.nullifier.data());
             zo_bundle_cmx(bundle->get(), i, note.cmx.data());
@@ -249,16 +315,19 @@ void ShieldedTxAdded(CWallet& wallet, const CWalletTx& wtx)
             auto& carriers{account.notes.try_emplace(nullifier, std::move(note)).first->second.carriers};
             const std::pair<Txid, uint32_t> carrier{txid, i};
             if (std::find(carriers.begin(), carriers.end(), carrier) == carriers.end()) carriers.push_back(carrier);
+            break;
         }
         // What the wallet paid, to others or itself (recovered with its outgoing key).
-        ShieldedPayment payment;
-        OrchardNoteBytes sent;
-        if (zo_bundle_recover(bundle->get(), i, fvk, sent.data(), payment.memo.data())) {
+        for (const auto& [key, legacy] : keys) {
+            ShieldedPayment payment;
+            OrchardNoteBytes sent;
+            if (!zo_bundle_recover(bundle->get(), i, key->data(), sent.data(), payment.memo.data())) continue;
             payment.txid = txid;
             payment.action = i;
             std::copy(sent.begin(), sent.begin() + zside::ADDRESS_SIZE, payment.recipient.begin());
             payment.value = static_cast<CAmount>(zo_note_value(sent.data()));
             account.payments.emplace(std::make_pair(txid, i), payment);
+            break;
         }
     }
 }
@@ -273,13 +342,15 @@ bool IsShieldedMine(const CWallet& wallet, const CTransaction& tx)
     for (const uint256& nf : bundle->Nullifiers()) {
         if (wallet.m_shielded.notes.contains(nf)) return true;
     }
-    const uint8_t* fvk{wallet.m_shielded.fvk->data()};
-    for (size_t i{0}; i < bundle->NumActions(); ++i) {
-        OrchardNoteBytes note;
-        OrchardMemo memo;
-        bool internal;
-        if (zo_bundle_decrypt(bundle->get(), i, fvk, note.data(), memo.data(), &internal)) return true;
-        if (zo_bundle_recover(bundle->get(), i, fvk, note.data(), memo.data())) return true;
+    for (const auto& [key, legacy] : ShieldedViewingKeys(wallet.m_shielded)) {
+        const uint8_t* fvk{key->data()};
+        for (size_t i{0}; i < bundle->NumActions(); ++i) {
+            OrchardNoteBytes note;
+            OrchardMemo memo;
+            bool internal;
+            if (zo_bundle_decrypt(bundle->get(), i, fvk, note.data(), memo.data(), &internal)) return true;
+            if (zo_bundle_recover(bundle->get(), i, fvk, note.data(), memo.data())) return true;
+        }
     }
     return false;
 }
@@ -504,15 +575,21 @@ Prepared PrepareSend(CWallet& wallet, const std::vector<ShieldedRecipient>& reci
 {
     AssertLockHeld(wallet.cs_wallet);
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
-    const auto sk{ShieldedSpendingKey(wallet)};
-    if (!sk) return std::string{"The wallet is locked"};
-    const uint8_t* fvk{wallet.m_shielded.fvk->data()};
-    // The key comes from the wallet's active descriptor: if another was made active since the account
-    // was set up, it is not the account's key, and could spend none of its notes.
-    OrchardFvk derived;
-    const bool same{zo_full_viewing_key(sk->data(), derived.data()) == ZO_OK && derived == *wallet.m_shielded.fvk};
-    memory_cleanse(derived.data(), derived.size());
-    if (!same) {
+    const ShieldedAccount& account{wallet.m_shielded};
+    const auto sk{ShieldedSpendingKey(wallet, account.key_version)};
+    // The key of version 1 too, for the notes paid to it (ShieldedAccount::legacy_fvk).
+    const auto legacy_sk{account.legacy_fvk ? ShieldedSpendingKey(wallet, KEY_ANY_CHAIN) : std::nullopt};
+    if (!sk || (account.legacy_fvk && !legacy_sk)) return std::string{"The wallet is locked"};
+    const uint8_t* fvk{account.fvk->data()};
+    // The keys come from the wallet's active descriptor: if another was made active since the account
+    // was set up, they are not the account's, and could spend none of its notes.
+    const auto matches{[](const ShieldedKey& key, const OrchardFvk& expected) {
+        OrchardFvk derived;
+        const bool same{zo_full_viewing_key(key.data(), derived.data()) == ZO_OK && derived == expected};
+        memory_cleanse(derived.data(), derived.size());
+        return same;
+    }};
+    if (!matches(*sk, *account.fvk) || (account.legacy_fvk && !matches(*legacy_sk, *account.legacy_fvk))) {
         return std::string{"The active descriptor of the wallet is not the one the shielded account was made from: make that one active again to spend the account's notes"};
     }
 
@@ -636,7 +713,8 @@ Prepared PrepareSend(CWallet& wallet, const std::vector<ShieldedRecipient>& reci
     for (size_t i{0}; i < spends.size(); ++i) {
         std::vector<uint8_t> path;
         for (const uint256& node : witnesses->paths[i].path) path.insert(path.end(), node.begin(), node.end());
-        const int result{zo_builder_add_spend(builder, sk->data(), spends[i].note->note.data(), static_cast<uint32_t>(witnesses->paths[i].position), path.data())};
+        const ShieldedKey& key{spends[i].note->legacy ? *legacy_sk : *sk};
+        const int result{zo_builder_add_spend(builder, key.data(), spends[i].note->note.data(), static_cast<uint32_t>(witnesses->paths[i].position), path.data())};
         if (result != ZO_OK) {
             zo_builder_free(builder);
             return strprintf("Cannot spend a note (error %d)", result);
@@ -723,7 +801,7 @@ Prepared PrepareBump(CWallet& wallet, const Txid& txid, std::optional<CAmount> n
     for (auto it{wallet.m_shielded.payments.lower_bound({txid, 0})}; it != wallet.m_shielded.payments.end() && it->first.first == txid; ++it) {
         const ShieldedPayment& payment{it->second};
         // Change is to an internal address of the account.
-        if (zo_address_scope(wallet.m_shielded.fvk->data(), payment.recipient.data()) == 2) continue;
+        if (ShieldedAddressScope(wallet.m_shielded, payment.recipient) == 2) continue;
         ShieldedRecipient r;
         r.shielded = payment.recipient;
         r.amount = payment.value;

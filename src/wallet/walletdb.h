@@ -91,6 +91,8 @@ extern const std::string WATCHS;
 extern const std::string ORCHARDFVK;
 extern const std::string MELTCAST;
 extern const std::string ORCHARDRESCAN;
+extern const std::string ORCHARDKEYVERSION;
+extern const std::string ORCHARDLEGACYFVK;
 
 // Keys in this set pertain only to legacy wallets and are removed during migration to descriptors.
 extern const std::unordered_set<std::string> LEGACY_TYPES;
@@ -292,6 +294,9 @@ public:
     bool WriteWalletFlags(uint64_t flags);
     //! zSide: the full viewing key of the shielded account.
     bool WriteOrchardViewingKey(const std::vector<unsigned char>& fvk) { return WriteIC(DBKeys::ORCHARDFVK, fvk); }
+    //! zSide: the version of its keys' derivation (none: 1), and with version 2 the viewing key of version 1 it watches too.
+    bool WriteOrchardKeyVersion(int version) { return WriteIC(DBKeys::ORCHARDKEYVERSION, version); }
+    bool WriteOrchardLegacyViewingKey(const std::vector<unsigned char>& fvk) { return WriteIC(DBKeys::ORCHARDLEGACYFVK, fvk); }
     //! zSide: the height the wallet is to scan again from, for the shielded account (wallet/shielded.h).
     bool WriteOrchardRescan(int height) { return WriteIC(DBKeys::ORCHARDRESCAN, height); }
     bool EraseOrchardRescan() { return EraseIC(DBKeys::ORCHARDRESCAN); }

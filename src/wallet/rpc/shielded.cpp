@@ -477,7 +477,7 @@ RPCMethod listshieldedtransactions()
         for (auto it{pwallet->m_shielded.payments.lower_bound({txid, 0})}; it != pwallet->m_shielded.payments.end() && it->first.first == txid; ++it) {
             const ShieldedPayment& p{it->second};
             // Change is not a payment.
-            const int scope{zo_address_scope(pwallet->m_shielded.fvk->data(), p.recipient.data())};
+            const int scope{ShieldedAddressScope(pwallet->m_shielded, p.recipient)};
             if (scope == 2) continue;
             UniValue pay(UniValue::VOBJ);
             pay.pushKV("address", EncodeShieldedAddress(p.recipient));
