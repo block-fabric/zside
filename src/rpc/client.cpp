@@ -69,6 +69,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "castcoins", 1, "spread" },
     { "sendshielded", 0, "amounts" },
     { "sendshielded", 2, "fee" },
+    { "bumpshieldedfee", 1, "fee" },
     { "listshieldedtransactions", 0, "count" },
     { "setbmm", 0, "mine" },
     { "setbmm", 2, "always" },

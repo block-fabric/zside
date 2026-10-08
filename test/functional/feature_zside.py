@@ -2,9 +2,11 @@
 # Copyright (c) 2026 The Chains developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test the shielded pool: shielding, private payments with memos, unshielding, double spends, undo, melt/cast."""
+"""Test the shielded pool: shielding, private payments with memos, unshielding, double spends, undo, fee bumps,
+conflicts, melt/cast."""
 
 from decimal import Decimal
+import os
 
 from feature_sidechain import ACTIVATION_PERIOD, SLOT, SidechainTest
 from test_framework.messages import tx_from_hex
@@ -128,25 +130,38 @@ class ZSideTest(SidechainTest):
 
         # Before melt and unshield, which leave the wallet without coins on either side.
         self.run_anchor_reorg_test()
+        self.run_bump_test()
+        self.run_conflict_test()
         self.run_meltcast_test()
         self.run_unshield_test()
 
     def run_anchor_reorg_test(self):
         side, other = self.nodes
-        self.log.info("A spend whose anchor a reorg takes away leaves the mempool, and blocks can still be made")
+        self.log.info("A spend is anchored a few blocks back: a reorg of the last blocks leaves it in the mempool")
         side.shieldcoins(1)
         self.mine_txs()
         anchored = side.getbestblockhash()
+        # Its note, and every other, three blocks deep: the spend's anchor is the tree the block of the
+        # newest of them left.
+        self.mine_txs()
+        self.mine_txs()
         spend = side.sendshielded({other.getshieldedaddress(): Decimal("0.1")})["txid"]
         assert spend in side.getrawmempool()
+        tip = side.getbestblockhash()
+        side.invalidateblock(tip)
+        assert spend in side.getrawmempool()
+        side.reconsiderblock(tip)
+        assert_equal(side.getbestblockhash(), tip)
+
+        self.log.info("A spend whose anchor a reorg takes away leaves the mempool, and blocks can still be made")
         side.invalidateblock(anchored)
         assert spend not in side.getrawmempool()
         # The next block is built (the template would fail on the stale spend). The other node keeps
-        # the anchored block, as high as this one, until this branch grows longer.
+        # the anchored block and those after it, its branch the longer.
         replacement = self.bmm(expect=False)
         assert_equal(side.getbestblockhash(), replacement)
-        # Back, the anchored block is the one seen first: the node may go back to it. Either way the
-        # next block makes one branch longer, and both nodes take it.
+        # Back, the node may go back to the anchored branch. Either way the next block makes one
+        # branch longer, and both nodes take it.
         side.reconsiderblock(anchored)
         self.bmm()
         self.sync_blocks()
@@ -156,6 +171,74 @@ class ZSideTest(SidechainTest):
             self.mine_txs()
         except JSONRPCException:
             side.abandontransaction(spend)
+        self.check_in_sync()
+
+    def run_bump_test(self):
+        side, other = self.nodes
+        self.log.info("A shielded transaction is fee-bumped: the new one spends the same notes, and replaces it")
+        self.mine_txs()
+        before = side.getshieldedbalance()
+        assert_equal(before["pending"], 0)
+        to = other.getshieldedaddress(True)
+        txid = side.sendshielded({to: Decimal("0.2")}, "bumped")["txid"]
+        self.sync_mempools()
+        assert_raises_rpc_error(-4, "transparent inputs", side.bumpshieldedfee, side.shieldcoins(Decimal("0.01"))["txid"])
+        assert_raises_rpc_error(-4, "The new fee must be at least", side.bumpshieldedfee, txid, Decimal("0.00000001"))
+        res = side.bumpshieldedfee(txid)
+        assert_greater_than(res["fee"], res["origfee"])
+        bumped = res["txid"]
+        self.sync_mempools()
+        for node in self.nodes:
+            assert bumped in node.getrawmempool()
+            assert txid not in node.getrawmempool()
+        assert_equal(side.gettransaction(txid)["replaced_by_txid"], bumped)
+        assert_raises_rpc_error(-4, "replaced already", side.bumpshieldedfee, txid)
+        # The old one does not come back: it reveals the same nullifiers, and pays less.
+        accept = side.testmempoolaccept([side.gettransaction(txid)["hex"]])[0]
+        assert_equal(accept["allowed"], False)
+        assert accept["reject-reason"].startswith("insufficient fee"), accept
+        # Bumped again, with a fee given.
+        fee = res["fee"] * 2
+        res = side.bumpshieldedfee(bumped, fee)
+        assert_equal(res["fee"], fee)
+        bumped = res["txid"]
+        self.mine_txs()
+        # The old ones conflict with the one in the block; the change of none of them counts but its.
+        assert_greater_than(0, side.gettransaction(txid)["confirmations"])
+        assert_equal(side.gettransaction(bumped)["confirmations"], 1)
+        after = side.getshieldedbalance()
+        assert_equal(after["pending"], 0)
+        # The 0.01 shielded on the way came in.
+        assert_equal(after["available"], before["available"] - Decimal("0.2") - fee + Decimal("0.01"))
+        assert {"amount": Decimal("0.2"), "memo": "bumped"}.items() <= [n for n in other.listshieldednotes() if n["txid"] == bumped][0].items()
+        self.check_in_sync()
+
+    def run_conflict_test(self):
+        side, other = self.nodes
+        self.log.info("A spend of the wallet whose note another spends in a block: conflicted, and gone from the mempool")
+        backup = os.path.join(self.options.tmpdir, "side-wallet.dat")
+        side.backupwallet(backup)
+        other.restorewallet("copy", backup)
+        copy = other.get_wallet_rpc("copy")
+        other_wallet = other.get_wallet_rpc(self.default_wallet_name)
+        txid = side.sendshielded({other_wallet.getshieldedaddress(): Decimal("0.1")})["txid"]
+        self.sync_mempools()
+        assert_equal(copy.gettransaction(txid)["txid"], txid)
+        # Apart, the copy of the wallet spends the same notes again, with a higher fee, and its node mines it.
+        self.disconnect_nodes(0, 1)
+        bumped = copy.bumpshieldedfee(txid)["txid"]
+        assert txid in side.getrawmempool()
+        assert bumped in other.getrawmempool()
+        self.bmm(node=other, expect=False)
+        self.connect_nodes(0, 1)
+        self.sync_blocks()
+        # The node finds the conflict by the nullifiers of the block, the wallet by the note.
+        assert txid not in side.getrawmempool()
+        assert_greater_than(0, side.gettransaction(txid)["confirmations"])
+        assert_equal(side.gettransaction(bumped)["confirmations"], 1)
+        assert_equal(side.getshieldedbalance()["pending"], 0)
+        assert_equal(side.getshieldedbalance(), copy.getshieldedbalance())
+        other.unloadwallet("copy")
         self.check_in_sync()
 
     def run_unshield_test(self):

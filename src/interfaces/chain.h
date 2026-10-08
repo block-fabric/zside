@@ -191,9 +191,10 @@ public:
     //! Check if transaction is in mempool.
     virtual bool isInMempool(const Txid& txid) = 0;
 
-    //! zSide: where shielded notes are in the tree, with their paths to the same root (the tree
-    //! of the tip); nullopt if one is not in it, or the node keeps no -orchardindex.
-    virtual std::optional<OrchardWitnesses> getOrchardWitnesses(const std::vector<uint256>& cmxs) = 0;
+    //! zSide: where shielded notes are in the tree, with their paths to the same root: the tree as
+    //! the block at `anchor_height` of the active chain left it (the tip's if none); nullopt if one
+    //! is not in it, or the node keeps no -orchardindex.
+    virtual std::optional<OrchardWitnesses> getOrchardWitnesses(const std::vector<uint256>& cmxs, std::optional<int> anchor_height) = 0;
     //! The merged-mining request (BIP301 M8) in the mempool for a sidechain slot, if any: the sidechain
     //! block it asks for, the mainchain block it is for, and the fee it pays.
     struct BmmRequestInfo {

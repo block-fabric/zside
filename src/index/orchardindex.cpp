@@ -60,6 +60,20 @@ public:
         return node;
     }
 
+    /**
+     * A node of the tree as it was with `size` leaves, `size` at most the current size: the current
+     * node where its leaves were all in it already, computed again from its children where it was
+     * cut (one per level at most, on the right edge).
+     */
+    uint256 NodeAt(unsigned level, uint64_t index, uint64_t size, uint64_t current) const
+    {
+        const std::map<NodeKey, uint256> none;
+        const uint64_t first{index << level};
+        if (first >= size) return zside::EmptyRoot(level);
+        if (size == current || level == 0 || first + (uint64_t{1} << level) <= size) return Node(none, level, index, current);
+        return zside::Combine(level - 1, NodeAt(level - 1, 2 * index, size, current), NodeAt(level - 1, 2 * index + 1, size, current));
+    }
+
     /** Compute the nodes above the leaf at `position` again, in a tree of `size` leaves. */
     void Rehash(std::map<NodeKey, uint256>& pending, uint64_t position, uint64_t size) const
     {
@@ -149,49 +163,47 @@ bool OrchardIndex::CustomRemove(const interfaces::BlockInfo& block)
     return true;
 }
 
-std::optional<OrchardIndex::Witnesses> OrchardIndex::FindNotes(const std::vector<uint256>& cmxs) const
+std::optional<OrchardIndex::Witnesses> OrchardIndex::FindNotes(const std::vector<uint256>& cmxs, const std::optional<uint256>& next_block) const
 {
     // Under one lock: the paths all lead to the same root.
     LOCK(m_db->m_mutex);
+    uint64_t size{m_db->Size()};
+    if (next_block) {
+        uint64_t before;
+        if (!m_db->Read(std::make_pair(DB_BLOCK, *next_block), before) || before > size) return std::nullopt;
+        size = before;
+    }
     Witnesses out;
+    out.anchor = m_db->NodeAt(zside::TREE_DEPTH, 0, size, m_db->Size());
     for (const uint256& cmx : cmxs) {
-        auto witness{FindNoteLocked(cmx)};
+        auto witness{FindNoteLocked(cmx, size)};
         if (!witness) return std::nullopt;
-        out.anchor = witness->anchor;
         out.paths.push_back(std::move(*witness));
     }
-    if (cmxs.empty()) out.anchor = Tree_Locked();
     return out;
 }
 
 std::optional<OrchardWitness> OrchardIndex::FindNote(const uint256& cmx) const
 {
     LOCK(m_db->m_mutex);
-    return FindNoteLocked(cmx);
+    return FindNoteLocked(cmx, m_db->Size());
 }
 
-uint256 OrchardIndex::Tree_Locked() const
-{
-    const uint64_t size{m_db->Size()};
-    const std::map<NodeKey, uint256> none;
-    return size == 0 ? zside::EmptyRoot(zside::TREE_DEPTH) : m_db->Node(none, zside::TREE_DEPTH, 0, size);
-}
-
-std::optional<OrchardWitness> OrchardIndex::FindNoteLocked(const uint256& cmx) const
+std::optional<OrchardWitness> OrchardIndex::FindNoteLocked(const uint256& cmx, uint64_t size) const
 {
     uint64_t position;
     if (!m_db->Read(std::make_pair(DB_POSITION, cmx), position)) return std::nullopt;
-    const uint64_t size{m_db->Size()};
-    // A note of a block the index has removed since.
-    if (position >= size) return std::nullopt;
+    const uint64_t current{m_db->Size()};
+    // A note of a block the index has removed since, or after the tree asked for.
+    if (position >= size || size > current) return std::nullopt;
     const std::map<NodeKey, uint256> none;
-    if (m_db->Node(none, 0, position, size) != cmx) return std::nullopt;
+    if (m_db->Node(none, 0, position, current) != cmx) return std::nullopt;
     OrchardWitness witness;
     witness.position = position;
     for (unsigned level{0}; level < zside::TREE_DEPTH; ++level) {
-        witness.path[level] = m_db->Node(none, level, (position >> level) ^ 1, size);
+        witness.path[level] = m_db->NodeAt(level, (position >> level) ^ 1, size, current);
     }
-    witness.anchor = m_db->Node(none, zside::TREE_DEPTH, 0, size);
+    witness.anchor = m_db->NodeAt(zside::TREE_DEPTH, 0, size, current);
     return witness;
 }
 

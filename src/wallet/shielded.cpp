@@ -8,6 +8,7 @@
 #include <chainparams.h>
 #include <hash.h>
 #include <key_io.h>
+#include <policy/policy.h>
 #include <util/check.h>
 #include <util/moneystr.h>
 #include <util/strencodings.h>
@@ -21,6 +22,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <set>
 
 namespace wallet {
 
@@ -142,6 +144,23 @@ bool SetupShieldedAccount(CWallet& wallet)
     return true;
 }
 
+std::vector<Txid> ShieldedConflicts(const CWallet& wallet, const CTransaction& tx)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    std::vector<Txid> out;
+    if (wallet.m_shielded.spends.empty() || !zside::HasShieldedMarker(tx)) return out;
+    std::string error;
+    const auto bundle{zside::Bundle::FromTx(tx, error)};
+    if (!bundle) return out;
+    for (const uint256& nf : bundle->Nullifiers()) {
+        const auto range{wallet.m_shielded.spends.equal_range(nf)};
+        for (auto it{range.first}; it != range.second; ++it) {
+            if (it->second != tx.GetHash() && std::find(out.begin(), out.end(), it->second) == out.end()) out.push_back(it->second);
+        }
+    }
+    return out;
+}
+
 std::optional<OrchardAddress> ShieldedAddress(const CWallet& wallet, uint64_t index, bool internal)
 {
     AssertLockHeld(wallet.cs_wallet);
@@ -221,12 +240,15 @@ std::vector<NoteStatus> ShieldedNotes(const CWallet& wallet)
         NoteStatus status;
         status.note = &note;
         status.confirmations = wallet.GetTxDepthInMainChain(it->second);
-        // A note whose transaction was abandoned, or lost to a conflict, is not there.
-        if (it->second.isAbandoned() || status.confirmations < 0) continue;
+        // A note whose transaction was abandoned, or lost to a conflict (in a block, or replaced in the
+        // mempool), is not there.
+        if (it->second.isAbandoned() || status.confirmations < 0 || (status.confirmations == 0 && it->second.isMempoolConflicted())) continue;
         const auto range{wallet.m_shielded.spends.equal_range(nf)};
         for (auto spend{range.first}; spend != range.second; ++spend) {
             const auto stx{wallet.mapWallet.find(spend->second)};
-            if (stx == wallet.mapWallet.end() || stx->second.isAbandoned() || wallet.GetTxDepthInMainChain(stx->second) < 0) continue;
+            if (stx == wallet.mapWallet.end() || stx->second.isAbandoned()) continue;
+            const int depth{wallet.GetTxDepthInMainChain(stx->second)};
+            if (depth < 0 || (depth == 0 && stx->second.isMempoolConflicted())) continue;
             status.spent_by = spend->second;
             break;
         }
@@ -279,9 +301,9 @@ std::optional<std::string> FinishBundle(const CWallet& wallet, CMutableTransacti
     return std::nullopt;
 }
 
-std::optional<std::string> Commit(CWallet& wallet, const CTransactionRef& tx)
+std::optional<std::string> Commit(CWallet& wallet, const CTransactionRef& tx, std::optional<Txid> replaces = std::nullopt)
 {
-    wallet.CommitTransaction(tx);
+    wallet.CommitTransaction(tx, replaces);
     if (!wallet.chain().isInMempool(tx->GetHash())) {
         wallet.AbandonTransaction(tx->GetHash());
         return "The transaction was not accepted into the mempool (see the debug log for why)";
@@ -290,9 +312,15 @@ std::optional<std::string> Commit(CWallet& wallet, const CTransactionRef& tx)
 }
 } // namespace
 
-std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fixed_fee, bool subtract_fee)
+namespace {
+/**
+ * SendShielded, spending the notes of `spend_first` (by nullifier) before any other: those of a
+ * transaction this one replaces, which it so conflicts with.
+ */
+std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fixed_fee, bool subtract_fee,
+                                                           const std::set<uint256>& spend_first, std::optional<Txid> replaces) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
-    LOCK(wallet.cs_wallet);
+    AssertLockHeld(wallet.cs_wallet);
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
     const auto sk{ShieldedSpendingKey(wallet)};
     if (!sk) return std::string{"The wallet is locked"};
@@ -321,25 +349,41 @@ std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const s
     // What the notes must cover: the amounts, and the fee unless it comes out of the amount.
     const auto needed{[&](CAmount fee) { return subtract_fee ? to_pay : to_pay + fee; }};
 
-    // The notes to spend: in blocks, not spent, largest first, until they pay for it all and the fee.
-    std::vector<const ShieldedNote*> available;
+    // The notes to spend: those it must first; then in blocks, not spent, those deep enough to be
+    // spent at an anchor a reorg of the last blocks leaves (ANCHOR_CONFIRMATIONS) first, largest first,
+    // until they pay for it all and the fee.
+    struct Candidate {
+        const ShieldedNote* note;
+        int confirmations;
+    };
+    std::vector<Candidate> available, spends;
     for (const NoteStatus& s : ShieldedNotes(wallet)) {
-        if (!s.spent_by && s.confirmations > 0 && s.note->value > 0) available.push_back(s.note);
+        if (spend_first.contains(s.note->nullifier)) {
+            if (s.confirmations <= 0) return std::string{"A note it spends is not in a block"};
+            spends.push_back({s.note, s.confirmations});
+        } else if (!s.spent_by && s.confirmations > 0 && s.note->value > 0) {
+            available.push_back({s.note, s.confirmations});
+        }
     }
-    std::sort(available.begin(), available.end(), [](const auto* a, const auto* b) { return a->value > b->value; });
+    if (spends.size() != spend_first.size()) return std::string{"The notes it spends are not all the wallet's"};
+    std::sort(available.begin(), available.end(), [](const Candidate& a, const Candidate& b) {
+        const bool deep_a{a.confirmations >= ANCHOR_CONFIRMATIONS}, deep_b{b.confirmations >= ANCHOR_CONFIRMATIONS};
+        if (deep_a != deep_b) return deep_a;
+        return a.note->value > b.note->value;
+    });
     const MinimumFeeRateResult fee_rate{GetMinimumFeeRate(wallet, CCoinControl{})};
-    const auto fee_for{[&](size_t spends) -> CAmount {
+    const auto fee_for{[&](size_t n_spends) -> CAmount {
         if (fixed_fee) return *fixed_fee;
         std::vector<CTxOut> outputs{transparent};
-        outputs.emplace_back(0, PlaceholderMarker(BundleSize(ActionCount(spends, shielded_outputs + 1))));
+        outputs.emplace_back(0, PlaceholderMarker(BundleSize(ActionCount(n_spends, shielded_outputs + 1))));
         return GetMinimumFee(fee_rate, ShieldedTxSize(outputs));
     }};
-    std::vector<const ShieldedNote*> spends;
     CAmount spent{0};
-    for (const ShieldedNote* note : available) {
+    for (const Candidate& c : spends) spent += c.note->value;
+    for (const Candidate& c : available) {
         if (spent >= needed(fee_for(spends.size()))) break;
-        spends.push_back(note);
-        spent += note->value;
+        spends.push_back(c);
+        spent += c.note->value;
     }
     const CAmount fee{fee_for(spends.size())};
     if (spent < needed(fee)) {
@@ -355,10 +399,17 @@ std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const s
     }
     const CAmount change{spent - needed(fee)};
 
-    // Where the notes are in the tree, all against the same root.
+    // Where the notes are in the tree, all against the same root: the tree as the block with
+    // ANCHOR_CONFIRMATIONS left it, or the block of the newest note if it has fewer. An anchor at the
+    // tip would go with a reorg of one block, and the spend with it, for nothing.
+    int depth{ANCHOR_CONFIRMATIONS};
+    for (const Candidate& c : spends) depth = std::min(depth, c.confirmations);
+    const int anchor_height{wallet.GetLastBlockHeight() - depth + 1};
     std::vector<uint256> cmxs;
-    for (const ShieldedNote* note : spends) cmxs.push_back(note->cmx);
-    const auto witnesses{wallet.chain().getOrchardWitnesses(cmxs)};
+    for (const Candidate& c : spends) cmxs.push_back(c.note->cmx);
+    auto witnesses{wallet.chain().getOrchardWitnesses(cmxs, anchor_height)};
+    // The node may be at another tip than the wallet for a moment: the tree of its tip then.
+    if (!witnesses) witnesses = wallet.chain().getOrchardWitnesses(cmxs, std::nullopt);
     if (!witnesses) return std::string{"The node cannot find the notes in its tree yet (is -orchardindex on, and synced?)"};
 
     ZoBuilder* builder{zo_builder_new(witnesses->anchor.data())};
@@ -366,7 +417,7 @@ std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const s
     for (size_t i{0}; i < spends.size(); ++i) {
         std::vector<uint8_t> path;
         for (const uint256& node : witnesses->paths[i].path) path.insert(path.end(), node.begin(), node.end());
-        const int result{zo_builder_add_spend(builder, sk->data(), spends[i]->note.data(), static_cast<uint32_t>(witnesses->paths[i].position), path.data())};
+        const int result{zo_builder_add_spend(builder, sk->data(), spends[i].note->note.data(), static_cast<uint32_t>(witnesses->paths[i].position), path.data())};
         if (result != ZO_OK) {
             zo_builder_free(builder);
             return strprintf("Cannot spend a note (error %d)", result);
@@ -402,8 +453,76 @@ std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const s
     mtx.vout.emplace_back(0, PlaceholderMarker(BundleSize(zo_unsigned_num_actions(unsigned_bundle))));
     if (const auto error{FinishBundle(wallet, mtx, mtx.vout.size() - 1, unsigned_bundle)}) return *error;
     const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
-    if (const auto error{Commit(wallet, tx)}) return *error;
+    if (const auto error{Commit(wallet, tx, replaces)}) return *error;
     return tx;
+}
+} // namespace
+
+std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fixed_fee, bool subtract_fee)
+{
+    LOCK(wallet.cs_wallet);
+    return SendShieldedWith(wallet, recipients, fixed_fee, subtract_fee, /*spend_first=*/{}, /*replaces=*/std::nullopt);
+}
+
+std::variant<CTransactionRef, std::string> BumpShieldedFee(CWallet& wallet, const Txid& txid, std::optional<CAmount> new_fee)
+{
+    LOCK(wallet.cs_wallet);
+    if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
+    const CWalletTx* wtx{wallet.GetWalletTx(txid)};
+    if (!wtx) return std::string{"The wallet has no such transaction"};
+    if (wtx->m_replaced_by_txid) return strprintf("It was replaced already, by %s", wtx->m_replaced_by_txid->GetHex());
+    if (wtx->isAbandoned() || wallet.GetTxDepthInMainChain(*wtx) != 0 || wtx->isMempoolConflicted()) return std::string{"It is not waiting for a block"};
+    const CTransaction& tx{*wtx->GetTx()};
+    // One of the shielded account alone: a transaction with transparent inputs is bumped with bumpfee.
+    if (!tx.vin.empty()) return std::string{"It has transparent inputs: not one of the shielded account alone (see bumpfee)"};
+    std::string error;
+    const auto bundle{zside::Bundle::FromTx(tx, error)};
+    if (!bundle) return std::string{"It has no shielded bundle"};
+
+    // The notes it spends: the same are spent again, so that the new one replaces it.
+    std::set<uint256> notes;
+    for (const uint256& nf : bundle->Nullifiers()) {
+        if (wallet.m_shielded.notes.contains(nf)) notes.insert(nf);
+    }
+    if (notes.empty()) return std::string{"It spends no note of the account"};
+
+    // Whom it paid: its transparent outputs, and the shielded payments it made (its change aside).
+    std::vector<ShieldedRecipient> recipients;
+    CAmount transparent_out{0};
+    for (uint32_t i{0}; i < tx.vout.size(); ++i) {
+        if (i == bundle->marker_index) continue;
+        ShieldedRecipient r;
+        r.script = tx.vout[i].scriptPubKey;
+        r.amount = tx.vout[i].nValue;
+        transparent_out += r.amount;
+        recipients.push_back(std::move(r));
+    }
+    for (auto it{wallet.m_shielded.payments.lower_bound({txid, 0})}; it != wallet.m_shielded.payments.end() && it->first.first == txid; ++it) {
+        const ShieldedPayment& payment{it->second};
+        // Change is to an internal address of the account.
+        if (zo_address_scope(wallet.m_shielded.fvk->data(), payment.recipient.data()) == 2) continue;
+        ShieldedRecipient r;
+        r.shielded = payment.recipient;
+        r.amount = payment.value;
+        r.memo = payment.memo;
+        recipients.push_back(std::move(r));
+    }
+    if (recipients.empty()) return std::string{"It pays no one but the account's change"};
+
+    // The fee it paid, and the one now: at least what the mempool takes as a replacement (BIP 125
+    // rules 3 and 4, at the size of the old one: the new one has as many actions), and the wallet's fee rate.
+    const CAmount old_fee{bundle->ValueBalance() - transparent_out};
+    const int64_t vsize{GetVirtualTransactionSize(tx)};
+    const CAmount lowest{old_fee + wallet.chain().relayIncrementalFee().GetFee(vsize)};
+    CAmount fee{std::max(lowest, GetMinimumFee(GetMinimumFeeRate(wallet, CCoinControl{}), vsize))};
+    if (new_fee) {
+        if (*new_fee < lowest) return strprintf("The new fee must be at least %s (the old fee, %s, and what a replacement adds)", FormatMoney(lowest), FormatMoney(old_fee));
+        fee = *new_fee;
+    }
+    if (!MoneyRange(fee) || fee > wallet.m_default_max_tx_fee) return strprintf("The fee of %s is more than the wallet pays (-maxtxfee)", FormatMoney(fee));
+    auto result{SendShieldedWith(wallet, recipients, fee, /*subtract_fee=*/false, notes, txid)};
+    if (const auto* bumped{std::get_if<CTransactionRef>(&result)}) wallet.MarkReplaced(txid, (*bumped)->GetHash());
+    return result;
 }
 
 std::variant<CTransactionRef, std::string> ShieldCoins(CWallet& wallet, CAmount amount, const OrchardAddress& to, const OrchardMemo& memo)

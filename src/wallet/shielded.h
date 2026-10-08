@@ -73,6 +73,10 @@ struct ShieldedAccount {
     std::map<uint64_t, MeltCastJob> jobs;
 };
 
+/** Notes are spent at the tree of the block with this many confirmations, or of the newest of their own blocks:
+ *  a spend is not undone by a reorg of the blocks above it. */
+inline constexpr int ANCHOR_CONFIRMATIONS{3};
+
 /** Shielded addresses: Bech32m, "zo" on the main network ("tzo" on the test networks, "rzo" on regtest). */
 std::string EncodeShieldedAddress(const OrchardAddress& address);
 std::optional<OrchardAddress> DecodeShieldedAddress(const std::string& text);
@@ -85,6 +89,8 @@ std::optional<OrchardMemo> MemoFromText(const std::string& text);
 std::optional<std::array<uint8_t, 32>> ShieldedSpendingKey(const CWallet& wallet);
 /** Make the viewing key known (from the spending key) and keep it, if it is not yet. */
 bool SetupShieldedAccount(CWallet& wallet);
+/** The transactions of the wallet, other than `tx`, that reveal a nullifier it reveals: they conflict with it. */
+std::vector<Txid> ShieldedConflicts(const CWallet& wallet, const CTransaction& tx);
 /** An address of the account: `index` 0 is the default one; others look unrelated to it. */
 std::optional<OrchardAddress> ShieldedAddress(const CWallet& wallet, uint64_t index, bool internal = false);
 
@@ -126,6 +132,12 @@ struct ShieldedRecipient {
  * @return the transaction, or the error
  */
 std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fee = std::nullopt, bool subtract_fee = false);
+/**
+ * Pay the same again, with a higher fee: a transaction that replaces one of the wallet's, out of its shielded
+ * account, waiting for a block (it spends the same notes, and more if they do not cover the fee).
+ * @param[in] fee  the new fee, or none for the lowest the mempool takes as a replacement
+ */
+std::variant<CTransactionRef, std::string> BumpShieldedFee(CWallet& wallet, const Txid& txid, std::optional<CAmount> fee = std::nullopt);
 /** Move transparent coins of the wallet into its shielded account (or to another shielded address). */
 std::variant<CTransactionRef, std::string> ShieldCoins(CWallet& wallet, CAmount amount, const OrchardAddress& to, const OrchardMemo& memo);
 

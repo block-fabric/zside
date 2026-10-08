@@ -718,11 +718,19 @@ public:
         LOCK(m_node.mempool->cs);
         return IsRBFOptIn(tx, *m_node.mempool);
     }
-    std::optional<OrchardWitnesses> getOrchardWitnesses(const std::vector<uint256>& cmxs) override
+    std::optional<OrchardWitnesses> getOrchardWitnesses(const std::vector<uint256>& cmxs, std::optional<int> anchor_height) override
     {
         if (!g_orchardindex) return std::nullopt;
         g_orchardindex->BlockUntilSyncedToCurrentChain();
-        return g_orchardindex->FindNotes(cmxs);
+        // The tree a block left is the one the next found: the index knows that block's.
+        std::optional<uint256> next;
+        if (anchor_height) {
+            LOCK(::cs_main);
+            const CChain& active{chainman().ActiveChain()};
+            if (*anchor_height < 0 || *anchor_height > active.Height()) return std::nullopt;
+            if (*anchor_height < active.Height()) next = active[*anchor_height + 1]->GetBlockHash();
+        }
+        return g_orchardindex->FindNotes(cmxs, next);
     }
     std::optional<BmmRequestInfo> getMempoolBmmRequest(uint32_t slot) override
     {

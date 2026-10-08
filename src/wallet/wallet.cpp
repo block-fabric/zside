@@ -1267,6 +1267,11 @@ bool CWallet::AddToWalletIfInvolvingMe(const CTransactionRef& ptx, const SyncTxS
                     range.first++;
                 }
             }
+            // zSide: and those that spend a note it spends (reveal a nullifier it reveals).
+            for (const Txid& other : ShieldedConflicts(*this, tx)) {
+                WalletLogPrintf("Transaction %s (in block %s) conflicts with wallet transaction %s (both spend a shielded note)\n", tx.GetHash().ToString(), conf->confirmed_block_hash.ToString(), other.ToString());
+                MarkConflicted(conf->confirmed_block_hash, conf->confirmed_block_height, other);
+            }
         }
 
         bool fExisted = mapWallet.contains(tx.GetHash());
@@ -1496,6 +1501,12 @@ void CWallet::transactionAddedToMempool(const CTransactionRef& tx) {
         }
 
     }
+    // zSide: and of those that spend a note it spends.
+    for (const Txid& spent_id : ShieldedConflicts(*this, *tx)) {
+        RecursiveUpdateTxState(/*batch=*/nullptr, spent_id, [&txid](CWalletTx& wtx) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet) {
+            return wtx.mempool_conflicts.insert(txid).second ? TxUpdate::CHANGED : TxUpdate::UNCHANGED;
+        });
+    }
 
     if (tx->version == TRUC_VERSION) {
         // Unconfirmed TRUC transactions are only allowed a 1-parent-1-child topology.
@@ -1577,6 +1588,12 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
             });
         }
     }
+    // zSide: and of those that spend a note it spends.
+    for (const Txid& spent_id : ShieldedConflicts(*this, *tx)) {
+        RecursiveUpdateTxState(/*batch=*/nullptr, spent_id, [&txid](CWalletTx& wtx) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet) {
+            return wtx.mempool_conflicts.erase(txid) ? TxUpdate::CHANGED : TxUpdate::UNCHANGED;
+        });
+    }
 
     if (tx->version == TRUC_VERSION) {
         // If this tx has a parent, unset its truc_child_in_mempool to make it possible
@@ -1641,6 +1658,15 @@ void CWallet::blockDisconnected(const interfaces::BlockInfo& block)
         // Coinbase transactions are not only inactive but also abandoned,
         // meaning they should never be relayed standalone via the p2p protocol.
         SyncTransaction(ptx, TxStateInactive{/*abandoned=*/index == 0});
+
+        // zSide: those that spend a note it spends conflict with it no more.
+        for (const Txid& other : ShieldedConflicts(*this, *ptx)) {
+            RecursiveUpdateTxState(other, [&](CWalletTx& tx) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet) {
+                if (!tx.isBlockConflicted() || tx.state<TxStateBlockConflicted>()->conflicting_block_height < disconnect_height) return TxUpdate::UNCHANGED;
+                tx.m_state = TxStateInactive{};
+                return TxUpdate::CHANGED;
+            });
+        }
 
         for (const CTxIn& tx_in : ptx->vin) {
             // No other wallet transactions conflicted with this transaction

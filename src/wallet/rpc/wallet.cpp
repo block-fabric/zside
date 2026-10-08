@@ -1078,6 +1078,7 @@ RPCMethod getshieldedbalance();
 RPCMethod listshieldednotes();
 RPCMethod shieldcoins();
 RPCMethod sendshielded();
+RPCMethod bumpshieldedfee();
 RPCMethod listshieldedtransactions();
 RPCMethod meltcoins();
 RPCMethod unshieldcoins();
@@ -1156,6 +1157,7 @@ std::span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &listshieldednotes},
         {"wallet", &shieldcoins},
         {"wallet", &sendshielded},
+        {"wallet", &bumpshieldedfee},
         {"wallet", &listshieldedtransactions},
         {"wallet", &unshieldcoins},
         {"wallet", &meltcoins},

@@ -47,8 +47,7 @@ protected:
     bool CustomRemove(const interfaces::BlockInfo& block) override;
     BaseIndex::DB& GetDB() const override;
 
-    std::optional<OrchardWitness> FindNoteLocked(const uint256& cmx) const;
-    uint256 Tree_Locked() const;
+    std::optional<OrchardWitness> FindNoteLocked(const uint256& cmx, uint64_t size) const;
 
 public:
     explicit OrchardIndex(std::unique_ptr<interfaces::Chain> chain, size_t n_cache_size, bool f_memory = false, bool f_wipe = false);
@@ -56,9 +55,13 @@ public:
 
     /** Where the note with the commitment `cmx` is, with its path to the current root. */
     std::optional<OrchardWitness> FindNote(const uint256& cmx) const;
-    /** Where several notes are, with their paths to the same root; nullopt if one is not in the tree. */
+    /**
+     * Where several notes are, with their paths to the same root: that of the tree as it was before
+     * the block `next_block` (the one the block before it left), or of the current tree. Nullopt if
+     * one is not in that tree, or the index has no record of the block (not on its chain).
+     */
     using Witnesses = OrchardWitnesses;
-    std::optional<Witnesses> FindNotes(const std::vector<uint256>& cmxs) const;
+    std::optional<Witnesses> FindNotes(const std::vector<uint256>& cmxs, const std::optional<uint256>& next_block = std::nullopt) const;
     /** How many notes the tree holds, and its root. */
     std::pair<uint64_t, uint256> Tree() const;
 };

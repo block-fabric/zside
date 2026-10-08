@@ -266,6 +266,56 @@ RPCMethod sendshielded()
     };
 }
 
+RPCMethod bumpshieldedfee()
+{
+    return RPCMethod{
+        "bumpshieldedfee",
+        "Pay the same again with a higher fee: a transaction out of the wallet's shielded account (with no transparent\n"
+        "inputs) that waits for a block is replaced by one that spends the same notes (and more if they do not cover\n"
+        "the fee), pays the same recipients, and gives back less change. For one with transparent inputs, see bumpfee." +
+        HELP_REQUIRING_PASSPHRASE,
+        {
+            {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction"},
+            {"fee", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "The new fee (default: the least a replacement pays, or the wallet's fee rate if more)"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::STR_HEX, "txid", "The new transaction"},
+            {RPCResult::Type::STR_AMOUNT, "origfee", "The fee of the one it replaces"},
+            {RPCResult::Type::STR_AMOUNT, "fee", "Its fee"},
+        }},
+        RPCExamples{HelpExampleCli("bumpshieldedfee", "\"txid\"") + HelpExampleCli("bumpshieldedfee", "\"txid\" 0.001")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    const auto pwallet{ReadyWallet(request, /*unlocked=*/true)};
+    if (!pwallet) return UniValue::VNULL;
+    const Txid txid{Txid::FromUint256(ParseHashV(request.params[0], "txid"))};
+    const std::optional<CAmount> fee{request.params[1].isNull() ? std::nullopt : std::optional{AmountFromValue(request.params[1])}};
+    const auto fee_of{[](const CTransaction& tx) {
+        std::string error;
+        const auto bundle{zside::Bundle::FromTx(tx, error)};
+        CAmount out{bundle ? bundle->ValueBalance() : 0};
+        for (uint32_t i{0}; i < tx.vout.size(); ++i) {
+            if (!bundle || i != bundle->marker_index) out -= tx.vout[i].nValue;
+        }
+        return out;
+    }};
+    CAmount old_fee{0};
+    {
+        LOCK(pwallet->cs_wallet);
+        if (const CWalletTx* wtx{pwallet->GetWalletTx(txid)}) old_fee = fee_of(*wtx->GetTx());
+    }
+    const auto result{BumpShieldedFee(*pwallet, txid, fee)};
+    if (const auto* error{std::get_if<std::string>(&result)}) throw JSONRPCError(RPC_WALLET_ERROR, *error);
+    const CTransactionRef& tx{std::get<CTransactionRef>(result)};
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("txid", tx->GetHash().GetHex());
+    obj.pushKV("origfee", ValueFromAmount(old_fee));
+    obj.pushKV("fee", ValueFromAmount(fee_of(*tx)));
+    return obj;
+},
+    };
+}
+
 RPCMethod unshieldcoins()
 {
     return RPCMethod{
