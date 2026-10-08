@@ -4,6 +4,7 @@
 
 #include <chainparams.h>
 #include <coins.h>
+#include <consensus/merkle.h>
 #include <consensus/params.h>
 #include <consensus/tx_check.h>
 #include <consensus/tx_verify.h>
@@ -11,6 +12,7 @@
 #include <index/orchardindex.h>
 #include <interfaces/chain.h>
 #include <node/context.h>
+#include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <scheduler.h>
 #include <sidechain/state.h>
@@ -394,6 +396,34 @@ BOOST_AUTO_TEST_CASE(bundles_of_a_block_in_one_batch)
     BOOST_CHECK(CheckShieldedTx(*b, reason, domain));
     // In another domain they are not.
     BOOST_CHECK(!VerifyBundles(block, std::nullopt));
+}
+
+BOOST_AUTO_TEST_CASE(block_with_a_shielded_transaction_twice)
+{
+    // A shielded transaction has no inputs, so a second copy of it in the same block spends nothing twice:
+    // the block is refused for holding it twice (connecting it would otherwise add its outputs over
+    // themselves). The bundle need not be valid: CheckBlock does not look at proofs.
+    CMutableTransaction shielding{ShieldingTx(1000, std::nullopt)};
+    shielding.vin.clear();
+    const auto tx{MakeTransactionRef(shielding)};
+    const auto other{MakeTransactionRef(ShieldingTx(2000, std::nullopt, 11))};
+    CMutableTransaction coinbase;
+    coinbase.vin.emplace_back(COutPoint{});
+    coinbase.vin[0].scriptSig = CScript{} << 1 << OP_0;
+    coinbase.vout.emplace_back(0, CScript{} << OP_TRUE);
+    const auto cb{MakeTransactionRef(coinbase)};
+    const auto check{[&](std::vector<CTransactionRef> txs) {
+        CBlock block;
+        block.vtx = std::move(txs);
+        block.hashMerkleRoot = BlockMerkleRoot(block);
+        BlockValidationState state;
+        CheckBlock(block, state, Params().GetConsensus(), /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true);
+        return state.IsValid() ? std::string{} : state.GetRejectReason();
+    }};
+    BOOST_CHECK_EQUAL(check({cb, tx}), "");
+    // Neither layout is caught by the merkle tree's check for a mutated block.
+    BOOST_CHECK_EQUAL(check({cb, tx, tx}), "bad-txns-duplicate");
+    BOOST_CHECK_EQUAL(check({cb, tx, other, tx}), "bad-txns-duplicate");
 }
 
 BOOST_AUTO_TEST_CASE(tree_never_holds_two_to_the_32_leaves)
