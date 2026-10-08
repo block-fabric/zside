@@ -180,7 +180,8 @@ public:
     uint64_t NullifierCount() const;
 
 private:
-    [[nodiscard]] bool Check(const CTransaction& tx, const Bundle& bundle, std::string& reject_reason) const;
+    //! @param[in] audit2  the rules from audit2_height (a block in a sighash domain, or the mempool)
+    [[nodiscard]] bool Check(const CTransaction& tx, const Bundle& bundle, std::string& reject_reason, bool audit2) const;
 
     const sidechain::StoreView* m_view;
     sidechain::StoreOverlay* m_overlay;

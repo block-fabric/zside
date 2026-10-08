@@ -283,11 +283,16 @@ BOOST_AUTO_TEST_CASE(sighash_commits_to_the_chain)
     BOOST_CHECK(domain->genesis == genesis);
     BOOST_CHECK_EQUAL(domain->slot, 6U);
     BOOST_CHECK(SighashDomainAt(params, genesis, 1000));
-    // The networks: from their first block, but on the test network, until set at deploy.
+    // The networks: from their first block, but on the test network, which ran before the rule: from
+    // the height set at deploy (read here, not repeated: it moves with each deploy).
     for (const auto chain : {ChainType::MAIN, ChainType::SIGNET, ChainType::REGTEST}) {
         BOOST_CHECK_EQUAL(CreateChainParams(m_args, chain)->GetConsensus().sidechain.zside.audit2_height, 0);
     }
-    BOOST_CHECK_EQUAL(CreateChainParams(m_args, ChainType::TESTNET)->GetConsensus().sidechain.zside.audit2_height, 999999999);
+    const auto testnet{CreateChainParams(m_args, ChainType::TESTNET)};
+    const int testnet_audit2{testnet->GetConsensus().sidechain.zside.audit2_height};
+    BOOST_CHECK_GT(testnet_audit2, 0);
+    BOOST_CHECK(!SighashDomainAt(testnet->GetConsensus(), testnet_audit2 - 1));
+    BOOST_CHECK(SighashDomainAt(testnet->GetConsensus(), testnet_audit2));
 
     // Another genesis, another slot, none: another sighash.
     const CMutableTransaction mtx{ShieldingTx(1000, domain)};
@@ -338,6 +343,39 @@ BOOST_AUTO_TEST_CASE(bundles_of_a_block_in_one_batch)
     BOOST_CHECK(CheckShieldedTx(*b, reason, domain));
     // In another domain they are not.
     BOOST_CHECK(!VerifyBundles(block, std::nullopt));
+}
+
+BOOST_AUTO_TEST_CASE(tree_never_holds_two_to_the_32_leaves)
+{
+    // A tree two leaves short of 2^32 (its frontier written as the state keeps it): a bundle of two
+    // actions would fill it, and a full tree's root is the empty tree's (no bit of its size is set).
+    constexpr uint64_t CAPACITY{uint64_t{1} << TREE_DEPTH};
+    Frontier nearly_full;
+    DataStream stream;
+    stream << uint64_t{CAPACITY - 2} << std::vector<uint256>(TREE_DEPTH, Leaf(1));
+    stream >> nearly_full;
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay store{empty};
+    sidechain::Cell<Frontier>{0x12, Frontier{}}.Put(store, nearly_full);
+    ShieldedState state{store};
+    BOOST_REQUIRE_EQUAL(state.Tree().Size(), CAPACITY - 2);
+
+    const SighashDomain domain{.genesis = uint256::ONE, .slot = 6};
+    const CTransaction after{ShieldingTx(1000, domain, 5)};
+    const CTransaction before{ShieldingTx(1000, std::nullopt, 6)};
+    std::string reason;
+    // From audit2_height (a block in a sighash domain), and in the mempool: the tree is never full.
+    BOOST_CHECK(!state.ApplyTx(after, reason, domain));
+    BOOST_CHECK_EQUAL(reason, "bad-zs-tree-full");
+    reason.clear();
+    BOOST_CHECK(!state.CheckState(before, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-zs-tree-full");
+    BOOST_CHECK_EQUAL(state.Tree().Size(), CAPACITY - 2);
+    // Before it, as the chain had it: it could be, and its root then was the empty tree's.
+    reason.clear();
+    BOOST_CHECK(state.ApplyTx(before, reason, std::nullopt));
+    BOOST_CHECK_EQUAL(state.Tree().Size(), CAPACITY);
+    BOOST_CHECK(state.Tree().Root() == EmptyRoot(TREE_DEPTH));
 }
 
 namespace {

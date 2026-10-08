@@ -336,7 +336,7 @@ uint64_t ShieldedState::AnchorCount() const { return 1 + ANCHOR_COUNT.Get(*m_vie
 CAmount ShieldedState::Pool() const { return POOL.Get(*m_view); }
 uint64_t ShieldedState::NullifierCount() const { return NULLIFIER_COUNT.Get(*m_view); }
 
-bool ShieldedState::Check(const CTransaction& tx, const Bundle& bundle, std::string& reject_reason) const
+bool ShieldedState::Check(const CTransaction& tx, const Bundle& bundle, std::string& reject_reason, bool audit2) const
 {
     const auto invalid{[&](const char* reason) {
         reject_reason = reason;
@@ -351,7 +351,11 @@ bool ShieldedState::Check(const CTransaction& tx, const Bundle& bundle, std::str
     for (const uint256& nf : bundle.Nullifiers()) {
         if (IsSpent(nf) || !seen.insert(nf).second) return invalid("bad-zs-double-spend");
     }
-    if (Tree().Size() + bundle.NumActions() > (uint64_t{1} << TREE_DEPTH)) return invalid("bad-zs-tree-full");
+    // The tree holds 2^32 leaves; from audit2_height, one less: a frontier of exactly 2^32 leaves
+    // has a root equal to the empty tree's (Frontier::Root sees no bit of its size set), which every
+    // bundle may use as its anchor.
+    const uint64_t capacity{(uint64_t{1} << TREE_DEPTH) - (audit2 ? 1 : 0)};
+    if (Tree().Size() + bundle.NumActions() > capacity) return invalid("bad-zs-tree-full");
     // The pool never holds less than nothing: a flaw in the proofs could not take out more than went in.
     if (Pool() - balance < 0) return invalid("bad-zs-pool-negative");
     return true;
@@ -367,7 +371,8 @@ bool ShieldedState::CheckState(const CTransaction& tx, std::string& reject_reaso
         reject_reason = error;
         return false;
     }
-    return !bundle || Check(tx, *bundle, reject_reason);
+    // The mempool: the rule of audit2_height already (no stricter one is relaxed later).
+    return !bundle || Check(tx, *bundle, reject_reason, /*audit2=*/true);
 }
 
 bool ShieldedState::ApplyTx(const CTransaction& tx, std::string& reject_reason, const std::optional<SighashDomain>& domain)
@@ -376,7 +381,8 @@ bool ShieldedState::ApplyTx(const CTransaction& tx, std::string& reject_reason, 
     std::string error;
     const auto bundle{Bundle::FromTx(tx, error)};
     if (!bundle) return true;
-    if (!Check(tx, *bundle, reject_reason)) return false;
+    // A block from audit2_height is one with a sighash domain (SighashDomainAt).
+    if (!Check(tx, *bundle, reject_reason, /*audit2=*/domain.has_value())) return false;
     sidechain::StoreOverlay& out{*Assert(m_overlay)};
     uint64_t spent{NullifierCount()};
     for (const uint256& nf : bundle->Nullifiers()) {
