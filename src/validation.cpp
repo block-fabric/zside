@@ -812,9 +812,10 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
         }
 
         // The shielded pool: the bundle against the pool as the chain leaves it, and against the
-        // other transactions of the mempool, which may not reveal the same nullifiers.
+        // other transactions of the mempool, which may not reveal the same nullifiers (those that do
+        // are conflicts, PreChecks: replaced, or this one is refused). The proof is checked last
+        // (PolicyScriptChecks), once the transaction pays its way.
         std::string reject_reason;
-        // The mempool's nullifiers before anything costly.
         std::string error;
         if (const auto bundle{zside::Bundle::FromTx(tx, error)}) {
             for (const uint256& nf : bundle->Nullifiers()) {
@@ -823,7 +824,7 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
                 }
             }
         }
-        if (!side.Shielded().CheckTx(tx, reject_reason)) {
+        if (!side.Shielded().CheckState(tx, reject_reason)) {
             return ws.m_state.Invalid(TxValidationResult::TX_CONSENSUS, reject_reason);
         }
     }
@@ -1257,6 +1258,16 @@ bool MemPoolAccept::PolicyScriptChecks(Workspace& ws)
                     state.GetRejectReason(), state.GetDebugMessage());
         }
         return false; // state filled in by CheckInputScripts
+    }
+
+    // zSide: the proof and signatures of a shielded bundle, the costliest check of all, last: once
+    // the transaction pays its way and fits the pool (DrivechainChecks).
+    if (m_active_chainstate.m_chainman.GetConsensus().sidechain.enabled && zside::HasShieldedMarker(tx)) {
+        std::string reject_reason;
+        const int height{m_active_chainstate.m_chain.Height() + 1};
+        if (!zside::CheckShieldedTx(tx, reject_reason, zside::SighashDomainAt(m_active_chainstate.m_chainman.GetConsensus(), height))) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, reject_reason);
+        }
     }
 
     return true;

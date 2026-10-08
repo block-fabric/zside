@@ -29,6 +29,7 @@
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
 #include <index/orchardindex.h>
+#include <zside/orchard.h>
 #include <index/txindex.h>
 #include <index/txospenderindex.h>
 #include <init/common.h>
@@ -1990,6 +1991,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         g_txindex = std::make_unique<TxIndex>(interfaces::MakeChain(node), index_cache_sizes.tx_index, false, do_reindex);
         node.indexes.emplace_back(g_txindex.get());
     }
+
+    // zSide: the verifying key of the shielded proofs, built now rather than by the first bundle to
+    // verify, which would wait for it under cs_main.
+    if (chainman.GetConsensus().sidechain.enabled) zo_init_verifier();
 
     // zSide: the note commitment tree, for wallets to spend shielded notes.
     if (args.GetBoolArg("-orchardindex", DEFAULT_ORCHARDINDEX)) {

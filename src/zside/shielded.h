@@ -18,9 +18,14 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <vector>
 
+namespace Consensus {
+struct Params;
+struct SidechainParams;
+} // namespace Consensus
 struct ZoBundle;
 
 /**
@@ -41,6 +46,9 @@ struct ZoBundle;
  *    everything in it except their own bytes and the transparent signatures (the marker is
  *    taken with the commitment to the bundle's effects, ZIP 244, in place of the bundle).
  *    The transparent inputs sign the whole transaction, the bundle included.
+ *    From audit2_height (Consensus::ZsideParams), the sighash also commits to the chain: its
+ *    genesis block, its slot and a branch id, so that a bundle signed for one chain (a test
+ *    network, another sidechain of the same code) is invalid on any other.
  */
 namespace zside {
 
@@ -86,14 +94,33 @@ private:
  */
 CAmount ShieldedValueIn(const CTransaction& tx);
 
-/** The hash the bundle of a transaction signs. */
-uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uint256& bundle_commitment);
+/** The chain the signatures of a bundle are bound to. */
+struct SighashDomain {
+    uint256 genesis;
+    uint32_t slot{0};
+};
+/** Changed with anything the sighash commits to. */
+inline constexpr uint32_t SIGHASH_BRANCH_ID{0x7a530001};
+/** The domain of the sighash of a bundle in a block at `height`: none before audit2_height. */
+std::optional<SighashDomain> SighashDomainAt(const Consensus::SidechainParams& params, const uint256& genesis, int height);
+std::optional<SighashDomain> SighashDomainAt(const Consensus::Params& params, int height);
+
+/** The hash the bundle of a transaction signs (in `domain`, from audit2_height). */
+uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uint256& bundle_commitment, const std::optional<SighashDomain>& domain);
 
 /**
  * Check what depends on the transaction alone: one well-formed marker at most, not in a
- * coinbase, the value put in carried by the marker, the proof and signatures valid.
+ * coinbase, the value put in carried by the marker, the proof and signatures valid (for a
+ * block of the given sighash domain).
  */
-[[nodiscard]] bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason);
+[[nodiscard]] bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason, const std::optional<SighashDomain>& domain);
+
+/**
+ * Verify the proofs and signatures of the bundles of several transactions (a block's) in one batch,
+ * and remember them valid: CheckShieldedTx then finds them so. False if one is invalid; nothing is
+ * remembered then, and CheckShieldedTx finds which, one by one.
+ */
+bool VerifyBundles(std::span<const CTransactionRef> txs, const std::optional<SighashDomain>& domain);
 
 /** The right edge of the note commitment tree: enough to append to it and compute its root. */
 class Frontier
@@ -132,10 +159,14 @@ public:
     /** Read and write. */
     explicit ShieldedState(sidechain::StoreOverlay& overlay) : m_view{&overlay}, m_overlay{&overlay} {}
 
-    /** Check a transaction against the pool, and apply it. A transaction that fails changes nothing. */
-    [[nodiscard]] bool ApplyTx(const CTransaction& tx, std::string& reject_reason);
-    /** Whether ApplyTx would accept the transaction now. */
-    [[nodiscard]] bool CheckTx(const CTransaction& tx, std::string& reject_reason) const;
+    /** Check a transaction (CheckShieldedTx, in `domain`) and against the pool, and apply it. A transaction that fails changes nothing. */
+    [[nodiscard]] bool ApplyTx(const CTransaction& tx, std::string& reject_reason, const std::optional<SighashDomain>& domain);
+    /**
+     * Whether the bundle of a transaction fits the pool now (its anchor, its nullifiers, the pool's
+     * balance), its value balance in range: the cheap part of ApplyTx, without the proof
+     * (CheckShieldedTx), which the mempool verifies last.
+     */
+    [[nodiscard]] bool CheckState(const CTransaction& tx, std::string& reject_reason) const;
     /** End a block: its final root becomes an anchor later bundles may use. */
     void EndBlock();
 

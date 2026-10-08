@@ -6,6 +6,7 @@
 
 #include <util/check.h>
 
+#include <consensus/params.h>
 #include <crypto/common.h>
 #include <hash.h>
 #include <sync.h>
@@ -41,22 +42,30 @@ std::optional<std::span<const uint8_t>> MarkerPayload(const CScript& script)
     return data.subspan(sizeof(SHIELDED_TAG) + 1);
 }
 
-/** Bundles whose proof and signatures were found valid, by the wtxid of their transaction. */
+/**
+ * Bundles whose proof and signatures were found valid, by the wtxid of their transaction and the
+ * sighash they were verified against: one valid in a domain is not taken as valid in another.
+ */
 Mutex g_verified_mutex;
 std::set<uint256> g_verified GUARDED_BY(g_verified_mutex);
 constexpr size_t MAX_VERIFIED{50000};
 
-bool Verified(const uint256& wtxid)
+uint256 VerifiedKey(const CTransaction& tx, const uint256& sighash)
 {
-    LOCK(g_verified_mutex);
-    return g_verified.contains(wtxid);
+    return (HashWriter{} << tx.GetWitnessHash() << sighash).GetSHA256();
 }
 
-void SetVerified(const uint256& wtxid)
+bool Verified(const uint256& key)
+{
+    LOCK(g_verified_mutex);
+    return g_verified.contains(key);
+}
+
+void SetVerified(const uint256& key)
 {
     LOCK(g_verified_mutex);
     if (g_verified.size() >= MAX_VERIFIED) g_verified.clear();
-    g_verified.insert(wtxid);
+    g_verified.insert(key);
 }
 
 uint256 HashFromBytes(const uint8_t* bytes)
@@ -164,9 +173,22 @@ CAmount ShieldedValueIn(const CTransaction& tx)
     return 0;
 }
 
-uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uint256& bundle_commitment)
+std::optional<SighashDomain> SighashDomainAt(const Consensus::SidechainParams& params, const uint256& genesis, int height)
 {
-    HashWriter h{TaggedHash("zSide/Orchard sighash")};
+    if (height < params.zside.audit2_height) return std::nullopt;
+    return SighashDomain{.genesis = genesis, .slot = params.slot};
+}
+
+std::optional<SighashDomain> SighashDomainAt(const Consensus::Params& params, int height)
+{
+    return SighashDomainAt(params.sidechain, params.hashGenesisBlock, height);
+}
+
+uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uint256& bundle_commitment, const std::optional<SighashDomain>& domain)
+{
+    // In a domain: a tag of its own (no sighash of one is one of the other), then the chain.
+    HashWriter h{TaggedHash(domain ? "zSide/Orchard sighash/chain" : "zSide/Orchard sighash")};
+    if (domain) h << SIGHASH_BRANCH_ID << domain->genesis << domain->slot;
     h << tx.version;
     WriteCompactSize(h, tx.vin.size());
     for (const CTxIn& in : tx.vin) h << in.prevout << in.nSequence;
@@ -184,7 +206,7 @@ uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uin
     return h.GetSHA256();
 }
 
-bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason)
+bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason, const std::optional<SighashDomain>& domain)
 {
     const auto invalid{[&](const char* reason) {
         reject_reason = reason;
@@ -204,11 +226,39 @@ bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason)
     if (balance < -MAX_MONEY || balance > MAX_MONEY) return invalid("bad-zs-value-balance");
     // What goes into the pool, the marker carries; it carries nothing else.
     if (tx.vout[bundle->marker_index].nValue != std::max<CAmount>(0, -balance)) return invalid("bad-zs-marker-value");
-    if (Verified(tx.GetWitnessHash().ToUint256())) return true;
-    const uint256 sighash{ShieldedSighash(tx, bundle->marker_index, bundle->Commitment())};
+    const uint256 sighash{ShieldedSighash(tx, bundle->marker_index, bundle->Commitment(), domain)};
+    const uint256 key{VerifiedKey(tx, sighash)};
+    if (Verified(key)) return true;
     const ZoBundle* bundles[1]{bundle->get()};
     if (!zo_bundles_verify(bundles, sighash.data(), 1)) return invalid("bad-zs-proof");
-    SetVerified(tx.GetWitnessHash().ToUint256());
+    SetVerified(key);
+    return true;
+}
+
+bool VerifyBundles(std::span<const CTransactionRef> txs, const std::optional<SighashDomain>& domain)
+{
+    std::vector<Bundle> bundles;
+    std::vector<const ZoBundle*> list;
+    std::vector<uint8_t> sighashes;
+    std::vector<uint256> keys;
+    for (const CTransactionRef& tx : txs) {
+        if (!HasShieldedMarker(*tx)) continue;
+        std::string error;
+        auto bundle{Bundle::FromTx(*tx, error)};
+        // Those CheckShieldedTx refuses before the proof are left to it.
+        if (!bundle || bundle->NumActions() > MAX_ACTIONS) continue;
+        const uint256 sighash{ShieldedSighash(*tx, bundle->marker_index, bundle->Commitment(), domain)};
+        const uint256 key{VerifiedKey(*tx, sighash)};
+        if (Verified(key)) continue;
+        list.push_back(bundle->get());
+        bundles.push_back(std::move(*bundle));
+        sighashes.insert(sighashes.end(), sighash.begin(), sighash.end());
+        keys.push_back(key);
+    }
+    // One alone costs the same either way.
+    if (list.size() < 2) return true;
+    if (!zo_bundles_verify(list.data(), sighashes.data(), list.size())) return false;
+    for (const uint256& key : keys) SetVerified(key);
     return true;
 }
 
@@ -292,6 +342,10 @@ bool ShieldedState::Check(const CTransaction& tx, const Bundle& bundle, std::str
         reject_reason = reason;
         return false;
     }};
+    // In range before anything is computed with it: the pool's balance below is defined only so
+    // (CheckShieldedTx refuses any other, but may come after: the mempool checks the proof last).
+    const CAmount balance{bundle.ValueBalance()};
+    if (balance < -MAX_MONEY || balance > MAX_MONEY) return invalid("bad-zs-value-balance");
     if (!IsAnchor(bundle.Anchor())) return invalid("bad-zs-anchor");
     std::set<uint256> seen;
     for (const uint256& nf : bundle.Nullifiers()) {
@@ -299,22 +353,26 @@ bool ShieldedState::Check(const CTransaction& tx, const Bundle& bundle, std::str
     }
     if (Tree().Size() + bundle.NumActions() > (uint64_t{1} << TREE_DEPTH)) return invalid("bad-zs-tree-full");
     // The pool never holds less than nothing: a flaw in the proofs could not take out more than went in.
-    if (Pool() - bundle.ValueBalance() < 0) return invalid("bad-zs-pool-negative");
+    if (Pool() - balance < 0) return invalid("bad-zs-pool-negative");
     return true;
 }
 
-bool ShieldedState::CheckTx(const CTransaction& tx, std::string& reject_reason) const
+bool ShieldedState::CheckState(const CTransaction& tx, std::string& reject_reason) const
 {
-    // The cheap checks against the state first (anchor, nullifiers, pool): a bundle that fails them
-    // costs no proof verification -- one spent already, signed again, say.
+    // The cheap checks against the state (anchor, nullifiers, pool): a bundle that fails them costs
+    // no proof verification -- one spent already, signed again, say.
     std::string error;
-    if (const auto bundle{Bundle::FromTx(tx, error)}; bundle && !Check(tx, *bundle, reject_reason)) return false;
-    return CheckShieldedTx(tx, reject_reason);
+    const auto bundle{Bundle::FromTx(tx, error)};
+    if (!error.empty()) {
+        reject_reason = error;
+        return false;
+    }
+    return !bundle || Check(tx, *bundle, reject_reason);
 }
 
-bool ShieldedState::ApplyTx(const CTransaction& tx, std::string& reject_reason)
+bool ShieldedState::ApplyTx(const CTransaction& tx, std::string& reject_reason, const std::optional<SighashDomain>& domain)
 {
-    if (!CheckShieldedTx(tx, reject_reason)) return false;
+    if (!CheckShieldedTx(tx, reject_reason, domain)) return false;
     std::string error;
     const auto bundle{Bundle::FromTx(tx, error)};
     if (!bundle) return true;

@@ -260,14 +260,16 @@ size_t BundleSize(size_t actions)
 
 namespace {
 /** Prove and sign a built bundle for a transaction whose marker (at `marker_index`) is a placeholder of its size, and put it in. */
-std::optional<std::string> FinishBundle(CMutableTransaction& mtx, uint32_t marker_index, ZoUnsigned* unsigned_bundle)
+std::optional<std::string> FinishBundle(const CWallet& wallet, CMutableTransaction& mtx, uint32_t marker_index, ZoUnsigned* unsigned_bundle)
 {
     uint256 commitment;
     if (zo_unsigned_commitment(unsigned_bundle, commitment.data()) != ZO_OK) {
         zo_unsigned_free(unsigned_bundle);
         return "Cannot commit to the bundle";
     }
-    const uint256 sighash{zside::ShieldedSighash(CTransaction{mtx}, marker_index, commitment)};
+    // Signed for the next block of this chain (zside/shielded.h).
+    const int height{WITH_LOCK(wallet.cs_wallet, return wallet.GetLastBlockHeight()) + 1};
+    const uint256 sighash{zside::ShieldedSighash(CTransaction{mtx}, marker_index, commitment, zside::SighashDomainAt(Params().GetConsensus(), height))};
     uint8_t* encoded{nullptr};
     size_t len{0};
     const int result{zo_unsigned_finish(unsigned_bundle, sighash.data(), &encoded, &len)};
@@ -398,7 +400,7 @@ std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const s
     mtx.version = CTransaction::CURRENT_VERSION;
     mtx.vout = transparent;
     mtx.vout.emplace_back(0, PlaceholderMarker(BundleSize(zo_unsigned_num_actions(unsigned_bundle))));
-    if (const auto error{FinishBundle(mtx, mtx.vout.size() - 1, unsigned_bundle)}) return *error;
+    if (const auto error{FinishBundle(wallet, mtx, mtx.vout.size() - 1, unsigned_bundle)}) return *error;
     const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
     if (const auto error{Commit(wallet, tx)}) return *error;
     return tx;
@@ -436,7 +438,7 @@ std::variant<CTransactionRef, std::string> ShieldCoins(CWallet& wallet, CAmount 
         zo_unsigned_free(unsigned_bundle);
         return std::string{"The marker went missing"};
     }
-    if (const auto error{FinishBundle(mtx, marker_index, unsigned_bundle)}) return *error;
+    if (const auto error{FinishBundle(wallet, mtx, marker_index, unsigned_bundle)}) return *error;
     // The transparent inputs sign last, the bundle included.
     if (!wallet.SignTransaction(mtx)) return std::string{"Cannot sign the transaction (is the wallet unlocked?)"};
     const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
@@ -479,7 +481,7 @@ std::variant<CTransactionRef, std::string> ShieldCoin(CWallet& wallet, const COu
     }
     ZoUnsigned* unsigned_bundle{zo_builder_build(builder)};
     if (!unsigned_bundle) return std::string{"Cannot build the bundle"};
-    if (const auto error{FinishBundle(mtx, 0, unsigned_bundle)}) return *error;
+    if (const auto error{FinishBundle(wallet, mtx, 0, unsigned_bundle)}) return *error;
     if (!wallet.SignTransaction(mtx)) return std::string{"Cannot sign the transaction (is the wallet unlocked?)"};
     const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
     if (const auto error{Commit(wallet, tx)}) return *error;

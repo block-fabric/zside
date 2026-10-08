@@ -5,6 +5,7 @@
 #include <sidechain/state.h>
 
 #include <addresstype.h>
+#include <chainparams.h>
 #include <common/signmessage.h>
 #include <crypto/common.h>
 #include <drivechain/sidechain.h>
@@ -394,7 +395,7 @@ bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::Si
     }
     // The shielded pool: a transaction that breaks its rules is invalid.
     zside::ShieldedState shielded{Writable()};
-    if (!shielded.ApplyTx(tx, reject_reason)) return false;
+    if (!shielded.ApplyTx(tx, reject_reason, zside::SighashDomainAt(params, ::Params().GetConsensus().hashGenesisBlock, height))) return false;
     payouts.insert(payouts.end(), refunds.begin(), refunds.end());
     return true;
 }
@@ -437,6 +438,9 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
         reject_reason = "bad-zs-coinbase";
         return false;
     }
+    // The proofs of the block's bundles in one batch, which costs less than one by one (an invalid
+    // one is found below, by the transaction that has it).
+    (void)zside::VerifyBundles(std::span{block.vtx}.subspan(1), zside::SighashDomainAt(params, ::Params().GetConsensus().hashGenesisBlock, height));
     for (size_t i{1}; i < block.vtx.size(); ++i) {
         if (!ApplyTx(*block.vtx[i], height, params, tx_payouts, reject_reason, main_pending)) return false;
     }

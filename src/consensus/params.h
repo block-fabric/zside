@@ -84,6 +84,15 @@ struct BIP9Deployment {
     static constexpr int64_t NEVER_ACTIVE = -2;
 };
 
+/** zSide: the rules of the shielded pool. */
+struct ZsideParams {
+    /**
+     * From this height (the second audit's changes): the sighash of a bundle commits to the chain,
+     * its genesis block and slot (zside/shielded.h).
+     */
+    int audit2_height{0};
+};
+
 /**
  * Parameters of a chain that is a sidechain of the mainchain: its blocks are
  * blind merged mined, and its coins come from and return to the mainchain.
@@ -106,6 +115,8 @@ struct SidechainParams {
      * it would pay them a second time.
      */
     int single_bundle_height{0};
+    /** zSide: the shielded pool. */
+    ZsideParams zside;
 };
 
 /**
