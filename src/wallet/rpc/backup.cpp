@@ -417,6 +417,8 @@ RPCMethod importdescriptors()
         }
         pwallet->ConnectScriptPubKeyManNotifiers();
         pwallet->RefreshAllTXOs();
+        // zSide: the shielded account of the keys imported, before the rescan, so that it finds its notes.
+        SetupShieldedAccount(*pwallet);
     }
 
     // Rescan the blockchain using the lowest timestamp

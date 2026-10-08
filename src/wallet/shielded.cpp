@@ -5,6 +5,8 @@
 #include <wallet/shielded.h>
 
 #include <bech32.h>
+#include <chain.h>
+#include <interfaces/chain.h>
 #include <chainparams.h>
 #include <hash.h>
 #include <key_io.h>
@@ -22,6 +24,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <set>
 
 namespace wallet {
@@ -141,7 +144,43 @@ bool SetupShieldedAccount(CWallet& wallet)
     wallet.m_shielded.fvk = fvk;
     // What the wallet keeps already may pay the account.
     for (const auto& [txid, wtx] : wallet.mapWallet) ShieldedTxAdded(wallet, wtx);
+    // Blocks the wallet scanned without the account may have paid it alone, with nothing the wallet
+    // kept then: those since the wallet's birth are scanned again.
+    if (wallet.HaveChain() && wallet.GetLastBlockHeight() >= 0) {
+        int from{0};
+        const int64_t birth{wallet.GetBirthTime()};
+        bool found{birth == std::numeric_limits<int64_t>::max()};
+        if (!found) found = wallet.chain().findFirstBlockWithTimeAndHeight(birth - TIMESTAMP_WINDOW, 0, interfaces::FoundBlock().height(from));
+        if (found && from <= wallet.GetLastBlockHeight()) {
+            wallet.m_shielded.rescan_from = from;
+            batch.WriteOrchardRescan(from);
+            wallet.WalletLogPrintf("zSide: the shielded account is set up after the wallet scanned blocks without it: they are to be scanned again, from block %d\n", from);
+        }
+    }
     return true;
+}
+
+void ShieldedRescan(CWallet& wallet)
+{
+    const std::optional<int> from{WITH_LOCK(wallet.cs_wallet, return wallet.m_shielded.rescan_from)};
+    if (!from) return;
+    // Another rescan going on: the next call does it.
+    WalletRescanReserver reserver{wallet};
+    if (!reserver.reserve()) return;
+    const std::optional<int> tip{wallet.chain().getHeight()};
+    if (!tip) return;
+    const int start{std::min(*from, *tip)};
+    wallet.WalletLogPrintf("zSide: scanning again from block %d for the shielded account\n", start);
+    // A scan that goes through clears the mark (ShieldedScanned).
+    (void)wallet.ScanForWalletTransactions(wallet.chain().getBlockHash(start), start, /*max_height=*/{}, reserver, /*save_progress=*/false);
+}
+
+void ShieldedScanned(CWallet& wallet, int start_height)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    if (!wallet.m_shielded.rescan_from || start_height > *wallet.m_shielded.rescan_from) return;
+    wallet.m_shielded.rescan_from.reset();
+    WalletBatch{wallet.GetDatabase()}.EraseOrchardRescan();
 }
 
 std::vector<Txid> ShieldedConflicts(const CWallet& wallet, const CTransaction& tx)

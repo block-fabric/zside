@@ -109,6 +109,10 @@ RPCMethod walletpassphrase()
         }
     }, std::chrono::seconds(nSleepTime));
 
+    // zSide: the shielded account, set up on unlocking after the wallet scanned blocks without it,
+    // has them scanned again (wallet/shielded.h).
+    ShieldedRescan(*pwallet);
+
     return UniValue::VNULL;
 },
     };

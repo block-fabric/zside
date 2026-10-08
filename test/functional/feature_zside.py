@@ -3,7 +3,7 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the shielded pool: shielding, private payments with memos, unshielding, double spends, undo, fee bumps,
-conflicts, melt/cast."""
+conflicts, the account of a restored or locked wallet, melt/cast."""
 
 from decimal import Decimal
 import os
@@ -132,6 +132,7 @@ class ZSideTest(SidechainTest):
         self.run_anchor_reorg_test()
         self.run_bump_test()
         self.run_conflict_test()
+        self.run_rescan_test()
         self.run_meltcast_test()
         self.run_unshield_test()
 
@@ -239,6 +240,51 @@ class ZSideTest(SidechainTest):
         assert_equal(side.getshieldedbalance()["pending"], 0)
         assert_equal(side.getshieldedbalance(), copy.getshieldedbalance())
         other.unloadwallet("copy")
+        self.check_in_sync()
+
+    def run_rescan_test(self):
+        side, other = self.nodes
+        self.log.info("A blank wallet that imports the keys of another, from the start, finds its shielded notes")
+        received = other.getshieldedbalance()
+        assert_greater_than(received["available"], 0)
+        descriptors = []
+        for d in other.listdescriptors(True)["descriptors"]:
+            request = {"desc": d["desc"], "timestamp": 0, "active": d["active"], "internal": d.get("internal", False)}
+            if "range" in d:
+                request["range"] = d["range"]
+                request["next_index"] = d["next_index"]
+            descriptors.append(request)
+        other.createwallet("imported", blank=True)
+        imported = other.get_wallet_rpc("imported")
+        assert all(r["success"] for r in imported.importdescriptors(descriptors))
+        other_wallet = other.get_wallet_rpc(self.default_wallet_name)
+        assert_equal(imported.getshieldedbalance(), received)
+        assert_equal(imported.listshieldednotes(True), other_wallet.listshieldednotes(True))
+        other.unloadwallet("imported")
+
+        self.log.info("A wallet that scanned blocks locked, its shielded account not set up, scans them again once unlocked")
+        other.createwallet("locked", passphrase="secret")
+        locked = other.get_wallet_rpc("locked")
+        assert_raises_rpc_error(-13, "unlock the wallet once", locked.getshieldedbalance)
+        backup = os.path.join(self.options.tmpdir, "locked-wallet.dat")
+        locked.backupwallet(backup)
+        other.restorewallet("unlocked", backup)
+        unlocked = other.get_wallet_rpc("unlocked")
+        unlocked.walletpassphrase("secret", 600)
+        side.sendshielded({unlocked.getshieldedaddress(): Decimal("0.3")}, "to a locked wallet")
+        self.mine_txs()
+        assert_equal(unlocked.getshieldedbalance()["available"], Decimal("0.3"))
+        # The same keys: the locked wallet saw the block, and could not read it.
+        locked.walletpassphrase("secret", 600)
+        assert_equal(locked.getshieldedbalance()["available"], Decimal("0.3"))
+        assert_equal(locked.listshieldednotes()[0]["memo"], "to a locked wallet")
+        # It does not scan again after a restart: it is noted done.
+        self.restart_node(1)
+        self.connect_nodes(0, 1)
+        with other.assert_debug_log(expected_msgs=[], unexpected_msgs=["zSide: scanning again"]):
+            other.loadwallet("locked")
+            assert_equal(other.get_wallet_rpc("locked").getshieldedbalance()["available"], Decimal("0.3"))
+        other.unloadwallet("locked")
         self.check_in_sync()
 
     def run_unshield_test(self):

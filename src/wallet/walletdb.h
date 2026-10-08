@@ -90,6 +90,7 @@ extern const std::string WATCHMETA;
 extern const std::string WATCHS;
 extern const std::string ORCHARDFVK;
 extern const std::string MELTCAST;
+extern const std::string ORCHARDRESCAN;
 
 // Keys in this set pertain only to legacy wallets and are removed during migration to descriptors.
 extern const std::unordered_set<std::string> LEGACY_TYPES;
@@ -291,6 +292,9 @@ public:
     bool WriteWalletFlags(uint64_t flags);
     //! zSide: the full viewing key of the shielded account.
     bool WriteOrchardViewingKey(const std::vector<unsigned char>& fvk) { return WriteIC(DBKeys::ORCHARDFVK, fvk); }
+    //! zSide: the height the wallet is to scan again from, for the shielded account (wallet/shielded.h).
+    bool WriteOrchardRescan(int height) { return WriteIC(DBKeys::ORCHARDRESCAN, height); }
+    bool EraseOrchardRescan() { return EraseIC(DBKeys::ORCHARDRESCAN); }
     //! zSide: a step of the melt/cast plan.
     bool WriteMeltCastJob(const MeltCastJob& job) { return WriteIC(std::make_pair(DBKeys::MELTCAST, job.id), job); }
     bool EraseMeltCastJob(uint64_t id) { return EraseIC(std::make_pair(DBKeys::MELTCAST, id)); }

@@ -25,10 +25,14 @@ std::shared_ptr<CWallet> ReadyWallet(const JSONRPCRequest& request, bool unlocke
     if (!pwallet) return nullptr;
     pwallet->BlockUntilSyncedToCurrentChain();
     if (unlocked) EnsureWalletIsUnlocked(*pwallet);
-    LOCK(pwallet->cs_wallet);
-    if (!SetupShieldedAccount(*pwallet) && !pwallet->m_shielded.fvk) {
-        throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "The shielded account is not set up yet: unlock the wallet once (walletpassphrase)");
+    {
+        LOCK(pwallet->cs_wallet);
+        if (!SetupShieldedAccount(*pwallet) && !pwallet->m_shielded.fvk) {
+            throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "The shielded account is not set up yet: unlock the wallet once (walletpassphrase)");
+        }
     }
+    // Set up after the wallet scanned blocks without it, the account has them scanned again first.
+    ShieldedRescan(*pwallet);
     return pwallet;
 }
 

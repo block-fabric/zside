@@ -2098,6 +2098,8 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
         result.status = ScanResult::USER_ABORT;
     } else {
         WalletLogPrintf("Rescan completed in %15dms\n", Ticks<std::chrono::milliseconds>(reserver.now() - start_time));
+        // zSide: the blocks the shielded account was to have scanned again, if these.
+        if (result.status == ScanResult::SUCCESS && !max_height) WITH_LOCK(cs_wallet, ShieldedScanned(*this, start_height));
     }
     return result;
 }
@@ -3308,8 +3310,6 @@ bool CWallet::AttachChain(const std::shared_ptr<CWallet>& walletInstance, interf
     // allow setting the chain if it hasn't been set already but prevent changing it
     assert(!walletInstance->m_chain || walletInstance->m_chain == &chain);
     walletInstance->m_chain = &chain;
-    // zSide: the shielded account, before any rescan, so that the rescan finds its notes.
-    SetupShieldedAccount(*walletInstance);
 
     // Unless allowed, ensure wallet files are not reused across chains:
     if (!gArgs.GetBoolArg("-walletcrosschain", DEFAULT_WALLETCROSSCHAIN)) {
@@ -3351,6 +3351,14 @@ bool CWallet::AttachChain(const std::shared_ptr<CWallet>& walletInstance, interf
         walletInstance->SetLastBlockProcessedInMem(*tip_height, chain.getBlockHash(*tip_height));
     } else {
         walletInstance->SetLastBlockProcessedInMem(-1, uint256());
+    }
+
+    // zSide: the shielded account, before any rescan, so that the rescan finds its notes; and from
+    // where it is to scan again, if it was set up after the wallet scanned blocks without it.
+    SetupShieldedAccount(*walletInstance);
+    if (walletInstance->m_shielded.rescan_from && *walletInstance->m_shielded.rescan_from < rescan_height) {
+        rescan_height = *walletInstance->m_shielded.rescan_from;
+        walletInstance->WalletLogPrintf("zSide: scanning again from block %d for the shielded account\n", rescan_height);
     }
 
     if (tip_height && *tip_height != rescan_height)

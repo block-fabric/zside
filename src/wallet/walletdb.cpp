@@ -63,6 +63,7 @@ const std::string WATCHMETA{"watchmeta"};
 const std::string WATCHS{"watchs"};
 const std::string ORCHARDFVK{"zsfvk"};
 const std::string MELTCAST{"zsjob"};
+const std::string ORCHARDRESCAN{"zsrescan"};
 const std::unordered_set<std::string> LEGACY_TYPES{CRYPTED_KEY, CSCRIPT, DEFAULTKEY, HDCHAIN, KEYMETA, KEY, OLD_KEY, POOL, WATCHMETA, WATCHS};
 } // namespace DBKeys
 
@@ -1182,6 +1183,7 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
             std::copy(fvk.begin(), fvk.end(), key.begin());
             pwallet->m_shielded.fvk = key;
         }
+        if (int height; m_batch->Read(DBKeys::ORCHARDRESCAN, height)) pwallet->m_shielded.rescan_from = height;
         // zSide: the melt/cast plan.
         LoadResult meltcast_res = LoadRecords(pwallet, *m_batch, DBKeys::MELTCAST,
             [] (CWallet* pwallet, DataStream& key, DataStream& value, std::string& err) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet) {

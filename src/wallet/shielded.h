@@ -28,6 +28,11 @@ class CChainParams;
  * unlocked. Its full viewing key is kept in the wallet, so that a locked wallet still sees
  * what it receives. The notes are found by decrypting the shielded transactions the wallet
  * keeps: they come back with a rescan, and need no records of their own.
+ *
+ * The account is set up as soon as the key is at hand: on load, on unlocking, before the rescan of
+ * an import. Set up after the wallet scanned blocks without it, it has the wallet scan them again,
+ * from the wallet's birth (ShieldedRescan): a transaction that only pays the account, with no
+ * transparent output of the wallet, was not kept then.
  */
 namespace wallet {
 class CWallet;
@@ -71,6 +76,8 @@ struct ShieldedAccount {
     std::map<std::pair<Txid, uint32_t>, ShieldedPayment> payments;
     //! Melt/cast: the plan, by id (kept in the wallet's database).
     std::map<uint64_t, MeltCastJob> jobs;
+    //! Set up after the wallet scanned blocks without it: the height to scan again from (kept in the database).
+    std::optional<int> rescan_from;
 };
 
 /** Notes are spent at the tree of the block with this many confirmations, or of the newest of their own blocks:
@@ -87,8 +94,15 @@ std::optional<OrchardMemo> MemoFromText(const std::string& text);
 
 /** The spending key of the wallet's shielded account: nullopt if the wallet is locked or has no private keys. */
 std::optional<std::array<uint8_t, 32>> ShieldedSpendingKey(const CWallet& wallet);
-/** Make the viewing key known (from the spending key) and keep it, if it is not yet. */
+/**
+ * Make the viewing key known (from the spending key) and keep it, if it is not yet. If the wallet
+ * scanned blocks already, it notes they are to be scanned again (ShieldedRescan).
+ */
 bool SetupShieldedAccount(CWallet& wallet);
+/** Scan the blocks again that the wallet scanned before its shielded account was set up, if any (the wallet not locked by the caller). */
+void ShieldedRescan(CWallet& wallet);
+/** A scan of the chain from `start_height` to the tip went through: the account needs no other. */
+void ShieldedScanned(CWallet& wallet, int start_height);
 /** The transactions of the wallet, other than `tx`, that reveal a nullifier it reveals: they conflict with it. */
 std::vector<Txid> ShieldedConflicts(const CWallet& wallet, const CTransaction& tx);
 /** An address of the account: `index` 0 is the default one; others look unrelated to it. */
