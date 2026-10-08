@@ -57,6 +57,7 @@
 #include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <rpc/server.h>
+#include <scheduler.h>
 #include <sync.h>
 #include <drivechain/sidechain.h>
 #include <txmempool.h>
@@ -84,6 +85,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -721,16 +723,32 @@ public:
     std::optional<OrchardWitnesses> getOrchardWitnesses(const std::vector<uint256>& cmxs, std::optional<int> anchor_height) override
     {
         if (!g_orchardindex) return std::nullopt;
-        g_orchardindex->BlockUntilSyncedToCurrentChain();
+        // No draining of the validation queue here (BlockUntilSyncedToCurrentChain): on the
+        // scheduler's thread, or with a lock a queued notification waits for, it would never end.
+        // The index as it is: its tree must be one of the active chain (behind the tip is fine, it is
+        // then a root the chain had; on a branch a reorg left, it is still catching up).
+        const IndexSummary summary{g_orchardindex->GetSummary()};
         // The tree a block left is the one the next found: the index knows that block's.
         std::optional<uint256> next;
-        if (anchor_height) {
+        {
             LOCK(::cs_main);
             const CChain& active{chainman().ActiveChain()};
-            if (*anchor_height < 0 || *anchor_height > active.Height()) return std::nullopt;
-            if (*anchor_height < active.Height()) next = active[*anchor_height + 1]->GetBlockHash();
+            const CBlockIndex* best{chainman().m_blockman.LookupBlockIndex(summary.best_block_hash)};
+            if (!best || !active.Contains(*best)) return std::nullopt;
+            if (anchor_height) {
+                if (*anchor_height < 0 || *anchor_height > best->nHeight) return std::nullopt;
+                if (*anchor_height < best->nHeight) next = active[*anchor_height + 1]->GetBlockHash();
+            }
         }
         return g_orchardindex->FindNotes(cmxs, next);
+    }
+    void waitForOrchardIndex() override
+    {
+        if (!g_orchardindex) return;
+        // The scheduler's thread runs the validation queue: waiting there for the queue to drain
+        // would wait for itself.
+        if (m_node.scheduler && std::this_thread::get_id() == m_node.scheduler->m_service_thread.get_id()) return;
+        g_orchardindex->BlockUntilSyncedToCurrentChain();
     }
     std::optional<BmmRequestInfo> getMempoolBmmRequest(uint32_t slot) override
     {

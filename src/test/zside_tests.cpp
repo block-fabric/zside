@@ -8,17 +8,26 @@
 #include <consensus/tx_check.h>
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
+#include <index/orchardindex.h>
+#include <interfaces/chain.h>
+#include <node/context.h>
 #include <primitives/transaction.h>
+#include <scheduler.h>
 #include <sidechain/store.h>
 #include <streams.h>
+#include <sync.h>
 #include <test/util/setup_common.h>
+#include <util/byte_units.h>
+#include <validation.h>
 #include <zside/marker.h>
 #include <zside/orchard.h>
 #include <zside/shielded.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <chrono>
 #include <cstring>
+#include <future>
 #include <limits>
 
 using namespace zside;
@@ -352,6 +361,52 @@ BOOST_FIXTURE_TEST_CASE(no_inputs_only_on_a_sidechain, RegTestSetup)
     CAmount fee;
     BOOST_CHECK(!Consensus::CheckTxInputs(tx, state, view, 1, fee));
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-txns-vin-empty");
+}
+
+BOOST_FIXTURE_TEST_CASE(witnesses_never_wait_on_the_scheduler, TestChain100Setup)
+{
+    // The scheduler's thread runs the validation queue: there, finding notes must not wait for the
+    // index to take a queued block (it would wait for itself, and the node would stop), nor may
+    // waiting for the index (a melt/cast, a payment) ever block.
+    g_orchardindex = std::make_unique<OrchardIndex>(interfaces::MakeChain(m_node), 1_MiB, /*f_memory=*/true);
+    BOOST_REQUIRE(g_orchardindex->Init());
+    g_orchardindex->Sync();
+    const auto chain{interfaces::MakeChain(m_node)};
+    const int height{WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Height())};
+    BOOST_CHECK(chain->getOrchardWitnesses({}, height));
+    BOOST_CHECK(!chain->getOrchardWitnesses({}, height + 1));
+
+    // The scheduler's thread held, a block connected meanwhile: its notification waits behind.
+    std::promise<void> holding, connected;
+    std::promise<std::pair<bool, bool>> found;
+    auto holding_future{holding.get_future()};
+    auto connected_future{connected.get_future()};
+    auto found_future{found.get_future()};
+    m_node.scheduler->scheduleFromNow([&] {
+        holding.set_value();
+        connected_future.wait();
+        chain->waitForOrchardIndex();
+        found.set_value({chain->getOrchardWitnesses({}, height).has_value(), chain->getOrchardWitnesses({}, height + 1).has_value()});
+    }, std::chrono::milliseconds{0});
+    holding_future.wait();
+    CreateAndProcessBlock({}, CScript{} << OP_TRUE);
+    BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Height()), height + 1);
+    connected.set_value();
+    BOOST_REQUIRE(found_future.wait_for(std::chrono::seconds{60}) == std::future_status::ready);
+    const auto [at_old, at_new]{found_future.get()};
+    // The index as it was: the tree of the block it has, not yet that of the new one ("try again").
+    BOOST_CHECK(at_old);
+    BOOST_CHECK(!at_new);
+
+    // Off the scheduler's thread, the wait is a real one: then the new block's tree is found.
+    chain->waitForOrchardIndex();
+    BOOST_CHECK(chain->getOrchardWitnesses({}, height + 1));
+    BOOST_CHECK(chain->getOrchardWitnesses({}, height));
+    BOOST_CHECK(chain->getOrchardWitnesses({}, std::nullopt));
+    BOOST_CHECK(!chain->getOrchardWitnesses({uint256::ONE}, std::nullopt));
+
+    g_orchardindex->Stop();
+    g_orchardindex.reset();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

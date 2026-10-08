@@ -7,6 +7,7 @@ conflicts, the account of a restored or locked wallet, melt/cast."""
 
 from decimal import Decimal
 import os
+import time
 
 from feature_sidechain import ACTIVATION_PERIOD, SLOT, SidechainTest
 from test_framework.messages import tx_from_hex
@@ -389,6 +390,30 @@ class ZSideTest(SidechainTest):
         # No two bills to one address.
         outs = [o["scriptPubKey"]["address"] for j in side.listmeltcast() if j["id"] in cast_ids for o in side.gettransaction(j["txid"], True, True)["decoded"]["vout"] if o["value"] > 0]
         assert_equal(len(set(outs)), len(outs))
+
+        self.log.info("Melt and cast while blocks keep coming: the node keeps taking them")
+        # Two transparent coins, out of the shielded account (the blocks pay the wallet little).
+        fresh = [side.unshieldcoins(Decimal("0.1"))["address"] for _ in range(2)]
+        self.mine_txs()
+        # Two coins melted, the others (the blocks' rewards) held back meanwhile.
+        others = [{"txid": u["txid"], "vout": u["vout"]} for u in side.listunspent() if u["address"] not in fresh]
+        side.lockunspent(False, others)
+        melts = side.meltcoins(0)
+        assert_equal(len(melts), 2)
+        side.lockunspent(True, others)
+        busy = {j["id"] for j in melts} | {j["id"] for j in side.castcoins(Decimal("0.03"), 0)}
+        for _ in range(4 * CAST_PERIOD):
+            if all(j["status"] == "sent" for j in side.listmeltcast() if j["id"] in busy):
+                break
+            # Each block taken by both nodes, while the wallet proves (a melt/cast that waited for the
+            # index on the scheduler's thread would stop the node here).
+            self.mine_txs()
+            time.sleep(3)
+        assert all(j["status"] == "sent" for j in side.listmeltcast() if j["id"] in busy)
+        self.mine_txs()
+        for job in side.listmeltcast():
+            if job["id"] in busy:
+                assert_equal(side.gettransaction(job["txid"])["confirmations"] > 0, True)
 
         self.log.info("Cancelling")
         side.castcoins(Decimal("0.03"), 5)

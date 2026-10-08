@@ -176,6 +176,7 @@ bool CancelMeltCast(CWallet& wallet, uint64_t id)
 
 int RunMeltCast(CWallet& wallet)
 {
+    AssertLockNotHeld(wallet.cs_wallet);
     std::vector<uint64_t> due;
     int height;
     {
@@ -191,34 +192,49 @@ int RunMeltCast(CWallet& wallet)
 
     int made{0};
     for (const uint64_t id : due) {
-        LOCK(wallet.cs_wallet);
-        auto it{wallet.m_shielded.jobs.find(id)};
-        if (it == wallet.m_shielded.jobs.end()) continue;
-        MeltCastJob job{it->second};
-        it->second.tried = height;
-        job.tried = height;
-        if (wallet.IsLocked()) {
-            if (job.error.empty()) {
-                job.error = "Waiting for the wallet to be unlocked";
-                Keep(wallet, job);
-            }
-            continue;
-        }
-        std::variant<CTransactionRef, std::string> result{std::string{}};
-        if (job.kind == MeltCastJob::MELT) {
-            if (wallet.IsSpent(job.coin) || !wallet.GetWalletTx(job.coin.hash)) {
-                // Spent some other way (the coin was unlocked and sent): nothing left to melt.
-                wallet.WalletLogPrintf("Melt: coin %s was spent otherwise, dropped from the plan\n", job.coin.ToString());
-                WalletBatch{wallet.GetDatabase()}.EraseMeltCastJob(id);
-                wallet.m_shielded.jobs.erase(it);
+        // The job is read, and its result kept, under the wallet's lock; it is made without it: the
+        // payment waits for -orchardindex, whose notifications may wait for that lock.
+        MeltCastJob job;
+        std::optional<OrchardAddress> to;
+        std::optional<CTxDestination> dest;
+        std::string error;
+        {
+            LOCK(wallet.cs_wallet);
+            auto it{wallet.m_shielded.jobs.find(id)};
+            if (it == wallet.m_shielded.jobs.end() || it->second.Sent()) continue;
+            it->second.tried = height;
+            job = it->second;
+            if (wallet.IsLocked()) {
+                if (job.error.empty()) {
+                    job.error = "Waiting for the wallet to be unlocked";
+                    Keep(wallet, job);
+                }
                 continue;
             }
-            result = ShieldCoin(wallet, job.coin, *ShieldedAddress(wallet, 0));
-        } else {
-            // Each bill to a new address of the wallet: no two bills share one.
-            const auto dest{wallet.GetNewDestination(OutputType::BECH32, "cast")};
-            if (!dest) {
-                result = util::ErrorString(dest).original;
+            if (job.kind == MeltCastJob::MELT) {
+                if (wallet.IsSpent(job.coin) || !wallet.GetWalletTx(job.coin.hash)) {
+                    // Spent some other way (the coin was unlocked and sent): nothing left to melt.
+                    wallet.WalletLogPrintf("Melt: coin %s was spent otherwise, dropped from the plan\n", job.coin.ToString());
+                    WalletBatch{wallet.GetDatabase()}.EraseMeltCastJob(id);
+                    wallet.m_shielded.jobs.erase(it);
+                    continue;
+                }
+                to = ShieldedAddress(wallet, 0);
+                if (!to) error = "The wallet has no shielded account";
+            } else {
+                // Each bill to a new address of the wallet: no two bills share one.
+                auto fresh{wallet.GetNewDestination(OutputType::BECH32, "cast")};
+                if (fresh) {
+                    dest = *fresh;
+                } else {
+                    error = util::ErrorString(fresh).original;
+                }
+            }
+        }
+        std::variant<CTransactionRef, std::string> result{error};
+        if (error.empty()) {
+            if (job.kind == MeltCastJob::MELT) {
+                result = ShieldCoin(wallet, job.coin, *to);
             } else {
                 ShieldedRecipient recipient;
                 recipient.script = GetScriptForDestination(*dest);
@@ -226,19 +242,30 @@ int RunMeltCast(CWallet& wallet)
                 result = SendShielded(wallet, {recipient});
             }
         }
-        if (const auto* tx{std::get_if<CTransactionRef>(&result)}) {
-            job.txid = (*tx)->GetHash().ToUint256();
+        LOCK(wallet.cs_wallet);
+        const auto* tx{std::get_if<CTransactionRef>(&result)};
+        if (tx) {
             // The coin is spent now: no need to keep it from other uses.
             if (job.kind == MeltCastJob::MELT) wallet.UnlockCoin(job.coin);
-            job.error.clear();
             ++made;
-            wallet.WalletLogPrintf("%s %s at height %d: %s\n", job.kind == MeltCastJob::MELT ? "Melted" : "Cast", FormatMoney(job.amount), height, job.txid.GetHex());
+            wallet.WalletLogPrintf("%s %s at height %d: %s\n", job.kind == MeltCastJob::MELT ? "Melted" : "Cast", FormatMoney(job.amount), height, (*tx)->GetHash().GetHex());
+        } else {
+            wallet.WalletLogPrintf("%s %s could not go at height %d: %s\n", job.kind == MeltCastJob::MELT ? "Melt" : "Cast", FormatMoney(job.amount), height, std::get<std::string>(result));
+        }
+        auto it{wallet.m_shielded.jobs.find(id)};
+        if (it == wallet.m_shielded.jobs.end()) {
+            // Cancelled meanwhile: what went, went.
+            if (tx) wallet.WalletLogPrintf("Melt/cast step %d was cancelled while it was being made\n", id);
+            continue;
+        }
+        if (tx) {
+            it->second.txid = (*tx)->GetHash().ToUint256();
+            it->second.error.clear();
         } else {
             // It tries again: a melt at the next block, a cast at the next window of its bill.
-            job.error = std::get<std::string>(result);
-            wallet.WalletLogPrintf("%s %s could not go at height %d: %s\n", job.kind == MeltCastJob::MELT ? "Melt" : "Cast", FormatMoney(job.amount), height, job.error);
+            it->second.error = std::get<std::string>(result);
         }
-        Keep(wallet, job);
+        Keep(wallet, it->second);
     }
     return made;
 }

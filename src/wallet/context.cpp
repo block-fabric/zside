@@ -6,5 +6,10 @@
 
 namespace wallet {
 WalletContext::WalletContext() = default;
-WalletContext::~WalletContext() = default;
+WalletContext::~WalletContext()
+{
+    // Stopped by UnloadWallets normally; never left running past the context it uses.
+    meltcast_interrupt();
+    if (meltcast_thread.joinable()) meltcast_thread.join();
+}
 } // namespace wallet

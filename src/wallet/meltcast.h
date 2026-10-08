@@ -89,7 +89,11 @@ std::variant<std::vector<MeltCastJob>, std::string> ScheduleMelt(CWallet& wallet
 std::variant<std::vector<MeltCastJob>, std::string> ScheduleCast(CWallet& wallet, CAmount amount, int spread);
 /** Drop a step that has not gone yet; true if it was there. */
 bool CancelMeltCast(CWallet& wallet, uint64_t id);
-/** Carry out what is due at the wallet's height. Returns how many transactions it made. */
+/**
+ * Carry out what is due at the wallet's height. Returns how many transactions it made. Not with the
+ * wallet's lock held, nor on the scheduler's thread (it waits for -orchardindex, and proves for
+ * seconds): the wallets' melt/cast thread runs it (StartWallets).
+ */
 int RunMeltCast(CWallet& wallet);
 /** What the plan still holds back of the shielded account: the bills not cast yet. */
 CAmount CastReserved(const CWallet& wallet);

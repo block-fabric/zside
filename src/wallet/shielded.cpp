@@ -330,6 +330,19 @@ size_t BundleSize(size_t actions)
     return compact(actions) + actions * 820 + 1 + 8 + 32 + compact(proof) + proof + actions * 64 + 64;
 }
 
+std::optional<size_t> MaxShieldedSpends(const std::vector<CTxOut>& transparent, size_t shielded_outputs)
+{
+    const auto fits{[&](size_t n_spends) {
+        std::vector<CTxOut> outputs{transparent};
+        outputs.emplace_back(0, PlaceholderMarker(BundleSize(ActionCount(n_spends, shielded_outputs))));
+        return ShieldedTxSize(outputs) * WITNESS_SCALE_FACTOR <= static_cast<size_t>(MAX_STANDARD_TX_WEIGHT);
+    }};
+    if (!fits(0)) return std::nullopt;
+    size_t n{0};
+    while (n < zside::MAX_ACTIONS && fits(n + 1)) ++n;
+    return n;
+}
+
 namespace {
 /** Prove and sign a built bundle for a transaction whose marker (at `marker_index`) is a placeholder of its size, and put it in. */
 std::optional<std::string> FinishBundle(const CWallet& wallet, CMutableTransaction& mtx, uint32_t marker_index, ZoUnsigned* unsigned_bundle)
@@ -339,8 +352,10 @@ std::optional<std::string> FinishBundle(const CWallet& wallet, CMutableTransacti
         zo_unsigned_free(unsigned_bundle);
         return "Cannot commit to the bundle";
     }
-    // Signed for the next block of this chain (zside/shielded.h).
-    const int height{WITH_LOCK(wallet.cs_wallet, return wallet.GetLastBlockHeight()) + 1};
+    // Signed for the next block of the node's chain (zside/shielded.h): the one the mempool checks it
+    // for. The wallet may not have seen the node's tip yet, and the domain changes at audit2_height.
+    const std::optional<int> tip{wallet.chain().getHeight()};
+    const int height{(tip ? *tip : WITH_LOCK(wallet.cs_wallet, return wallet.GetLastBlockHeight())) + 1};
     const uint256 sighash{zside::ShieldedSighash(CTransaction{mtx}, marker_index, commitment, zside::SighashDomainAt(Params().GetConsensus(), height))};
     uint8_t* encoded{nullptr};
     size_t len{0};
@@ -430,14 +445,28 @@ std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, con
         outputs.emplace_back(0, PlaceholderMarker(BundleSize(ActionCount(n_spends, shielded_outputs + 1))));
         return GetMinimumFee(fee_rate, ShieldedTxSize(outputs));
     }};
+    // Each note spent is an action of about 3 kB: the transaction must stay of a size the network
+    // relays, which caps the notes one payment spends.
+    const std::optional<size_t> max_spends{MaxShieldedSpends(transparent, shielded_outputs + 1)};
+    const auto fits{[&](size_t n_spends) { return max_spends && n_spends <= *max_spends; }};
+    if (!fits(spends.size())) return std::string{"Too many recipients, or notes to spend, for one transaction the network relays"};
     CAmount spent{0};
     for (const Candidate& c : spends) spent += c.note->value;
+    bool capped{false};
     for (const Candidate& c : available) {
         if (spent >= needed(fee_for(spends.size()))) break;
+        if (!fits(spends.size() + 1)) {
+            capped = true;
+            break;
+        }
         spends.push_back(c);
         spent += c.note->value;
     }
     const CAmount fee{fee_for(spends.size())};
+    if (spent < needed(fee) && capped) {
+        return strprintf("It would take more than %u notes, too many for one transaction the network relays: %s at most can be paid at once now. "
+                         "Pay less, or join the notes first (pay part of the balance to the account's own address)", spends.size(), FormatMoney(std::max<CAmount>(0, subtract_fee ? spent : spent - fee)));
+    }
     if (spent < needed(fee)) {
         const ShieldedBalance balance{GetShieldedBalance(wallet)};
         if (balance.pending > 0 && balance.available < needed(fee)) {
@@ -462,7 +491,7 @@ std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, con
     auto witnesses{wallet.chain().getOrchardWitnesses(cmxs, anchor_height)};
     // The node may be at another tip than the wallet for a moment: the tree of its tip then.
     if (!witnesses) witnesses = wallet.chain().getOrchardWitnesses(cmxs, std::nullopt);
-    if (!witnesses) return std::string{"The node cannot find the notes in its tree yet (is -orchardindex on, and synced?)"};
+    if (!witnesses) return std::string{"The node cannot find the notes in its tree yet: its -orchardindex is off, or not caught up with the last blocks (try again in a moment)"};
 
     ZoBuilder* builder{zo_builder_new(witnesses->anchor.data())};
     if (!builder) return std::string{"Cannot start a bundle"};
@@ -512,12 +541,18 @@ std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, con
 
 std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fixed_fee, bool subtract_fee)
 {
+    // The index caught up with the tip first, the wallet's lock not held: a notification in the queue
+    // may wait for that lock (getOrchardWitnesses does not wait, under it).
+    AssertLockNotHeld(wallet.cs_wallet);
+    wallet.chain().waitForOrchardIndex();
     LOCK(wallet.cs_wallet);
     return SendShieldedWith(wallet, recipients, fixed_fee, subtract_fee, /*spend_first=*/{}, /*replaces=*/std::nullopt);
 }
 
 std::variant<CTransactionRef, std::string> BumpShieldedFee(CWallet& wallet, const Txid& txid, std::optional<CAmount> new_fee)
 {
+    AssertLockNotHeld(wallet.cs_wallet);
+    wallet.chain().waitForOrchardIndex();
     LOCK(wallet.cs_wallet);
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
     const CWalletTx* wtx{wallet.GetWalletTx(txid)};

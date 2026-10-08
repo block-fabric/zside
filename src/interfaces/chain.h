@@ -192,9 +192,15 @@ public:
     virtual bool isInMempool(const Txid& txid) = 0;
 
     //! zSide: where shielded notes are in the tree, with their paths to the same root: the tree as
-    //! the block at `anchor_height` of the active chain left it (the tip's if none); nullopt if one
-    //! is not in it, or the node keeps no -orchardindex.
+    //! the block at `anchor_height` of the active chain left it (the index's newest if none); nullopt
+    //! if one is not in it, the node keeps no -orchardindex, or the index has not caught up with that
+    //! block yet (try again later, or call waitForOrchardIndex first). It never waits: callable with
+    //! any lock held and from any thread, the scheduler's included.
     virtual std::optional<OrchardWitnesses> getOrchardWitnesses(const std::vector<uint256>& cmxs, std::optional<int> anchor_height) = 0;
+    //! zSide: wait until -orchardindex has caught up with the tip, by draining the validation queue.
+    //! Not with a wallet's lock held (a queued notification may wait for it). On the scheduler's
+    //! thread, which runs that queue, it returns at once: it would wait for itself.
+    virtual void waitForOrchardIndex() = 0;
     //! The merged-mining request (BIP301 M8) in the mempool for a sidechain slot, if any: the sidechain
     //! block it asks for, the mainchain block it is for, and the fee it pays.
     struct BmmRequestInfo {

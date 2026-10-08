@@ -28,6 +28,9 @@ bool LoadWallets(WalletContext& context);
 //! Complete startup of wallets.
 void StartWallets(WalletContext& context);
 
+//! zSide: stop the thread of the melt/cast plans (UnloadWallets does).
+void StopMeltCast(WalletContext& context);
+
 void UnloadWallets(WalletContext& context);
 } // namespace wallet
 

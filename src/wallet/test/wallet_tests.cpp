@@ -18,6 +18,7 @@
 #include <key_io.h>
 #include <node/blockstorage.h>
 #include <node/types.h>
+#include <consensus/validation.h>
 #include <policy/policy.h>
 #include <policy/truc_policy.h>
 #include <rpc/server.h>
@@ -32,6 +33,7 @@
 #include <wallet/coincontrol.h>
 #include <wallet/context.h>
 #include <wallet/receive.h>
+#include <wallet/shielded.h>
 #include <wallet/spend.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
@@ -867,6 +869,28 @@ BOOST_FIXTURE_TEST_CASE(drivechain_parents_not_selected, ListCoinsTestingSetup)
         wallet->mapWallet.at(request->GetHash()).m_state = TxStateConfirmed{m_node.chainman->ActiveChain().Tip()->GetBlockHash(), m_node.chainman->ActiveChain().Height(), /*index=*/1};
         BOOST_CHECK_EQUAL(AvailableCoins(*wallet).Size(), 1U);
     }
+}
+
+BOOST_AUTO_TEST_CASE(shielded_spends_capped)
+{
+    // zSide: a payment out of the shielded account spends no more notes than a transaction the network
+    // relays holds (each is an action of about 3 kB).
+    const CTxOut transparent{COIN, CScript() << OP_TRUE};
+    const auto max{MaxShieldedSpends({transparent}, 1)};
+    BOOST_REQUIRE(max);
+    BOOST_CHECK_GT(*max, 20U);
+    BOOST_CHECK_LT(*max, 40U);
+    const auto weight{[&](size_t spends) {
+        CMutableTransaction mtx;
+        mtx.vout = {transparent, CTxOut{0, CScript() << OP_RETURN << std::vector<unsigned char>(BundleSize(ActionCount(spends, 1)), 0)}};
+        return GetTransactionWeight(CTransaction{mtx});
+    }};
+    BOOST_CHECK_LE(weight(*max), MAX_STANDARD_TX_WEIGHT);
+    BOOST_CHECK_GT(weight(*max + 1), MAX_STANDARD_TX_WEIGHT);
+    // Actions pair a spend with an output: outputs fewer than the notes cost nothing more. Too many
+    // outputs alone, and no note can be spent.
+    BOOST_CHECK_EQUAL(*MaxShieldedSpends({transparent}, 10), *max);
+    BOOST_CHECK(!MaxShieldedSpends({}, 40));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

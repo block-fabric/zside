@@ -6,10 +6,12 @@
 #define BITCOIN_WALLET_CONTEXT_H
 
 #include <sync.h>
+#include <util/threadinterrupt.h>
 
 #include <functional>
 #include <list>
 #include <memory>
+#include <thread>
 #include <vector>
 
 class ArgsManager;
@@ -50,6 +52,10 @@ struct WalletContext {
     Mutex wallets_mutex;
     std::vector<std::shared_ptr<CWallet>> wallets GUARDED_BY(wallets_mutex);
     std::list<std::shared_ptr<LoadWalletHandler>> wallet_load_fns GUARDED_BY(wallets_mutex);
+    //! zSide: the thread that carries out the wallets' melt/cast plans (StartWallets), off the
+    //! scheduler's thread, and what stops it.
+    std::thread meltcast_thread;
+    CThreadInterrupt meltcast_interrupt;
 
     //! Declare default constructor and destructor that are not inline, so code
     //! instantiating the WalletContext struct doesn't need to #include class

@@ -11,6 +11,7 @@
 #include <util/check.h>
 #include <util/fs.h>
 #include <util/string.h>
+#include <util/thread.h>
 #include <util/translation.h>
 #include <wallet/context.h>
 #include <wallet/meltcast.h>
@@ -172,14 +173,33 @@ void StartWallets(WalletContext& context)
     }
 
     context.scheduler->scheduleEvery([&context] { MaybeResendWalletTxs(context); }, 1min);
-    // zSide: what the melt/cast plans have due, as the blocks come.
-    context.scheduler->scheduleEvery([&context] {
-        for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) RunMeltCast(*pwallet);
-    }, 10s);
+    // zSide: what the melt/cast plans have due, as the blocks come. On a thread of its own, as
+    // upstream does long wallet work, not the scheduler's: a payment waits for -orchardindex to take
+    // the queued block notifications, which the scheduler's thread runs (it would wait for itself),
+    // and proving takes seconds, which would hold back every notification.
+    if (!context.meltcast_thread.joinable()) {
+        context.meltcast_interrupt.reset();
+        context.meltcast_thread = std::thread(&util::TraceThread, "meltcast", [&context] {
+            while (context.meltcast_interrupt.sleep_for(10s)) {
+                for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) {
+                    if (context.meltcast_interrupt) break;
+                    RunMeltCast(*pwallet);
+                }
+            }
+        });
+    }
+}
+
+void StopMeltCast(WalletContext& context)
+{
+    context.meltcast_interrupt();
+    if (context.meltcast_thread.joinable()) context.meltcast_thread.join();
 }
 
 void UnloadWallets(WalletContext& context)
 {
+    // Before the wallets go, and while the scheduler still runs (a payment in progress may wait for it).
+    StopMeltCast(context);
     auto wallets = GetWallets(context);
     while (!wallets.empty()) {
         auto wallet = wallets.back();

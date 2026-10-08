@@ -144,16 +144,25 @@ struct ShieldedRecipient {
 };
 
 /**
+ * How many notes a payment out of the shielded account may spend, with these transparent outputs and
+ * shielded ones (its change included), for a transaction the network relays (MAX_STANDARD_TX_WEIGHT):
+ * nullopt if the outputs alone make it too large.
+ */
+std::optional<size_t> MaxShieldedSpends(const std::vector<CTxOut>& transparent, size_t shielded_outputs);
+/**
  * Pay out of the shielded account: no transparent inputs; the change goes back to the account.
  * @param[in] fee  the fee, or none for the wallet's fee rate
  * @param[in] subtract_fee  take the fee out of the one transparent recipient's amount (unshielding all of it)
  * @return the transaction, or the error
+ * Not with the wallet's lock held: it waits for -orchardindex to catch up first (but not on the
+ * scheduler's thread, where it finds the notes in the index as it is).
  */
 std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fee = std::nullopt, bool subtract_fee = false);
 /**
  * Pay the same again, with a higher fee: a transaction that replaces one of the wallet's, out of its shielded
  * account, waiting for a block (it spends the same notes, and more if they do not cover the fee).
  * @param[in] fee  the new fee, or none for the lowest the mempool takes as a replacement
+ * Not with the wallet's lock held, as SendShielded.
  */
 std::variant<CTransactionRef, std::string> BumpShieldedFee(CWallet& wallet, const Txid& txid, std::optional<CAmount> fee = std::nullopt);
 /** Move transparent coins of the wallet into its shielded account (or to another shielded address). */
