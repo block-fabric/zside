@@ -404,9 +404,11 @@ namespace {
 /**
  * SendShielded, spending the notes of `spend_first` (by nullifier) before any other: those of a
  * transaction this one replaces, which it so conflicts with.
+ * @param[in] replaced_fee  the fee of the transaction it replaces: it pays that, and the incremental
+ *                          relay fee of its own size (BIP 125 rules 3 and 4), at least
  */
 std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fixed_fee, bool subtract_fee,
-                                                           const std::set<uint256>& spend_first, std::optional<Txid> replaces) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+                                                           const std::set<uint256>& spend_first, std::optional<Txid> replaces, std::optional<CAmount> replaced_fee = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
@@ -462,11 +464,21 @@ std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, con
         return a.note->value > b.note->value;
     });
     const MinimumFeeRateResult fee_rate{GetMinimumFeeRate(wallet, CCoinControl{})};
-    const auto fee_for{[&](size_t n_spends) -> CAmount {
-        if (fixed_fee) return *fixed_fee;
+    // Its size with so many notes (and change): its virtual size, without transparent inputs.
+    const auto size_for{[&](size_t n_spends) {
         std::vector<CTxOut> outputs{transparent};
         outputs.emplace_back(0, PlaceholderMarker(BundleSize(ActionCount(n_spends, shielded_outputs + 1))));
-        return GetMinimumFee(fee_rate, ShieldedTxSize(outputs));
+        return ShieldedTxSize(outputs);
+    }};
+    // A replacement pays what the one it replaces paid, and the relay of its own size: of the new
+    // transaction, which is larger if it spends more notes.
+    const auto lowest_for{[&](size_t n_spends) -> CAmount {
+        return *replaced_fee + wallet.chain().relayIncrementalFee().GetFee(size_for(n_spends));
+    }};
+    const auto fee_for{[&](size_t n_spends) -> CAmount {
+        if (fixed_fee) return *fixed_fee;
+        const CAmount fee{GetMinimumFee(fee_rate, size_for(n_spends))};
+        return replaced_fee ? std::max(fee, lowest_for(n_spends)) : fee;
     }};
     // Each note spent is an action of about 3 kB: the transaction must stay of a size the network
     // relays, which caps the notes one payment spends.
@@ -486,6 +498,12 @@ std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, con
         spent += c.note->value;
     }
     const CAmount fee{fee_for(spends.size())};
+    if (replaced_fee) {
+        if (fee < lowest_for(spends.size())) {
+            return strprintf("The new fee must be at least %s (the old fee, %s, and what a replacement of its size adds)", FormatMoney(lowest_for(spends.size())), FormatMoney(*replaced_fee));
+        }
+        if (!MoneyRange(fee) || fee > wallet.m_default_max_tx_fee) return strprintf("The fee of %s is more than the wallet pays (-maxtxfee)", FormatMoney(fee));
+    }
     if (spent < needed(fee) && capped) {
         return strprintf("It would take more than %u notes, too many for one transaction the network relays: %s at most can be paid at once now. "
                          "Pay less, or join the notes first (pay part of the balance to the account's own address)", spends.size(), FormatMoney(std::max<CAmount>(0, subtract_fee ? spent : spent - fee)));
@@ -623,18 +641,11 @@ std::variant<CTransactionRef, std::string> BumpShieldedFeeWith(CWallet& wallet, 
     }
     if (recipients.empty()) return std::string{"It pays no one but the account's change"};
 
-    // The fee it paid, and the one now: at least what the mempool takes as a replacement (BIP 125
-    // rules 3 and 4, at the size of the old one: the new one has as many actions), and the wallet's fee rate.
+    // The fee it paid. The new one pays at least what the mempool takes as a replacement (BIP 125
+    // rules 3 and 4), at the size of the new transaction: larger than the old one if the fee takes
+    // more notes. By default, that or the wallet's fee rate, whichever is more.
     const CAmount old_fee{bundle->ValueBalance() - transparent_out};
-    const int64_t vsize{GetVirtualTransactionSize(tx)};
-    const CAmount lowest{old_fee + wallet.chain().relayIncrementalFee().GetFee(vsize)};
-    CAmount fee{std::max(lowest, GetMinimumFee(GetMinimumFeeRate(wallet, CCoinControl{}), vsize))};
-    if (new_fee) {
-        if (*new_fee < lowest) return strprintf("The new fee must be at least %s (the old fee, %s, and what a replacement adds)", FormatMoney(lowest), FormatMoney(old_fee));
-        fee = *new_fee;
-    }
-    if (!MoneyRange(fee) || fee > wallet.m_default_max_tx_fee) return strprintf("The fee of %s is more than the wallet pays (-maxtxfee)", FormatMoney(fee));
-    return SendShieldedWith(wallet, recipients, fee, /*subtract_fee=*/false, notes, txid);
+    return SendShieldedWith(wallet, recipients, new_fee, /*subtract_fee=*/false, notes, txid, old_fee);
 }
 } // namespace
 

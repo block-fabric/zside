@@ -133,6 +133,7 @@ class ZSideTest(SidechainTest):
         self.run_anchor_reorg_test()
         self.run_reorg_end_test()
         self.run_bump_test()
+        self.run_bump_size_test()
         self.run_conflict_test()
         self.run_rescan_test()
         self.run_meltcast_test()
@@ -250,6 +251,33 @@ class ZSideTest(SidechainTest):
         # The 0.01 shielded on the way came in.
         assert_equal(after["available"], before["available"] - Decimal("0.2") - fee + Decimal("0.01"))
         assert {"amount": Decimal("0.2"), "memo": "bumped"}.items() <= [n for n in other.listshieldednotes() if n["txid"] == bumped][0].items()
+        self.check_in_sync()
+
+    def run_bump_size_test(self):
+        side, other = self.nodes
+        self.log.info("A fee bump that takes more notes pays the replacement fee of its new size")
+        other.createwallet("bumper")
+        bumper = other.get_wallet_rpc("bumper")
+        # Three notes of 0.3.
+        side.sendshielded({bumper.getshieldedaddress(True): Decimal("0.3") for _ in range(3)})
+        self.mine_txs()
+        assert_equal(bumper.getshieldedbalance()["available"], Decimal("0.9"))
+        # Two of them, exactly: a high fee, no change.
+        txid = bumper.sendshielded({side.getshieldedaddress(): Decimal("0.599")}, None, Decimal("0.001"))["txid"]
+        assert_equal(other.getmempoolentry(txid)["fees"]["base"], Decimal("0.001"))
+        # The higher fee takes the third note: a bundle of three actions, larger than the old one.
+        res = bumper.bumpshieldedfee(txid)
+        bumped = res["txid"]
+        assert bumped in other.getrawmempool()
+        assert txid not in other.getrawmempool()
+        old_vsize = len(bumper.gettransaction(txid)["hex"]) // 2
+        entry = other.getmempoolentry(bumped)
+        assert_greater_than(entry["vsize"], old_vsize)
+        incremental = other.getmempoolinfo()["incrementalrelayfee"]
+        assert entry["fees"]["base"] >= res["origfee"] + incremental * entry["vsize"] / 1000
+        self.mine_txs()
+        assert_equal(bumper.gettransaction(bumped)["confirmations"], 1)
+        other.unloadwallet("bumper")
         self.check_in_sync()
 
     def run_conflict_test(self):
@@ -388,7 +416,8 @@ class ZSideTest(SidechainTest):
         assert_equal(sorted(j["amount"] for j in planned), [Decimal("0.01"), Decimal("0.04")])
         for job in planned:
             bill = int((job["amount"] / BILL_UNIT)).bit_length() - 1
-            assert_equal((job["height"] - bill * 7) % CAST_PERIOD, 0)
+            # In a window of its bill: at its start, or now if the tip is in one already.
+            assert_greater_than(WINDOW, (job["height"] - bill * 7) % CAST_PERIOD)
 
         self.log.info("The plan survives a restart")
         ids = [j["id"] for j in side.listmeltcast()]
