@@ -21,6 +21,7 @@
 
 #include <univalue.h>
 
+#include <algorithm>
 #include <system_error>
 
 using util::Join;
@@ -183,7 +184,13 @@ void StartWallets(WalletContext& context)
             while (context.meltcast_interrupt.sleep_for(10s)) {
                 for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) {
                     if (context.meltcast_interrupt) break;
-                    RunMeltCast(*pwallet);
+                    // Stopped between steps at shutdown, and once the wallet is unloaded (which waits
+                    // for this reference to go).
+                    RunMeltCast(*pwallet, [&context, &pwallet] {
+                        if (context.meltcast_interrupt) return true;
+                        const auto wallets{GetWallets(context)};
+                        return std::find(wallets.begin(), wallets.end(), pwallet) == wallets.end();
+                    });
                 }
             }
         });

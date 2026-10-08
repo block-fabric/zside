@@ -11,6 +11,7 @@
 #include <uint256.h>
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <variant>
@@ -93,8 +94,10 @@ bool CancelMeltCast(CWallet& wallet, uint64_t id);
  * Carry out what is due at the wallet's height. Returns how many transactions it made. Not with the
  * wallet's lock held, nor on the scheduler's thread (it waits for -orchardindex, and proves for
  * seconds): the wallets' melt/cast thread runs it (StartWallets).
+ * @param[in] interrupted  asked before each step: once it says so (shutdown, the wallet unloaded),
+ *                         the steps left wait for the next run
  */
-int RunMeltCast(CWallet& wallet);
+int RunMeltCast(CWallet& wallet, const std::function<bool()>& interrupted = {});
 /** What the plan still holds back of the shielded account: the bills not cast yet. */
 CAmount CastReserved(const CWallet& wallet);
 

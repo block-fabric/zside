@@ -174,7 +174,7 @@ bool CancelMeltCast(CWallet& wallet, uint64_t id)
     return true;
 }
 
-int RunMeltCast(CWallet& wallet)
+int RunMeltCast(CWallet& wallet, const std::function<bool()>& interrupted)
 {
     AssertLockNotHeld(wallet.cs_wallet);
     std::vector<uint64_t> due;
@@ -192,6 +192,8 @@ int RunMeltCast(CWallet& wallet)
 
     int made{0};
     for (const uint64_t id : due) {
+        // Each step proves for seconds: shutdown, or unloading the wallet, waits for one at most.
+        if (interrupted && interrupted()) break;
         // The job is read, and its result kept, under the wallet's lock; it is made without it: the
         // payment waits for -orchardindex, whose notifications may wait for that lock.
         MeltCastJob job;

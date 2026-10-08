@@ -32,6 +32,7 @@
 #include <validationinterface.h>
 #include <wallet/coincontrol.h>
 #include <wallet/context.h>
+#include <wallet/meltcast.h>
 #include <wallet/receive.h>
 #include <wallet/shielded.h>
 #include <wallet/spend.h>
@@ -980,6 +981,36 @@ BOOST_FIXTURE_TEST_CASE(shielded_commit_a_block_took, ListCoinsTestingSetup)
         BOOST_CHECK(!wtx->isAbandoned());
         for (const CTxIn& in : kept->vin) BOOST_CHECK(wallet->IsSpent(in.prevout));
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(meltcast_stops_between_steps, ListCoinsTestingSetup)
+{
+    // zSide: each step of a melt/cast plan proves for seconds; shutting down, or unloading the wallet,
+    // waits for the one under way at most, not for every step due.
+    AddTx(CRecipient{PKHash{coinbaseKey.GetPubKey()}, 10 * COIN, /*fSubtractFeeFromAmount=*/false});
+    const auto planned{ScheduleMelt(*wallet, /*spread=*/0)};
+    BOOST_REQUIRE(std::holds_alternative<std::vector<MeltCastJob>>(planned));
+    BOOST_REQUIRE_GE(std::get<std::vector<MeltCastJob>>(planned).size(), 2U);
+    // Due at the next block.
+    CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
+    int height;
+    {
+        LOCK2(wallet->cs_wallet, ::cs_main);
+        height = m_node.chainman->ActiveChain().Height();
+        wallet->SetLastBlockProcessed(height, m_node.chainman->ActiveChain().Tip()->GetBlockHash());
+    }
+    const auto tried{[&] {
+        LOCK(wallet->cs_wallet);
+        return std::count_if(wallet->m_shielded.jobs.begin(), wallet->m_shielded.jobs.end(), [&](const auto& j) { return j.second.tried == height; });
+    }};
+    // Interrupted from the start: no step is tried.
+    BOOST_CHECK_EQUAL(RunMeltCast(*wallet, [] { return true; }), 0);
+    BOOST_CHECK_EQUAL(tried(), 0);
+    // Interrupted after the first step: that one alone is tried (made, or failed: either way it went).
+    int asked{0};
+    RunMeltCast(*wallet, [&] { return ++asked > 1; });
+    BOOST_CHECK_EQUAL(asked, 2);
+    BOOST_CHECK_EQUAL(tried(), 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
