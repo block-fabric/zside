@@ -519,7 +519,8 @@ bool RecordIndependent(const std::string& reject_reason)
     static const std::set<std::string> independent{
         "bad-sc-withdrawal", "bad-sc-withdrawal-amount", "bad-sc-refund-signature", "bad-sc-bundle-multiple",
     };
-    return independent.contains(reject_reason);
+    // zSide: and the checks of a shielded transaction alone (zside/shielded.h).
+    return independent.contains(reject_reason) || zside::TxOnlyReason(reject_reason);
 }
 
 std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, bool shared)

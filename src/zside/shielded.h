@@ -116,6 +116,13 @@ uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uin
 [[nodiscard]] bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason, const std::optional<SighashDomain>& domain);
 
 /**
+ * Whether `reject_reason` is one of CheckShieldedTx's, which looks at the transaction alone (its
+ * marker, its bundle, the proof in the sighash domain of the block's height): a block that fails
+ * so fails whatever the record of the mainchain says (sidechain::RecordIndependent).
+ */
+bool TxOnlyReason(const std::string& reject_reason);
+
+/**
  * Verify the proofs and signatures of the bundles of several transactions (a block's) in one batch,
  * and remember them valid: CheckShieldedTx then finds them so. False if one is invalid; nothing is
  * remembered then, and CheckShieldedTx finds which, one by one.

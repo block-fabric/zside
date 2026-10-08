@@ -235,6 +235,18 @@ bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason, const s
     return true;
 }
 
+bool TxOnlyReason(const std::string& reject_reason)
+{
+    // Each is decided by the transaction and the height alone; none reads the record of the
+    // mainchain, nor the state (whose reasons -- anchor, double spend, tree full, pool -- are left
+    // to depend on it, as any other reason not listed).
+    static const std::set<std::string> reasons{
+        "bad-zs-markers", "bad-zs-bundle", "bad-zs-coinbase", "bad-zs-too-many-actions",
+        "bad-zs-value-balance", "bad-zs-marker-value", "bad-zs-proof",
+    };
+    return reasons.contains(reject_reason);
+}
+
 bool VerifyBundles(std::span<const CTransactionRef> txs, const std::optional<SighashDomain>& domain)
 {
     std::vector<Bundle> bundles;

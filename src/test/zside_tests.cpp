@@ -13,6 +13,7 @@
 #include <node/context.h>
 #include <primitives/transaction.h>
 #include <scheduler.h>
+#include <sidechain/state.h>
 #include <sidechain/store.h>
 #include <streams.h>
 #include <sync.h>
@@ -316,6 +317,25 @@ BOOST_AUTO_TEST_CASE(sighash_commits_to_the_chain)
     const CTransaction before{ShieldingTx(1000, std::nullopt)};
     BOOST_CHECK(CheckShieldedTx(before, reason, std::nullopt));
     BOOST_CHECK(!CheckShieldedTx(before, reason, domain));
+}
+
+BOOST_AUTO_TEST_CASE(tx_only_reasons_fail_whatever_the_record)
+{
+    // The checks of a shielded transaction alone fail a block whatever the mainchain did: no
+    // failure of the record (the follower would take it back, and look for a record that differs).
+    for (const char* reason : {"bad-zs-markers", "bad-zs-bundle", "bad-zs-coinbase", "bad-zs-too-many-actions",
+                               "bad-zs-value-balance", "bad-zs-marker-value", "bad-zs-proof"}) {
+        BOOST_CHECK(TxOnlyReason(reason));
+        BOOST_CHECK(sidechain::RecordIndependent(reason));
+    }
+    // Those of the state are left to depend on it, as any reason not listed.
+    for (const char* reason : {"bad-zs-anchor", "bad-zs-double-spend", "bad-zs-tree-full", "bad-zs-pool-negative", "bad-zs-other"}) {
+        BOOST_CHECK(!TxOnlyReason(reason));
+        BOOST_CHECK(!sidechain::RecordIndependent(reason));
+    }
+    // The template's own are still there.
+    BOOST_CHECK(sidechain::RecordIndependent("bad-sc-withdrawal"));
+    BOOST_CHECK(!sidechain::RecordIndependent("bad-sc-payout"));
 }
 
 BOOST_AUTO_TEST_CASE(bundles_of_a_block_in_one_batch)
