@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -81,6 +82,9 @@ struct ShieldedAccount {
     std::map<uint64_t, MeltCastJob> jobs;
     //! Set up after the wallet scanned blocks without it: the height to scan again from (kept in the database).
     std::optional<int> rescan_from;
+    //! The notes payments being proved spend (by nullifier), which the wallet's lock is not held for:
+    //! no other payment picks them meanwhile (not kept).
+    std::set<uint256> in_flight;
 };
 
 /** A spending key, in memory that is locked and wiped when freed. */
@@ -161,7 +165,10 @@ std::optional<size_t> MaxShieldedSpends(const std::vector<CTxOut>& transparent, 
  * @param[in] subtract_fee  take the fee out of the one transparent recipient's amount (unshielding all of it)
  * @return the transaction, or the error
  * Not with the wallet's lock held: it waits for -orchardindex to catch up first (but not on the
- * scheduler's thread, where it finds the notes in the index as it is).
+ * scheduler's thread, where it finds the notes in the index as it is). The notes are picked and the
+ * bundle built under the wallet's lock; it is proved without it (seconds), its notes and coins held
+ * back from other payments meanwhile; it is committed under the lock again if they are still unspent.
+ * So are ShieldCoins, ShieldCoin and BumpShieldedFee made.
  */
 std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fee = std::nullopt, bool subtract_fee = false);
 /**

@@ -7,12 +7,13 @@ conflicts, the account of a restored or locked wallet, melt/cast."""
 
 from decimal import Decimal
 import os
+import threading
 import time
 
 from feature_sidechain import ACTIVATION_PERIOD, SLOT, SidechainTest
 from test_framework.messages import tx_from_hex
-from test_framework.authproxy import JSONRPCException
-from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error
+from test_framework.authproxy import AuthServiceProxy, JSONRPCException
+from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error, get_auth_cookie, rpc_port
 
 # Melt/cast on regtest: a bill's window opens every CAST_PERIOD blocks, at (bill * 7) % CAST_PERIOD, for WINDOW blocks.
 CAST_PERIOD = 12
@@ -134,6 +135,7 @@ class ZSideTest(SidechainTest):
         self.run_reorg_end_test()
         self.run_bump_test()
         self.run_bump_size_test()
+        self.run_concurrent_test()
         self.run_conflict_test()
         self.run_rescan_test()
         self.run_meltcast_test()
@@ -278,6 +280,39 @@ class ZSideTest(SidechainTest):
         self.mine_txs()
         assert_equal(bumper.gettransaction(bumped)["confirmations"], 1)
         other.unloadwallet("bumper")
+        self.check_in_sync()
+
+    def run_concurrent_test(self):
+        side, other = self.nodes
+        self.log.info("Payments proved at the same time spend different notes, and the wallet answers meanwhile")
+        side.sendshielded({side.getshieldedaddress(True): Decimal("0.05") for _ in range(2)})
+        self.mine_txs()
+        user, password = get_auth_cookie(side.datadir_path, side.chain)
+        url = f"http://{user}:{password}@127.0.0.1:{rpc_port(side.index)}/wallet/{self.default_wallet_name}"
+        to = other.getshieldedaddress(True)
+        results = []
+
+        def pay():
+            # A connection of its own per thread.
+            try:
+                results.append(AuthServiceProxy(url, timeout=600).sendshielded({to: Decimal("0.04")})["txid"])
+            except JSONRPCException as e:
+                results.append(e.error["message"])
+
+        threads = [threading.Thread(target=pay) for _ in range(2)]
+        for t in threads:
+            t.start()
+        # The wallet's lock is not held while a bundle is proved: it answers in the meantime.
+        while any(t.is_alive() for t in threads):
+            side.getshieldedbalance()
+            time.sleep(0.05)
+        for t in threads:
+            t.join()
+        assert_equal(len(results), 2)
+        assert all(r in side.getrawmempool() for r in results), results
+        assert results[0] != results[1]
+        self.mine_txs()
+        assert all(side.gettransaction(r)["confirmations"] == 1 for r in results)
         self.check_in_sync()
 
     def run_conflict_test(self):

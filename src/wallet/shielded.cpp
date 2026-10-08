@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <set>
 
 namespace wallet {
@@ -356,35 +357,126 @@ std::optional<size_t> MaxShieldedSpends(const std::vector<CTxOut>& transparent, 
 }
 
 namespace {
-/** Prove and sign a built bundle for a transaction whose marker (at `marker_index`) is a placeholder of its size, and put it in. */
-std::optional<std::string> FinishBundle(const CWallet& wallet, CMutableTransaction& mtx, uint32_t marker_index, ZoUnsigned* unsigned_bundle)
+struct UnsignedFree {
+    void operator()(ZoUnsigned* bundle) const { zo_unsigned_free(bundle); }
+};
+using UnsignedBundle = std::unique_ptr<ZoUnsigned, UnsignedFree>;
+
+/**
+ * A payment out of, or into, the shielded account, made in three steps so that proving (seconds)
+ * holds no lock: under the wallet's lock the notes and coins are picked and reserved, and the bundle
+ * built (Prepare*); without it the bundle is proved and signed; under the lock again what it spends
+ * is checked still unspent, and it is committed (ProveAndCommit).
+ */
+struct PendingPayment {
+    CMutableTransaction mtx;
+    //! Its marker, a placeholder of the bundle's size until the bundle is proved.
+    uint32_t marker_index{0};
+    UnsignedBundle bundle;
+    uint256 sighash;
+    //! The notes it spends (by nullifier), reserved meanwhile (ShieldedAccount::in_flight).
+    std::vector<uint256> nullifiers;
+    //! The wallet's coins it spends; those it locked meanwhile (not those locked before).
+    std::vector<COutPoint> coins;
+    std::vector<COutPoint> locked;
+    //! Its transparent inputs sign once the bundle is in (they sign it too).
+    bool sign{false};
+    std::optional<Txid> replaces;
+};
+using Prepared = std::variant<PendingPayment, std::string>;
+
+/** The sighash the bundle of `p` signs; false if the bundle cannot commit to its effects. */
+bool SetSighash(const CWallet& wallet, PendingPayment& p) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     uint256 commitment;
-    if (zo_unsigned_commitment(unsigned_bundle, commitment.data()) != ZO_OK) {
-        zo_unsigned_free(unsigned_bundle);
-        return "Cannot commit to the bundle";
-    }
+    if (zo_unsigned_commitment(p.bundle.get(), commitment.data()) != ZO_OK) return false;
     // Signed for the next block of the node's chain (zside/shielded.h): the one the mempool checks it
     // for. The wallet may not have seen the node's tip yet, and the domain changes at audit2_height.
     const std::optional<int> tip{wallet.chain().getHeight()};
-    const int height{(tip ? *tip : WITH_LOCK(wallet.cs_wallet, return wallet.GetLastBlockHeight())) + 1};
-    const uint256 sighash{zside::ShieldedSighash(CTransaction{mtx}, marker_index, commitment, zside::SighashDomainAt(Params().GetConsensus(), height))};
-    uint8_t* encoded{nullptr};
-    size_t len{0};
-    const int result{zo_unsigned_finish(unsigned_bundle, sighash.data(), &encoded, &len)};
-    if (result != ZO_OK) return strprintf("Cannot prove and sign the bundle (error %d)", result);
-    mtx.vout[marker_index].scriptPubKey = zside::ShieldedMarkerScript(std::span{encoded, len});
-    zo_buffer_free(encoded, len);
-    return std::nullopt;
+    const int height{(tip ? *tip : wallet.GetLastBlockHeight()) + 1};
+    p.sighash = zside::ShieldedSighash(CTransaction{p.mtx}, p.marker_index, commitment, zside::SighashDomainAt(Params().GetConsensus(), height));
+    return true;
 }
 
-/** What a payment made under the wallet's lock comes to once the lock is released (RefusedCommit). */
+/** Hold what `p` spends from other payments while it is proved: its notes, and its coins (not locked yet). */
+void Reserve(CWallet& wallet, PendingPayment& p) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    for (const uint256& nf : p.nullifiers) wallet.m_shielded.in_flight.insert(nf);
+    for (const COutPoint& coin : p.coins) {
+        if (wallet.IsLockedCoin(coin)) continue;
+        wallet.LockCoin(coin, /*persist=*/false);
+        p.locked.push_back(coin);
+    }
+}
+
+/** Whether a transaction of the wallet may still be mined: not abandoned, nor conflicted. */
+bool Active(const CWallet& wallet, const Txid& txid) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    const CWalletTx* wtx{wallet.GetWalletTx(txid)};
+    if (!wtx || wtx->isAbandoned()) return false;
+    const int depth{wallet.GetTxDepthInMainChain(*wtx)};
+    return depth > 0 || (depth == 0 && !wtx->isMempoolConflicted());
+}
+
+/** Commit a proved payment, if what it spends is still unspent. Its reservations are released first. */
+std::variant<CTransactionRef, std::string> Commit(CWallet& wallet, PendingPayment& p, int proved) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    for (const uint256& nf : p.nullifiers) wallet.m_shielded.in_flight.erase(nf);
+    for (const COutPoint& coin : p.locked) wallet.UnlockCoin(coin);
+    if (proved != ZO_OK) return strprintf("Cannot prove and sign the bundle (error %d)", proved);
+    // While it was proved, the wallet may have taken in a block or a transaction that spends the same:
+    // a payment made meanwhile without the wallet's reservations (another wallet with the same keys,
+    // or the one it replaces mined).
+    if (p.replaces) {
+        const CWalletTx* old{wallet.GetWalletTx(*p.replaces)};
+        if (!old || old->m_replaced_by_txid || old->isAbandoned() || wallet.GetTxDepthInMainChain(*old) != 0 || old->isMempoolConflicted()) {
+            return std::string{"The transaction it replaces is no longer waiting for a block"};
+        }
+    }
+    for (const uint256& nf : p.nullifiers) {
+        const auto range{wallet.m_shielded.spends.equal_range(nf)};
+        for (auto it{range.first}; it != range.second; ++it) {
+            if (it->second != p.replaces && Active(wallet, it->second)) return std::string{"A note it spends was spent meanwhile (try again)"};
+        }
+    }
+    for (const COutPoint& coin : p.coins) {
+        if (wallet.IsSpent(coin)) return std::string{"A coin it spends was spent meanwhile (try again)"};
+    }
+    // The transparent inputs sign last, the bundle included.
+    if (p.sign && !wallet.SignTransaction(p.mtx)) return std::string{"Cannot sign the transaction (is the wallet unlocked?)"};
+    const CTransactionRef tx{MakeTransactionRef(std::move(p.mtx))};
+    wallet.CommitTransaction(tx, p.replaces);
+    return tx;
+}
+
+/** What a payment committed under the wallet's lock comes to once the lock is released (RefusedCommit). */
 std::variant<CTransactionRef, std::string> Settle(CWallet& wallet, std::variant<CTransactionRef, std::string> result) EXCLUSIVE_LOCKS_REQUIRED(!wallet.cs_wallet)
 {
     if (const auto* tx{std::get_if<CTransactionRef>(&result)}) {
         if (auto error{RefusedCommit(wallet, *tx)}) return std::move(*error);
     }
     return result;
+}
+
+/** Prove and sign a prepared payment without the wallet's lock, then commit it under the lock (and Settle). */
+std::variant<CTransactionRef, std::string> ProveAndCommit(CWallet& wallet, Prepared prepared) EXCLUSIVE_LOCKS_REQUIRED(!wallet.cs_wallet)
+{
+    if (auto* error{std::get_if<std::string>(&prepared)}) return std::move(*error);
+    PendingPayment& p{std::get<PendingPayment>(prepared)};
+    uint8_t* encoded{nullptr};
+    size_t len{0};
+    // Consumes the bundle, proved or not.
+    const int proved{zo_unsigned_finish(p.bundle.release(), p.sighash.data(), &encoded, &len)};
+    if (proved == ZO_OK) {
+        p.mtx.vout[p.marker_index].scriptPubKey = zside::ShieldedMarkerScript(std::span{encoded, len});
+        zo_buffer_free(encoded, len);
+    }
+    std::variant<CTransactionRef, std::string> result;
+    {
+        LOCK(wallet.cs_wallet);
+        result = Commit(wallet, p, proved);
+    }
+    return Settle(wallet, std::move(result));
 }
 } // namespace
 
@@ -407,8 +499,8 @@ namespace {
  * @param[in] replaced_fee  the fee of the transaction it replaces: it pays that, and the incremental
  *                          relay fee of its own size (BIP 125 rules 3 and 4), at least
  */
-std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fixed_fee, bool subtract_fee,
-                                                           const std::set<uint256>& spend_first, std::optional<Txid> replaces, std::optional<CAmount> replaced_fee = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+Prepared PrepareSend(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fixed_fee, bool subtract_fee,
+                     const std::set<uint256>& spend_first, std::optional<Txid> replaces, std::optional<CAmount> replaced_fee = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
@@ -443,17 +535,19 @@ std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, con
 
     // The notes to spend: those it must first; then in blocks, not spent, those deep enough to be
     // spent at an anchor a reorg of the last blocks leaves (ANCHOR_CONFIRMATIONS) first, largest first,
-    // until they pay for it all and the fee.
+    // until they pay for it all and the fee. Notes a payment being proved spends are left to it.
     struct Candidate {
         const ShieldedNote* note;
         int confirmations;
     };
     std::vector<Candidate> available, spends;
     for (const NoteStatus& s : ShieldedNotes(wallet)) {
+        const bool in_flight{wallet.m_shielded.in_flight.contains(s.note->nullifier)};
         if (spend_first.contains(s.note->nullifier)) {
             if (s.confirmations <= 0) return std::string{"A note it spends is not in a block"};
+            if (in_flight) return std::string{"Another payment that spends its notes is being made"};
             spends.push_back({s.note, s.confirmations});
-        } else if (!s.spent_by && s.confirmations > 0 && s.note->value > 0) {
+        } else if (!s.spent_by && !in_flight && s.confirmations > 0 && s.note->value > 0) {
             available.push_back({s.note, s.confirmations});
         }
     }
@@ -513,6 +607,9 @@ std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, con
         if (balance.pending > 0 && balance.available < needed(fee)) {
             return strprintf("Not enough shielded funds in blocks yet: %s available, %s waiting for a block; %s needed with the fee", FormatMoney(balance.available), FormatMoney(balance.pending), FormatMoney(needed(fee)));
         }
+        if (!wallet.m_shielded.in_flight.empty()) {
+            return strprintf("Not enough shielded funds: %s available, part of it held by a payment being made; %s needed with the fee", FormatMoney(balance.available), FormatMoney(needed(fee)));
+        }
         return strprintf("Not enough shielded funds: %s available, %s needed with the fee", FormatMoney(balance.available), FormatMoney(needed(fee)));
     }
     if (subtract_fee) {
@@ -558,26 +655,24 @@ std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, con
             return std::string{"Cannot make the change"};
         }
     }
-    ZoUnsigned* unsigned_bundle{zo_builder_build(builder)};
-    if (!unsigned_bundle) return std::string{"Cannot build the bundle"};
+    PendingPayment p;
+    p.bundle.reset(zo_builder_build(builder));
+    if (!p.bundle) return std::string{"Cannot build the bundle"};
     // What comes out of the pool pays the transparent outputs and the fee, exactly.
-    const CAmount out_of_pool{zo_unsigned_value_balance(unsigned_bundle)};
+    const CAmount out_of_pool{zo_unsigned_value_balance(p.bundle.get())};
     CAmount transparent_out{0};
     for (const CTxOut& out : transparent) transparent_out += out.nValue;
-    if (out_of_pool != transparent_out + fee) {
-        zo_unsigned_free(unsigned_bundle);
-        return std::string{"The bundle does not balance"};
-    }
+    if (out_of_pool != transparent_out + fee) return std::string{"The bundle does not balance"};
 
-    CMutableTransaction mtx;
-    mtx.version = CTransaction::CURRENT_VERSION;
-    mtx.vout = transparent;
-    mtx.vout.emplace_back(0, PlaceholderMarker(BundleSize(zo_unsigned_num_actions(unsigned_bundle))));
-    if (const auto error{FinishBundle(wallet, mtx, mtx.vout.size() - 1, unsigned_bundle)}) return *error;
-    const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
-    // Whether the mempool took it is checked once the lock is released (Settle).
-    wallet.CommitTransaction(tx, replaces);
-    return tx;
+    p.mtx.version = CTransaction::CURRENT_VERSION;
+    p.mtx.vout = transparent;
+    p.mtx.vout.emplace_back(0, PlaceholderMarker(BundleSize(zo_unsigned_num_actions(p.bundle.get()))));
+    p.marker_index = p.mtx.vout.size() - 1;
+    if (!SetSighash(wallet, p)) return std::string{"Cannot commit to the bundle"};
+    for (const Candidate& c : spends) p.nullifiers.push_back(c.note->nullifier);
+    p.replaces = replaces;
+    Reserve(wallet, p);
+    return p;
 }
 } // namespace
 
@@ -587,16 +682,12 @@ std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const s
     // may wait for that lock (getOrchardWitnesses does not wait, under it).
     AssertLockNotHeld(wallet.cs_wallet);
     wallet.chain().waitForOrchardIndex();
-    std::variant<CTransactionRef, std::string> result;
-    {
-        LOCK(wallet.cs_wallet);
-        result = SendShieldedWith(wallet, recipients, fixed_fee, subtract_fee, /*spend_first=*/{}, /*replaces=*/std::nullopt);
-    }
-    return Settle(wallet, std::move(result));
+    Prepared prepared{WITH_LOCK(wallet.cs_wallet, return PrepareSend(wallet, recipients, fixed_fee, subtract_fee, /*spend_first=*/{}, /*replaces=*/std::nullopt))};
+    return ProveAndCommit(wallet, std::move(prepared));
 }
 
 namespace {
-std::variant<CTransactionRef, std::string> BumpShieldedFeeWith(CWallet& wallet, const Txid& txid, std::optional<CAmount> new_fee) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+Prepared PrepareBump(CWallet& wallet, const Txid& txid, std::optional<CAmount> new_fee) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
@@ -645,7 +736,7 @@ std::variant<CTransactionRef, std::string> BumpShieldedFeeWith(CWallet& wallet, 
     // rules 3 and 4), at the size of the new transaction: larger than the old one if the fee takes
     // more notes. By default, that or the wallet's fee rate, whichever is more.
     const CAmount old_fee{bundle->ValueBalance() - transparent_out};
-    return SendShieldedWith(wallet, recipients, new_fee, /*subtract_fee=*/false, notes, txid, old_fee);
+    return PrepareSend(wallet, recipients, new_fee, /*subtract_fee=*/false, notes, txid, old_fee);
 }
 } // namespace
 
@@ -653,12 +744,8 @@ std::variant<CTransactionRef, std::string> BumpShieldedFee(CWallet& wallet, cons
 {
     AssertLockNotHeld(wallet.cs_wallet);
     wallet.chain().waitForOrchardIndex();
-    std::variant<CTransactionRef, std::string> result;
-    {
-        LOCK(wallet.cs_wallet);
-        result = BumpShieldedFeeWith(wallet, txid, new_fee);
-    }
-    result = Settle(wallet, std::move(result));
+    Prepared prepared{WITH_LOCK(wallet.cs_wallet, return PrepareBump(wallet, txid, new_fee))};
+    auto result{ProveAndCommit(wallet, std::move(prepared))};
     // Replaced once the new one went (to the mempool, or a block): one refused replaces nothing.
     if (const auto* bumped{std::get_if<CTransactionRef>(&result)}) {
         LOCK(wallet.cs_wallet);
@@ -668,7 +755,7 @@ std::variant<CTransactionRef, std::string> BumpShieldedFee(CWallet& wallet, cons
 }
 
 namespace {
-std::variant<CTransactionRef, std::string> ShieldCoinsWith(CWallet& wallet, CAmount amount, const OrchardAddress& to, const OrchardMemo& memo) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+Prepared PrepareShieldCoins(CWallet& wallet, CAmount amount, const OrchardAddress& to, const OrchardMemo& memo) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
@@ -681,34 +768,28 @@ std::variant<CTransactionRef, std::string> ShieldCoinsWith(CWallet& wallet, CAmo
         zo_builder_free(builder);
         return std::string{"Cannot pay the shielded address"};
     }
-    ZoUnsigned* unsigned_bundle{zo_builder_build(builder)};
-    if (!unsigned_bundle) return std::string{"Cannot build the bundle"};
+    PendingPayment p;
+    p.bundle.reset(zo_builder_build(builder));
+    if (!p.bundle) return std::string{"Cannot build the bundle"};
 
     // The wallet funds the marker, which carries what goes into the pool, like any payment; the
-    // placeholder has the size of the bundle, so the fee is right.
-    const CScript placeholder{PlaceholderMarker(BundleSize(zo_unsigned_num_actions(unsigned_bundle)))};
+    // placeholder has the size of the bundle, so the fee is right. Coins a payment being proved
+    // spends are locked meanwhile: not picked again.
+    const CScript placeholder{PlaceholderMarker(BundleSize(zo_unsigned_num_actions(p.bundle.get())))};
     CCoinControl coin_control;
     auto created{CreateTransaction(wallet, {{CNoDestination{placeholder}, amount, /*fSubtractFeeFromAmount=*/false}}, /*change_pos=*/std::nullopt, coin_control, /*sign=*/false)};
-    if (!created) {
-        zo_unsigned_free(unsigned_bundle);
-        return util::ErrorString(created).original;
-    }
-    CMutableTransaction mtx{*created->tx};
-    uint32_t marker_index{0};
-    while (marker_index < mtx.vout.size() && mtx.vout[marker_index].scriptPubKey != placeholder) ++marker_index;
-    if (marker_index == mtx.vout.size()) {
-        zo_unsigned_free(unsigned_bundle);
-        return std::string{"The marker went missing"};
-    }
-    if (const auto error{FinishBundle(wallet, mtx, marker_index, unsigned_bundle)}) return *error;
-    // The transparent inputs sign last, the bundle included.
-    if (!wallet.SignTransaction(mtx)) return std::string{"Cannot sign the transaction (is the wallet unlocked?)"};
-    const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
-    wallet.CommitTransaction(tx);
-    return tx;
+    if (!created) return util::ErrorString(created).original;
+    p.mtx = CMutableTransaction{*created->tx};
+    while (p.marker_index < p.mtx.vout.size() && p.mtx.vout[p.marker_index].scriptPubKey != placeholder) ++p.marker_index;
+    if (p.marker_index == p.mtx.vout.size()) return std::string{"The marker went missing"};
+    if (!SetSighash(wallet, p)) return std::string{"Cannot commit to the bundle"};
+    for (const CTxIn& in : p.mtx.vin) p.coins.push_back(in.prevout);
+    p.sign = true;
+    Reserve(wallet, p);
+    return p;
 }
 
-std::variant<CTransactionRef, std::string> ShieldCoinWith(CWallet& wallet, const COutPoint& coin, const OrchardAddress& to) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+Prepared PrepareShieldCoin(CWallet& wallet, const COutPoint& coin, const OrchardAddress& to) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
     if (wallet.IsLocked()) return std::string{"The wallet is locked"};
@@ -730,9 +811,10 @@ std::variant<CTransactionRef, std::string> ShieldCoinWith(CWallet& wallet, const
     auto created{CreateTransaction(wallet, {{CNoDestination{placeholder}, value, /*fSubtractFeeFromAmount=*/true}}, /*change_pos=*/std::nullopt, coin_control, /*sign=*/false)};
     if (was_locked) wallet.LockCoin(coin, /*persist=*/true);
     if (!created) return util::ErrorString(created).original;
-    CMutableTransaction mtx{*created->tx};
-    if (mtx.vin.size() != 1 || mtx.vout.size() != 1 || mtx.vout[0].scriptPubKey != placeholder) return std::string{"The coin cannot be shielded alone (too small to pay its fee?)"};
-    const CAmount into_pool{mtx.vout[0].nValue};
+    PendingPayment p;
+    p.mtx = CMutableTransaction{*created->tx};
+    if (p.mtx.vin.size() != 1 || p.mtx.vout.size() != 1 || p.mtx.vout[0].scriptPubKey != placeholder) return std::string{"The coin cannot be shielded alone (too small to pay its fee?)"};
+    const CAmount into_pool{p.mtx.vout[0].nValue};
 
     const uint256 empty{zside::EmptyRoot(zside::TREE_DEPTH)};
     ZoBuilder* builder{zo_builder_new(empty.data())};
@@ -741,36 +823,29 @@ std::variant<CTransactionRef, std::string> ShieldCoinWith(CWallet& wallet, const
         zo_builder_free(builder);
         return std::string{"Cannot pay the shielded address"};
     }
-    ZoUnsigned* unsigned_bundle{zo_builder_build(builder)};
-    if (!unsigned_bundle) return std::string{"Cannot build the bundle"};
-    if (const auto error{FinishBundle(wallet, mtx, 0, unsigned_bundle)}) return *error;
-    if (!wallet.SignTransaction(mtx)) return std::string{"Cannot sign the transaction (is the wallet unlocked?)"};
-    const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
-    wallet.CommitTransaction(tx);
-    return tx;
+    p.bundle.reset(zo_builder_build(builder));
+    if (!p.bundle) return std::string{"Cannot build the bundle"};
+    p.marker_index = 0;
+    if (!SetSighash(wallet, p)) return std::string{"Cannot commit to the bundle"};
+    p.coins.push_back(coin);
+    p.sign = true;
+    Reserve(wallet, p);
+    return p;
 }
 } // namespace
 
 std::variant<CTransactionRef, std::string> ShieldCoins(CWallet& wallet, CAmount amount, const OrchardAddress& to, const OrchardMemo& memo)
 {
     AssertLockNotHeld(wallet.cs_wallet);
-    std::variant<CTransactionRef, std::string> result;
-    {
-        LOCK(wallet.cs_wallet);
-        result = ShieldCoinsWith(wallet, amount, to, memo);
-    }
-    return Settle(wallet, std::move(result));
+    Prepared prepared{WITH_LOCK(wallet.cs_wallet, return PrepareShieldCoins(wallet, amount, to, memo))};
+    return ProveAndCommit(wallet, std::move(prepared));
 }
 
 std::variant<CTransactionRef, std::string> ShieldCoin(CWallet& wallet, const COutPoint& coin, const OrchardAddress& to)
 {
     AssertLockNotHeld(wallet.cs_wallet);
-    std::variant<CTransactionRef, std::string> result;
-    {
-        LOCK(wallet.cs_wallet);
-        result = ShieldCoinWith(wallet, coin, to);
-    }
-    return Settle(wallet, std::move(result));
+    Prepared prepared{WITH_LOCK(wallet.cs_wallet, return PrepareShieldCoin(wallet, coin, to))};
+    return ProveAndCommit(wallet, std::move(prepared));
 }
 
 } // namespace wallet
