@@ -348,12 +348,12 @@ public:
         consensus.sidechain.single_bundle_height = 2300;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
         consensus.sidechain.main_activation_height = 4900;
-        consensus.sidechain.audit2_height = 3419; // audit 2 rules on the test network: moved out while the third audit's fixes are made
+        consensus.sidechain.audit2_height = 1830; // audits 2 and 3 on the test network, 300 blocks after the deploy
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
-        consensus.sidechain.zside.audit2_height = 3419; // audit 2 rules on the test network: moved out while the third audit's fixes are made
+        consensus.sidechain.zside.audit2_height = 1830; // audits 2 and 3 on the test network, 300 blocks after the deploy
     }
 };
 
