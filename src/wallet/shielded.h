@@ -7,6 +7,7 @@
 
 #include <consensus/amount.h>
 #include <primitives/transaction.h>
+#include <support/allocators/secure.h>
 #include <uint256.h>
 #include <wallet/meltcast.h>
 #include <zside/orchard.h>
@@ -80,6 +81,9 @@ struct ShieldedAccount {
     std::optional<int> rescan_from;
 };
 
+/** A spending key, in memory that is locked and wiped when freed. */
+using ShieldedKey = std::vector<uint8_t, secure_allocator<uint8_t>>;
+
 /** Notes are spent at the tree of the block with this many confirmations, or of the newest of their own blocks:
  *  a spend is not undone by a reorg of the blocks above it. */
 inline constexpr int ANCHOR_CONFIRMATIONS{3};
@@ -93,7 +97,7 @@ std::string MemoText(const OrchardMemo& memo);
 std::optional<OrchardMemo> MemoFromText(const std::string& text);
 
 /** The spending key of the wallet's shielded account: nullopt if the wallet is locked or has no private keys. */
-std::optional<std::array<uint8_t, 32>> ShieldedSpendingKey(const CWallet& wallet);
+std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet);
 /**
  * Make the viewing key known (from the spending key) and keep it, if it is not yet. If the wallet
  * scanned blocks already, it notes they are to be scanned again (ShieldedRescan).

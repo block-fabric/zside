@@ -11,6 +11,7 @@
 #include <hash.h>
 #include <key_io.h>
 #include <policy/policy.h>
+#include <support/cleanse.h>
 #include <util/check.h>
 #include <util/moneystr.h>
 #include <util/strencodings.h>
@@ -105,30 +106,40 @@ std::optional<OrchardMemo> MemoFromText(const std::string& text)
     return memo;
 }
 
-std::optional<std::array<uint8_t, 32>> ShieldedSpendingKey(const CWallet& wallet)
+std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet)
 {
     const auto* spkm{dynamic_cast<const DescriptorScriptPubKeyMan*>(wallet.GetScriptPubKeyMan(OutputType::BECH32, /*internal=*/false))};
     if (!spkm) return std::nullopt;
+    // The descriptor with its private keys, and all made of it, wiped once read.
+    const auto wipe{[](std::string& text) { memory_cleanse(text.data(), text.size()); }};
     std::string descriptor;
-    if (!spkm->GetDescriptorString(descriptor, /*priv=*/true)) return std::nullopt;
-    // The first extended private key of the descriptor (the account key, which is restored with it).
-    for (const std::string prefix : {"xprv", "tprv"}) {
-        const size_t at{descriptor.find(prefix)};
-        if (at == std::string::npos) continue;
-        size_t end{at};
-        while (end < descriptor.size() && std::string_view{"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"}.find(descriptor[end]) != std::string_view::npos) ++end;
-        const CExtKey extkey{DecodeExtKey(descriptor.substr(at, end - at))};
-        if (!extkey.key.IsValid()) return std::nullopt;
-        unsigned char code[BIP32_EXTKEY_SIZE];
-        extkey.Encode(code);
-        HashWriter seed{TaggedHash("zSide/Orchard seed")};
-        seed.write(std::as_bytes(std::span{code}));
-        const uint256 seed_hash{seed.GetSHA256()};
-        std::array<uint8_t, 32> sk;
-        if (zo_spending_key_from_seed(seed_hash.data(), 32, COIN_TYPE, 0, sk.data()) != ZO_OK) return std::nullopt;
-        return sk;
+    std::optional<ShieldedKey> out;
+    if (spkm->GetDescriptorString(descriptor, /*priv=*/true)) {
+        // The first extended private key of the descriptor (the account key, which is restored with it).
+        for (const std::string prefix : {"xprv", "tprv"}) {
+            const size_t at{descriptor.find(prefix)};
+            if (at == std::string::npos) continue;
+            size_t end{at};
+            while (end < descriptor.size() && std::string_view{"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"}.find(descriptor[end]) != std::string_view::npos) ++end;
+            std::string encoded{descriptor.substr(at, end - at)};
+            const CExtKey extkey{DecodeExtKey(encoded)};
+            wipe(encoded);
+            if (!extkey.key.IsValid()) break;
+            std::array<unsigned char, BIP32_EXTKEY_SIZE> code;
+            extkey.Encode(code.data());
+            HashWriter seed{TaggedHash("zSide/Orchard seed")};
+            seed.write(std::as_bytes(std::span{code}));
+            memory_cleanse(code.data(), code.size());
+            uint256 seed_hash{seed.GetSHA256()};
+            ShieldedKey sk(32);
+            const int result{zo_spending_key_from_seed(seed_hash.data(), 32, COIN_TYPE, 0, sk.data())};
+            memory_cleanse(seed_hash.data(), seed_hash.size());
+            if (result == ZO_OK) out = std::move(sk);
+            break;
+        }
     }
-    return std::nullopt;
+    wipe(descriptor);
+    return out;
 }
 
 bool SetupShieldedAccount(CWallet& wallet)
@@ -367,7 +378,9 @@ std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, con
     // The key comes from the wallet's active descriptor: if another was made active since the account
     // was set up, it is not the account's key, and could spend none of its notes.
     OrchardFvk derived;
-    if (zo_full_viewing_key(sk->data(), derived.data()) != ZO_OK || derived != *wallet.m_shielded.fvk) {
+    const bool same{zo_full_viewing_key(sk->data(), derived.data()) == ZO_OK && derived == *wallet.m_shielded.fvk};
+    memory_cleanse(derived.data(), derived.size());
+    if (!same) {
         return std::string{"The active descriptor of the wallet is not the one the shielded account was made from: make that one active again to spend the account's notes"};
     }
 
