@@ -240,12 +240,14 @@ void ShieldedTxAdded(CWallet& wallet, const CWalletTx& wtx)
     for (uint32_t i{0}; i < bundle->NumActions(); ++i) {
         ShieldedNote note;
         if (zo_bundle_decrypt(bundle->get(), i, fvk, note.note.data(), note.memo.data(), &note.internal)) {
-            note.txid = txid;
-            note.action = i;
             note.value = static_cast<CAmount>(zo_note_value(note.note.data()));
             zo_note_nullifier(note.note.data(), fvk, note.nullifier.data());
             zo_bundle_cmx(bundle->get(), i, note.cmx.data());
-            account.notes.emplace(note.nullifier, note);
+            // The same note in another transaction (its bundle again): one note, carried by both.
+            const uint256 nullifier{note.nullifier};
+            auto& carriers{account.notes.try_emplace(nullifier, std::move(note)).first->second.carriers};
+            const std::pair<Txid, uint32_t> carrier{txid, i};
+            if (std::find(carriers.begin(), carriers.end(), carrier) == carriers.end()) carriers.push_back(carrier);
         }
         // What the wallet paid, to others or itself (recovered with its outgoing key).
         ShieldedPayment payment;
@@ -286,14 +288,23 @@ std::vector<NoteStatus> ShieldedNotes(const CWallet& wallet)
     AssertLockHeld(wallet.cs_wallet);
     std::vector<NoteStatus> out;
     for (const auto& [nf, note] : wallet.m_shielded.notes) {
-        const auto it{wallet.mapWallet.find(note.txid)};
-        if (it == wallet.mapWallet.end()) continue;
-        NoteStatus status;
+        // A transaction that was abandoned, or lost to a conflict (in a block, or replaced in the
+        // mempool), does not carry it: another one may (the one a block took).
+        std::optional<NoteStatus> best;
+        for (const auto& [txid, action] : note.carriers) {
+            const auto it{wallet.mapWallet.find(txid)};
+            if (it == wallet.mapWallet.end() || it->second.isAbandoned()) continue;
+            const int depth{wallet.GetTxDepthInMainChain(it->second)};
+            if (depth < 0 || (depth == 0 && it->second.isMempoolConflicted())) continue;
+            if (best && best->confirmations >= depth) continue;
+            best.emplace();
+            best->txid = txid;
+            best->action = action;
+            best->confirmations = depth;
+        }
+        if (!best) continue;
+        NoteStatus status{*best};
         status.note = &note;
-        status.confirmations = wallet.GetTxDepthInMainChain(it->second);
-        // A note whose transaction was abandoned, or lost to a conflict (in a block, or replaced in the
-        // mempool), is not there.
-        if (it->second.isAbandoned() || status.confirmations < 0 || (status.confirmations == 0 && it->second.isMempoolConflicted())) continue;
         const auto range{wallet.m_shielded.spends.equal_range(nf)};
         for (auto spend{range.first}; spend != range.second; ++spend) {
             const auto stx{wallet.mapWallet.find(spend->second)};

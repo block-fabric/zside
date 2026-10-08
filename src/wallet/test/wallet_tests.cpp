@@ -38,6 +38,8 @@
 #include <wallet/spend.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
+#include <zside/shielded.h>
+#include <zside/orchard.h>
 
 #include <boost/test/unit_test.hpp>
 #include <univalue.h>
@@ -981,6 +983,107 @@ BOOST_FIXTURE_TEST_CASE(shielded_commit_a_block_took, ListCoinsTestingSetup)
         BOOST_CHECK(!wtx->isAbandoned());
         for (const CTxIn& in : kept->vin) BOOST_CHECK(wallet->IsSpent(in.prevout));
     }
+}
+
+/** zSide: a viewing key and the default address of a spending key made of `seed_byte`. */
+static std::pair<OrchardFvk, OrchardAddress> ShieldedKeyOf(uint8_t seed_byte)
+{
+    std::array<uint8_t, 32> seed{};
+    seed.fill(seed_byte);
+    std::array<uint8_t, 32> sk;
+    BOOST_REQUIRE_EQUAL(zo_spending_key_from_seed(seed.data(), seed.size(), 1, 0, sk.data()), ZO_OK);
+    OrchardFvk fvk;
+    OrchardAddress address;
+    BOOST_REQUIRE_EQUAL(zo_full_viewing_key(sk.data(), fvk.data()), ZO_OK);
+    BOOST_REQUIRE_EQUAL(zo_address(fvk.data(), 0, false, address.data()), ZO_OK);
+    return {fvk, address};
+}
+
+/** zSide: a transaction that pays `value` into the pool to `address` (a bundle of two actions, proved), with one transparent input. */
+static CMutableTransaction ShieldingTxTo(const OrchardFvk& ovk, const OrchardAddress& address, CAmount value)
+{
+    const uint256 empty{zside::EmptyRoot(zside::TREE_DEPTH)};
+    ZoBuilder* builder{zo_builder_new(empty.data())};
+    BOOST_REQUIRE(builder);
+    BOOST_REQUIRE_EQUAL(zo_builder_add_output(builder, ovk.data(), address.data(), static_cast<uint64_t>(value), MemoFromText("")->data()), ZO_OK);
+    ZoUnsigned* unsigned_bundle{zo_builder_build(builder)};
+    BOOST_REQUIRE(unsigned_bundle);
+    CMutableTransaction mtx;
+    mtx.version = 2;
+    mtx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 0});
+    mtx.vout.emplace_back(value, zside::ShieldedMarkerScript(std::vector<uint8_t>(BundleSize(zo_unsigned_num_actions(unsigned_bundle)), 0)));
+    uint256 commitment;
+    BOOST_REQUIRE_EQUAL(zo_unsigned_commitment(unsigned_bundle, commitment.data()), ZO_OK);
+    const uint256 sighash{zside::ShieldedSighash(CTransaction{mtx}, 0, commitment, std::nullopt)};
+    uint8_t* bytes{nullptr};
+    size_t len{0};
+    BOOST_REQUIRE_EQUAL(zo_unsigned_finish(unsigned_bundle, sighash.data(), &bytes, &len), ZO_OK);
+    mtx.vout[0].scriptPubKey = zside::ShieldedMarkerScript(std::span{bytes, len});
+    zo_buffer_free(bytes, len);
+    return mtx;
+}
+
+BOOST_FIXTURE_TEST_CASE(shielded_note_carried_by_another_tx, TestChain100Setup)
+{
+    // zSide: the bundle of a transaction can go out in another one: proved again by its sender, or its
+    // transparent signatures malleated (the bundle does not sign them). The note is the same; the
+    // wallet keeps it while any transaction that carries it is not abandoned nor conflicted -- the
+    // one mined, typically, not the one it saw first.
+    CWallet wallet{m_node.chain.get(), "", CreateMockableWalletDatabase()};
+    const auto [fvk, address]{ShieldedKeyOf(3)};
+    int height;
+    uint256 tip;
+    {
+        LOCK2(wallet.cs_wallet, ::cs_main);
+        height = m_node.chainman->ActiveChain().Height();
+        tip = m_node.chainman->ActiveChain().Tip()->GetBlockHash();
+        wallet.SetLastBlockProcessed(height, tip);
+        wallet.m_shielded.fvk = fvk;
+    }
+    const CMutableTransaction seen{ShieldingTxTo(fvk, address, 5 * COIN)};
+    CMutableTransaction malleated{seen};
+    malleated.vin[0].scriptSig = CScript() << OP_TRUE;
+    const CTransactionRef first{MakeTransactionRef(seen)};
+    const CTransactionRef mined{MakeTransactionRef(malleated)};
+    BOOST_REQUIRE(first->GetHash() != mined->GetHash());
+
+    LOCK(wallet.cs_wallet);
+    BOOST_REQUIRE(wallet.AddToWallet(first, TxStateInMempool{}));
+    {
+        const auto notes{ShieldedNotes(wallet)};
+        BOOST_REQUIRE_EQUAL(notes.size(), 1U);
+        BOOST_CHECK(notes[0].txid == first->GetHash());
+        BOOST_CHECK_EQUAL(GetShieldedBalance(wallet).pending, 5 * COIN);
+    }
+    // The other is mined; the first conflicts with it (it spends the same coin).
+    BOOST_REQUIRE(wallet.AddToWallet(mined, TxStateConfirmed{tip, height, /*index=*/1}));
+    wallet.mapWallet.at(first->GetHash()).m_state = TxStateBlockConflicted{tip, height};
+    const auto check_mined{[&] {
+        const auto notes{ShieldedNotes(wallet)};
+        BOOST_REQUIRE_EQUAL(notes.size(), 1U);
+        BOOST_CHECK(notes[0].txid == mined->GetHash());
+        BOOST_CHECK_EQUAL(notes[0].confirmations, 1);
+        BOOST_CHECK(!notes[0].spent_by);
+        const ShieldedBalance balance{GetShieldedBalance(wallet)};
+        BOOST_CHECK_EQUAL(balance.available, 5 * COIN);
+        BOOST_CHECK_EQUAL(balance.pending, 0);
+        BOOST_CHECK_EQUAL(balance.notes, 1);
+    }};
+    check_mined();
+
+    // Taken in again, in any order and more than once (a rescan, a load): the same.
+    wallet.m_shielded.notes.clear();
+    ShieldedTxAdded(wallet, wallet.mapWallet.at(mined->GetHash()));
+    ShieldedTxAdded(wallet, wallet.mapWallet.at(first->GetHash()));
+    ShieldedTxAdded(wallet, wallet.mapWallet.at(mined->GetHash()));
+    BOOST_REQUIRE_EQUAL(wallet.m_shielded.notes.size(), 1U);
+    BOOST_CHECK_EQUAL(wallet.m_shielded.notes.begin()->second.carriers.size(), 2U);
+    check_mined();
+
+    // Neither carries it any more: gone.
+    wallet.mapWallet.at(mined->GetHash()).m_state = TxStateInactive{/*abandoned=*/true};
+    BOOST_CHECK(ShieldedNotes(wallet).empty());
+    BOOST_CHECK_EQUAL(GetShieldedBalance(wallet).notes, 0);
 }
 
 BOOST_FIXTURE_TEST_CASE(meltcast_stops_between_steps, ListCoinsTestingSetup)

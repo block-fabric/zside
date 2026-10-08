@@ -180,8 +180,8 @@ RPCMethod listshieldednotes()
     for (const NoteStatus& s : ShieldedNotes(*pwallet)) {
         if (s.spent_by && !include_spent) continue;
         UniValue obj(UniValue::VOBJ);
-        obj.pushKV("txid", s.note->txid.GetHex());
-        obj.pushKV("action", s.note->action);
+        obj.pushKV("txid", s.txid.GetHex());
+        obj.pushKV("action", s.action);
         obj.pushKV("amount", ValueFromAmount(s.note->value));
         obj.pushKV("memo", MemoText(s.note->memo));
         obj.pushKV("change", s.note->internal);
@@ -421,12 +421,15 @@ RPCMethod listshieldedtransactions()
     };
     std::map<Txid, Entry> entries;
     for (const auto& [nf, note] : pwallet->m_shielded.notes) {
-        const auto it{pwallet->mapWallet.find(note.txid)};
-        if (it == pwallet->mapWallet.end()) continue;
-        Entry& e{entries.try_emplace(note.txid, Entry{&it->second}).first->second};
-        e.received += note.value;
-        if (!note.internal) {
-            if (const std::string text{MemoText(note.memo)}; !text.empty()) e.memos.push_back(text);
+        // Each transaction that carries it received it (one of them, at most, is mined).
+        for (const auto& [carrier, action] : note.carriers) {
+            const auto it{pwallet->mapWallet.find(carrier)};
+            if (it == pwallet->mapWallet.end()) continue;
+            Entry& e{entries.try_emplace(carrier, Entry{&it->second}).first->second};
+            e.received += note.value;
+            if (!note.internal) {
+                if (const std::string text{MemoText(note.memo)}; !text.empty()) e.memos.push_back(text);
+            }
         }
         const auto range{pwallet->m_shielded.spends.equal_range(nf)};
         for (auto spend{range.first}; spend != range.second; ++spend) {

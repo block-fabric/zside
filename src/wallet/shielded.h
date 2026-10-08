@@ -46,8 +46,10 @@ using OrchardMemo = std::array<uint8_t, zside::MEMO_SIZE>;
 
 /** A note of the wallet. */
 struct ShieldedNote {
-    Txid txid;
-    uint32_t action{0};
+    //! The transactions that carry it, and its action in each: one, unless its bundle went out in
+    //! another transaction too (proved again, or its transparent signatures malleated), which may be
+    //! the one mined. The note is there while any of them is.
+    std::vector<std::pair<Txid, uint32_t>> carriers;
     OrchardNoteBytes note{};
     OrchardMemo memo{};
     //! Change: to an internal address.
@@ -120,10 +122,14 @@ bool IsShieldedMine(const CWallet& wallet, const CTransaction& tx);
 /** A note with where it stands. */
 struct NoteStatus {
     const ShieldedNote* note{nullptr};
+    //! The transaction that carries it, of those not abandoned nor conflicted: the one deepest in the chain.
+    Txid txid;
+    uint32_t action{0};
     int confirmations{0};
     //! The transaction that spends it, if any (in a block or waiting).
     std::optional<Txid> spent_by;
 };
+/** The notes of the account a transaction of the wallet carries (abandoned and conflicted ones left out). */
 std::vector<NoteStatus> ShieldedNotes(const CWallet& wallet);
 
 struct ShieldedBalance {
