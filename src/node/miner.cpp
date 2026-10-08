@@ -409,6 +409,11 @@ bool BlockAssembler::TestChunkTransactions(const std::vector<CTxMemPoolEntryRef>
         if (!IsFinalTx(tx.get().GetTx(), nHeight, m_lock_time_cutoff)) {
             return false;
         }
+        // Skipping the chunk skips the rest of its cluster, so the transactions that depend on the
+        // request stay out as well.
+        if (!m_options.include_bmm_requests && drivechain::GetBmmRequest(tx.get().GetTx())) {
+            return false;
+        }
     }
     return true;
 }

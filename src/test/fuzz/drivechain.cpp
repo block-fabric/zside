@@ -84,6 +84,9 @@ FUZZ_TARGET(drivechain_scdb)
     params.withdrawal_min_score = fdp.ConsumeIntegralInRange<int>(1, 6);
     params.max_pending_bundles = fdp.ConsumeIntegralInRange<uint32_t>(1, 4);
     params.single_payout_height = fdp.ConsumeIntegralInRange<int>(0, 40);
+    params.idle_expiry_blocks = fdp.ConsumeIntegralInRange<int>(1, 12);
+    params.audit2_height = fdp.ConsumeIntegralInRange<int>(0, 40);
+    params.upvote_expiry_blocks = fdp.ConsumeIntegralInRange<int>(1, 8);
 
     SidechainDB scdb;
     uint256 tip{1};

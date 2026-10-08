@@ -31,6 +31,20 @@ CTransactionRef SendScript(CWallet& wallet, const CScript& script, CAmount value
     return res->tx;
 }
 
+/**
+ * Whether a transaction just committed was refused: it is neither in the mempool nor in a block.
+ * A block may have taken it from the mempool between the commit and the check; that one is kept.
+ */
+bool Refused(CWallet& wallet, const CTransactionRef& tx)
+{
+    if (wallet.chain().isInMempool(tx->GetHash())) return false;
+    // The wallet hears of the block that took it after the mempool dropped it.
+    wallet.BlockUntilSyncedToCurrentChain();
+    LOCK(wallet.cs_wallet);
+    const CWalletTx* wtx{wallet.GetWalletTx(tx->GetHash())};
+    return !wtx || wallet.GetTxDepthInMainChain(*wtx) <= 0;
+}
+
 } // namespace
 
 RPCMethod getdepositaddress()
@@ -119,7 +133,7 @@ RPCMethod createwithdrawal()
 
     const CScript script{sidechain::WithdrawalScript(main_fee, uint160{*keyhash}, *main_script)};
     const CTransactionRef tx{SendScript(*pwallet, script, amount + main_fee)};
-    if (!pwallet->chain().isInMempool(tx->GetHash())) {
+    if (Refused(*pwallet, tx)) {
         pwallet->AbandonTransaction(tx->GetHash());
         throw JSONRPCError(RPC_WALLET_ERROR, "The withdrawal was not accepted into the mempool; the amount may be below the minimum");
     }
@@ -179,7 +193,7 @@ RPCMethod refundwithdrawal()
     refund.signature = *Assert(DecodeBase64(signature_base64));
 
     const CTransactionRef tx{SendScript(*pwallet, sidechain::RefundScript(refund), 0)};
-    if (!pwallet->chain().isInMempool(tx->GetHash())) {
+    if (Refused(*pwallet, tx)) {
         pwallet->AbandonTransaction(tx->GetHash());
         throw JSONRPCError(RPC_WALLET_ERROR, "The refund was not accepted into the mempool: the withdrawal is not mined yet, is in a bundle, was paid, or was already refunded");
     }

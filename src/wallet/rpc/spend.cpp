@@ -346,6 +346,17 @@ RPCMethod sendtoaddress()
  * that do not belong to the wallet and need no signature.
  * @return the id of the signed transaction
  */
+/**
+ * Let a BMM request or a deposit be paid from the unconfirmed outputs of earlier ones (a wallet that
+ * serves several sidechains), when the wallet has nothing else: the mempool takes it then only if it
+ * is small (dc-unconfirmed-parent).
+ */
+static void AllowDrivechainParents(CCoinControl& coin_control)
+{
+    coin_control.m_allow_drivechain_parents = true;
+    coin_control.m_max_tx_weight = TRUC_CHILD_MAX_WEIGHT;
+}
+
 static Txid SignAndCommit(CWallet& wallet, CMutableTransaction& mtx, const std::map<COutPoint, Coin>& external)
 {
     std::map<COutPoint, Coin> coins{external};
@@ -445,8 +456,15 @@ RPCMethod createsidechaindeposit()
         {CNoDestination{drivechain::DestinationScript(destination)}, 0, /*fSubtractFeeFromAmount=*/false},
     };
     // The destination has to follow the treasury output (BIP300 M5): the change goes after both.
-    auto res{FundTransaction(*pwallet, tx, recipients, /*change_pos=*/2, /*lockUnspents=*/false, coin_control)};
-    if (!res) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(res).original);
+    const auto fund{[&] { return FundTransaction(*pwallet, tx, recipients, /*change_pos=*/2, /*lockUnspents=*/false, coin_control); }};
+    auto first{fund()};
+    std::optional<util::Result<CreatedTransactionResult>> retry;
+    if (!first) {
+        AllowDrivechainParents(coin_control);
+        retry.emplace(fund());
+    }
+    const auto& res{retry ? *retry : first};
+    if (!res) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(first).original);
 
     CMutableTransaction mtx{*res->tx};
     const Txid txid{SignAndCommit(*pwallet, mtx, external)};
@@ -530,8 +548,15 @@ RPCMethod createbmmrequest()
     const CFeeRate probe_rate{DEFAULT_MIN_RELAY_TX_FEE * 10};
     coin_control.m_feerate = probe_rate;
     // The request has to be output 0 (BIP301 M8): the change goes after it.
-    auto probe{CreateTransaction(*pwallet, recipients, /*change_pos=*/1, coin_control, /*sign=*/false)};
-    if (!probe) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(probe).original);
+    const auto create_probe{[&] { return CreateTransaction(*pwallet, recipients, /*change_pos=*/1, coin_control, /*sign=*/false); }};
+    auto first_probe{create_probe()};
+    std::optional<util::Result<CreatedTransactionResult>> retry_probe;
+    if (!first_probe) {
+        AllowDrivechainParents(coin_control);
+        retry_probe.emplace(create_probe());
+    }
+    const auto& probe{retry_probe ? *retry_probe : first_probe};
+    if (!probe) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(first_probe).original);
     const int64_t vsize{std::max<int64_t>(1, probe->fee * 1000 / probe_rate.GetFeePerK())};
     coin_control.m_feerate = CFeeRate{amount, static_cast<int32_t>(vsize)};
 

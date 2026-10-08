@@ -89,6 +89,13 @@ struct BlockCreateOptions {
      * Should only be disabled for tests / benchmarks.
      */
     bool test_block_validity{true};
+    /**
+     * Whether to take requests for blind merged mining (BIP301 M8) from the
+     * mempool, with the transactions that depend on them. A block that has one
+     * has to accept it in its coinbase (M7): mining software that builds its
+     * own coinbase without the drivechain messages would make an invalid block.
+     */
+    bool include_bmm_requests{true};
 };
 
 struct BlockWaitOptions {

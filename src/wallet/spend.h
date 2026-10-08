@@ -87,7 +87,14 @@ struct CoinFilterParams {
     // When true, filter unconfirmed coins by whether their
     // version's TRUCness matches what is set by CCoinControl.
     bool check_version_trucness{true};
+    // When true, skip the unconfirmed outputs of BMM requests and treasury transactions (deposits),
+    // which the mempool lets only small transactions of their kind spend (dc-unconfirmed-parent),
+    // unless CCoinControl::m_allow_drivechain_parents is set.
+    bool skip_drivechain_parents{true};
 };
+
+/** Whether the unconfirmed outputs of a transaction can be spent only by small drivechain transactions: a BMM request or a treasury transaction. */
+bool IsDrivechainParent(const CTransaction& tx);
 
 /**
  * Populate the CoinsResult struct with vectors of available COutputs, organized by OutputType.

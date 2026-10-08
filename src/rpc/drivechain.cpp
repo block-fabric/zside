@@ -107,13 +107,6 @@ std::vector<RPCResult> SlotResults()
     return results;
 }
 
-/** Copy of the sidechain database of the active chain, with the height it belongs to. */
-std::pair<SidechainDB, int> ActiveSidechainDB(ChainstateManager& chainman)
-{
-    LOCK(::cs_main);
-    return {chainman.ActiveChainstate().m_scdb, chainman.ActiveHeight()};
-}
-
 RPCMethod getdrivechaininfo()
 {
     return RPCMethod{
@@ -129,6 +122,8 @@ RPCMethod getdrivechaininfo()
             {RPCResult::Type::NUM, "withdrawalperiod", "Blocks a withdrawal bundle has to collect its work score"},
             {RPCResult::Type::NUM, "withdrawalminscore", "Work score a withdrawal bundle needs to be paid out"},
             {RPCResult::Type::NUM, "maxpendingbundles", "Maximum number of pending withdrawal bundles per sidechain"},
+            {RPCResult::Type::NUM, "upvoteexpiryblocks", "Blocks in a row without an upvote after which a pending bundle fails (counted from its proposal or its last upvote)"},
+            {RPCResult::Type::NUM, "upvoteexpiryheight", "Height from which that rule, and the forgetting of failed bundles a withdrawal period on, apply"},
             {RPCResult::Type::NUM, "height", "Height of the block the sidechain database belongs to"},
             {RPCResult::Type::NUM, "activesidechains", "Number of active sidechains"},
             {RPCResult::Type::NUM, "proposals", "Number of sidechain proposals collecting acks"},
@@ -142,7 +137,10 @@ RPCMethod getdrivechaininfo()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const Consensus::DrivechainParams& params{chainman.GetConsensus().drivechain};
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
+    const int height{chainman.ActiveHeight()};
 
     size_t bundles{0};
     CAmount escrow{0};
@@ -159,6 +157,8 @@ RPCMethod getdrivechaininfo()
     obj.pushKV("withdrawalperiod", params.withdrawal_period);
     obj.pushKV("withdrawalminscore", params.withdrawal_min_score);
     obj.pushKV("maxpendingbundles", params.max_pending_bundles);
+    obj.pushKV("upvoteexpiryblocks", params.upvote_expiry_blocks);
+    obj.pushKV("upvoteexpiryheight", params.audit2_height);
     obj.pushKV("height", height);
     obj.pushKV("activesidechains", scdb.GetSlots().size());
     obj.pushKV("proposals", scdb.GetProposals().size());
@@ -185,7 +185,9 @@ RPCMethod listactivesidechains()
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
     UniValue result(UniValue::VARR);
     for (const auto& [id, slot] : scdb.GetSlots()) result.push_back(SlotToJSON(slot));
     return result;
@@ -207,7 +209,9 @@ RPCMethod getsidechain()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const SidechainId id{ParseSlot(request.params[0], chainman)};
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
     const Slot* slot{scdb.GetSlot(id)};
     if (!slot) throw JSONRPCError(RPC_INVALID_PARAMETER, "No active sidechain in this slot");
     return SlotToJSON(*slot);
@@ -245,7 +249,10 @@ RPCMethod listsidechainproposals()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const Consensus::DrivechainParams& params{chainman.GetConsensus().drivechain};
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
+    const int height{chainman.ActiveHeight()};
 
     UniValue pending(UniValue::VARR);
     for (const Proposal& proposal : scdb.GetProposals()) {
@@ -364,8 +371,8 @@ RPCMethod acksidechain()
         if (slot < 0 || slot >= static_cast<int>(drivechain::MAX_SLOTS)) throw JSONRPCError(RPC_INVALID_PARAMETER, "slot out of range");
         slots.insert(static_cast<SidechainId>(slot));
     } else {
-        const auto [scdb, height]{ActiveSidechainDB(chainman)};
-        for (const Proposal& proposal : scdb.GetProposals()) {
+        LOCK(::cs_main);
+        for (const Proposal& proposal : chainman.ActiveChainstate().m_scdb.GetProposals()) {
             if (proposal.hash == hash) slots.insert(proposal.sidechain.slot);
         }
         for (const Sidechain& sidechain : chainman.m_drivechain_miner.GetProposals()) {
@@ -563,6 +570,7 @@ RPCMethod listwithdrawalbundles()
                 {RPCResult::Type::NUM, "index", "Position of the bundle among the bundles of its sidechain, as used in vote messages"},
                 {RPCResult::Type::NUM, "height", "Height of the block that proposed the bundle"},
                 {RPCResult::Type::NUM, "score", "The work score of the bundle"},
+                {RPCResult::Type::NUM, "lastupvote", "Height of the last block that upvoted the bundle, or of the block that proposed it"},
                 {RPCResult::Type::NUM, "blocksleft", "Number of blocks before the bundle fails if it is not paid out"},
                 {RPCResult::Type::BOOL, "payable", "Whether the bundle has the score to be paid out"},
                 {RPCResult::Type::BOOL, "known", "Whether this node has the transaction of the bundle, which it needs to pay it out"},
@@ -578,7 +586,10 @@ RPCMethod listwithdrawalbundles()
     const Consensus::DrivechainParams& params{chainman.GetConsensus().drivechain};
     std::optional<SidechainId> only;
     if (!request.params[0].isNull()) only = ParseSlot(request.params[0], chainman);
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
+    const int height{chainman.ActiveHeight()};
 
     UniValue result(UniValue::VARR);
     for (const auto& [id, slot] : scdb.GetSlots()) {
@@ -592,6 +603,7 @@ RPCMethod listwithdrawalbundles()
             obj.pushKV("index", i);
             obj.pushKV("height", bundle.height);
             obj.pushKV("score", bundle.score);
+            obj.pushKV("lastupvote", bundle.last_upvote);
             obj.pushKV("blocksleft", SidechainDB::BlocksLeft(bundle, height, params));
             obj.pushKV("payable", bundle.score >= static_cast<uint32_t>(params.withdrawal_min_score));
             const auto blind{chainman.m_drivechain_miner.GetBundle(id, bundle.hash)};
@@ -625,8 +637,10 @@ RPCMethod getwithdrawalbundle()
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
-            {RPCResult::Type::STR, "status", "\"pending\" while miners vote on the bundle, \"paid\" once it was paid out, \"failed\" if it did not get the votes in time, \"unknown\" if no block proposed it"},
+            {RPCResult::Type::STR, "status", "\"pending\" while miners vote on the bundle, \"paid\" once it was paid out, \"failed\" if it did not get the votes in time, \"unknown\" if no block proposed it\n"
+                                          "(or it failed more than a withdrawal period ago: getsidechainevents tells what became of every bundle for good)"},
             {RPCResult::Type::NUM, "score", /*optional=*/true, "The work score of a pending bundle"},
+            {RPCResult::Type::NUM, "lastupvote", /*optional=*/true, "Height of the last block that upvoted a pending bundle, or of the block that proposed it"},
             {RPCResult::Type::NUM, "blocksleft", /*optional=*/true, "Number of blocks a pending bundle has left to reach the minimum work score"},
             {RPCResult::Type::BOOL, "payable", /*optional=*/true, "Whether a pending bundle has the work score to be paid out"},
             BundlePayoutResults()[0],
@@ -638,7 +652,10 @@ RPCMethod getwithdrawalbundle()
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const SidechainId id{ParseSlot(request.params[0], chainman)};
     const uint256 hash{ParseHashV(request.params[1], "hash")};
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
+    const int height{chainman.ActiveHeight()};
     const auto& params{chainman.GetConsensus().drivechain};
 
     UniValue result(UniValue::VOBJ);
@@ -651,6 +668,7 @@ RPCMethod getwithdrawalbundle()
             if (bundle.hash != hash) continue;
             result.pushKV("status", "pending");
             result.pushKV("score", bundle.score);
+            result.pushKV("lastupvote", bundle.last_upvote);
             result.pushKV("blocksleft", SidechainDB::BlocksLeft(bundle, height, params));
             result.pushKV("payable", bundle.score >= static_cast<uint32_t>(params.withdrawal_min_score));
             PushBundlePayouts(result, chainman.m_drivechain_miner.GetBundle(id, hash));
@@ -782,6 +800,9 @@ RPCMethod setdefaultwithdrawalvote()
     };
 }
 
+//! Most escrow changes listsidechaindeposits returns at a time.
+static constexpr unsigned int MAX_DEPOSITS_LISTED{1000};
+
 RPCMethod listsidechaindeposits()
 {
     return RPCMethod{
@@ -791,7 +812,7 @@ RPCMethod listsidechaindeposits()
         {
             {"slot", RPCArg::Type::NUM, RPCArg::Optional::NO, "The sidechain slot number"},
             {"after", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Only list the changes after the transaction with this id"},
-            {"count", RPCArg::Type::NUM, RPCArg::Default{0}, "The maximum number of changes to return; 0 for no limit"},
+            {"count", RPCArg::Type::NUM, RPCArg::Default{MAX_DEPOSITS_LISTED}, strprintf("The maximum number of changes to return, at most %u; 0 for that many. To list more, ask again with the last one in 'after'", MAX_DEPOSITS_LISTED)},
         },
         RPCResult{RPCResult::Type::ARR, "", "",
         {
@@ -816,8 +837,11 @@ RPCMethod listsidechaindeposits()
     const SidechainId id{ParseSlot(request.params[0], chainman)};
     std::optional<uint256> after;
     if (!request.params[1].isNull()) after = ParseHashV(request.params[1], "after");
-    const int64_t count{request.params[2].isNull() ? 0 : request.params[2].getInt<int64_t>()};
+    int64_t count{request.params[2].isNull() ? 0 : request.params[2].getInt<int64_t>()};
     if (count < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "count must not be negative");
+    if (count > MAX_DEPOSITS_LISTED) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("count must be at most %u", MAX_DEPOSITS_LISTED));
+    // Bounded, since the main lock is held throughout.
+    if (count == 0) count = MAX_DEPOSITS_LISTED;
 
     LOCK(::cs_main);
     const auto deposits{chainman.m_blockman.m_drivechain_db->ListDeposits(id, after, static_cast<size_t>(count))};
@@ -917,7 +941,8 @@ RPCMethod getsidechainevents()
     {
         LOCK(::cs_main);
         const CChain& chain{chainman.ActiveChain()};
-        for (int height{first}; height < first + count && height <= chain.Height(); ++height) {
+        // Counted from `first`, which may be near the largest int: first + count would overflow.
+        for (int height{first}; height <= chain.Height() && height - first < count; ++height) {
             wanted.emplace_back(chain[height], chain[height]->GetBlockPos());
         }
     }
@@ -932,7 +957,6 @@ RPCMethod getsidechainevents()
     for (size_t i{0}; i < wanted.size(); ++i) {
         if (chain[first + static_cast<int>(i)] != wanted[i].first) throw JSONRPCError(RPC_MISC_ERROR, "The chain changed meanwhile; ask again");
     }
-    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
     for (int height{first}; height < first + static_cast<int>(wanted.size()); ++height) {
         const CBlockIndex* pindex{chain[height]};
         UniValue obj(UniValue::VOBJ);
@@ -979,30 +1003,24 @@ RPCMethod getsidechainevents()
         obj.pushKV("deposits", std::move(deposits));
 
         UniValue bundles(UniValue::VARR);
-        drivechain::BlockUndo undo;
+        drivechain::BlockEvents events;
         // What a block closed and proposed is what sidechains act on: missing, it must not look like nothing.
-        const bool have_undo{chainman.m_blockman.m_drivechain_db->ReadBlockUndo(pindex->GetBlockHash(), undo)};
-        if (!have_undo && height > 0) throw JSONRPCError(RPC_MISC_ERROR, strprintf("The drivechain data of block %d is not available", height));
-        if (have_undo) {
-            for (const auto& [slot, hash] : undo.closed) {
-                if (slot != id) continue;
-                UniValue entry(UniValue::VOBJ);
-                entry.pushKV("hash", hash.GetHex());
-                entry.pushKV("paid", scdb.WasPaid(slot, hash).value_or(false));
-                bundles.push_back(std::move(entry));
-            }
+        const bool have_events{chainman.m_blockman.m_drivechain_db->ReadBlockEvents(pindex->GetBlockHash(), events)};
+        if (!have_events && height > 0) throw JSONRPCError(RPC_MISC_ERROR, strprintf("The drivechain data of block %d is not available", height));
+        for (const drivechain::BlockUndo::Closed& closed : events.closed) {
+            if (closed.id != id) continue;
+            UniValue entry(UniValue::VOBJ);
+            entry.pushKV("hash", closed.hash.GetHex());
+            entry.pushKV("paid", closed.paid);
+            bundles.push_back(std::move(entry));
         }
         obj.pushKV("bundles", std::move(bundles));
 
-        // A proposal counts if the block took it: then it changed the slot (a proposal for a slot
-        // without a sidechain is ignored, and changes nothing).
+        // The proposals the block made that became pending (a proposal for a slot without a
+        // sidechain is ignored, and changes nothing).
         UniValue proposed(UniValue::VARR);
-        const bool slot_changed{std::any_of(undo.slots.begin(), undo.slots.end(), [&](const drivechain::BlockUndo::SlotUndo& saved) { return saved.id == id; })};
-        if (slot_changed) {
-            for (const CTxOut& out : block.vtx[0]->vout) {
-                const auto bundle{drivechain::ParseBundleScript(out.scriptPubKey)};
-                if (bundle && bundle->first == id) proposed.push_back(bundle->second.GetHex());
-            }
+        for (const auto& [slot, hash] : events.proposed) {
+            if (slot == id) proposed.push_back(hash.GetHex());
         }
         obj.pushKV("proposed", std::move(proposed));
         result.push_back(std::move(obj));

@@ -5,8 +5,10 @@
 #include <drivechain/db.h>
 
 #include <serialize.h>
-#include <sidechain/state.h>
+#include <sidechain/store.h>
+#include <span.h>
 
+#include <ios>
 #include <memory>
 #include <utility>
 
@@ -14,14 +16,46 @@ namespace drivechain {
 
 namespace {
 
-constexpr uint8_t DB_BLOCK{'U'};
-//! The sidechain database, without the sidechain state (now in its store): a node with the
-//! earlier format, under 'S', rebuilds the state from its blocks.
-constexpr uint8_t DB_STATE_OLD{'S'};
+//! What a block needs to be taken back (BlockUndo), for the blocks a reorg can reach.
+constexpr uint8_t DB_UNDO{'R'};
+//! What a block did (BlockRecord), for every block.
+constexpr uint8_t DB_EVENTS{'E'};
+//! The sidechain database of a chainstate (StateRecord).
 constexpr uint8_t DB_STATE{'s'};
-//! The entries of the store of the sidechain state: 'T', the chainstate's name, 0, then the key.
-constexpr uint8_t DB_SIDE_STORE{'T'};
+//! An escrow change (Deposit), by DepositKey.
 constexpr uint8_t DB_DEPOSIT{'D'};
+//! Where an escrow change is (DepositKey), by sidechain and txid.
+constexpr uint8_t DB_DEPOSIT_TXID{'T'};
+constexpr uint8_t DB_FORMAT_VERSION{'v'};
+//! The sidechain database of a chainstate as an earlier version wrote it; erased with the state.
+constexpr uint8_t DB_STATE_OLD{'S'};
+//! The entries of the store of the state of this chain as a sidechain: 'K', the chainstate's name,
+//! 0, then the key (sidechain/store.h).
+constexpr uint8_t DB_SIDE_STORE{'K'};
+
+//! Version of the snapshot of the sidechain database; a snapshot of another one is not read.
+constexpr uint32_t STATE_VERSION{3};
+
+/** Thrown on bytes left over after a record: it is of another format. */
+template <typename Stream>
+void ExpectEnd(Stream& s)
+{
+    if constexpr (requires { s.empty(); }) {
+        if (!s.empty()) throw std::ios_base::failure("drivechain record of another format");
+    }
+}
+
+/** The undo data of a block, read strictly: nothing may be left over. */
+struct UndoRecord {
+    BlockUndo& undo;
+
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        s >> undo;
+        ExpectEnd(s);
+    }
+};
 
 /** Key of an escrow change; big endian so that the database orders the changes of a sidechain by position in the chain. */
 struct DepositKey {
@@ -45,111 +79,173 @@ struct DepositKey {
         height = ser_readdata32be(s);
         tx_index = ser_readdata32be(s);
     }
+
+    friend bool operator==(const DepositKey&, const DepositKey&) = default;
 };
 
-/** Thrown on bytes left over after a record: it is of another format. */
-template <typename Stream>
-void ExpectEnd(Stream& s)
-{
-    if constexpr (requires { s.empty(); }) {
-        if (!s.empty()) throw std::ios_base::failure("drivechain record of another format");
-    }
-}
+/** Key of the position of an escrow change by its transaction. */
+struct DepositTxidKey {
+    SidechainId slot{0};
+    uint256 txid;
 
-/** What is stored for a block. */
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        ser_writedata8(s, DB_DEPOSIT_TXID);
+        ser_writedata32be(s, slot);
+        s << txid;
+    }
+};
+
+/** What is stored for every block. */
 struct BlockRecord {
-    BlockUndo undo;
+    BlockEvents events;
     //! The index entries the block added.
     std::vector<DepositKey> deposits;
 
-    template <typename Stream>
-    void Serialize(Stream& s) const { s << undo << deposits; }
+    SERIALIZE_METHODS(BlockRecord, obj) { READWRITE(obj.events.closed, obj.events.proposed, obj.deposits); }
+};
+
+/** The snapshot of a sidechain database, with the version of its format. */
+struct StateRecord {
+    SidechainDB& scdb;
+
     template <typename Stream>
     void Unserialize(Stream& s)
     {
-        s >> undo >> deposits;
+        uint32_t version;
+        s >> version;
+        if (version != STATE_VERSION) throw std::ios_base::failure("unknown version of the sidechain database");
+        s >> scdb;
         ExpectEnd(s);
     }
 };
 
-/**
- * A record written before the sidechain state had a store (sidechain/store.h): the change of a
- * block to the state was a structure of its own, which BlockUndo::side cannot be read from. Read
- * only for what comes before it, when it is the empty structure that a chain which is no
- * sidechain wrote (`side_empty`).
- */
-struct LegacyBlockRecord {
-    BlockUndo undo;
-    std::vector<DepositKey> deposits;
-    bool side_empty{false};
+struct StateWriteRecord {
+    const SidechainDB& scdb;
 
+    template <typename Stream>
+    void Serialize(Stream& s) const { s << STATE_VERSION << scdb; }
+};
+
+/** A key as it is, whatever it holds: it reads all that is left. */
+struct RawKey {
+    std::vector<std::byte> bytes;
+
+    template <typename Stream>
+    void Serialize(Stream& s) const { s.write(std::span{bytes}); }
     template <typename Stream>
     void Unserialize(Stream& s)
     {
-        s >> undo.prev_block_hash >> undo.slots >> undo.proposals_added >> undo.acked >> undo.removed >> undo.closed >> undo.last_votes;
-        int32_t main_height, last_failure_height;
-        bool has_bundle;
-        s >> main_height >> has_bundle;
-        if (has_bundle) {
-            sidechain::PendingBundle bundle;
-            s >> bundle;
-        }
-        std::vector<COutPoint> added;
-        std::vector<sidechain::Withdrawal> removed;
-        std::vector<CTxOut> paid, paid_tx;
-        uint64_t queued, queued_tx;
-        s >> last_failure_height >> added >> removed >> paid >> queued >> paid_tx >> queued_tx;
-        s >> deposits;
-        ExpectEnd(s);
-        side_empty = main_height == -1 && !has_bundle && last_failure_height == -1 && added.empty() && removed.empty() &&
-                     paid.empty() && queued == 0 && paid_tx.empty() && queued_tx == 0;
+        bytes.resize(s.size());
+        s.read(std::span{bytes});
     }
 };
 
 } // namespace
 
-Database::Database(const DBParams& params) : m_db{params} {}
+Database::Database(const DBParams& params) : m_db{params}
+{
+    // A new database is in the current format (an older one, which has data, is not marked as such).
+    if (m_db.IsEmpty()) WriteFormatVersion();
+}
 
-bool Database::WriteBlock(const uint256& block_hash, int height, const BlockUndo& undo, const std::vector<Deposit>& deposits)
+bool Database::IsCurrentFormat() const
+{
+    uint32_t version{0};
+    return m_db.Read(DB_FORMAT_VERSION, version) && version == FORMAT_VERSION;
+}
+
+void Database::WriteFormatVersion()
+{
+    m_db.Write(DB_FORMAT_VERSION, FORMAT_VERSION, /*fSync=*/true);
+}
+
+void Database::Wipe()
+{
+    // In batches: a database that grew for long would not fit in memory as one.
+    while (true) {
+        std::vector<RawKey> keys;
+        {
+            const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
+            for (it->SeekToFirst(); it->Valid() && keys.size() < 10'000; it->Next()) {
+                RawKey key;
+                if (!it->GetKey(key)) break;
+                keys.push_back(std::move(key));
+            }
+        }
+        if (keys.empty()) break;
+        CDBBatch batch{m_db};
+        for (const RawKey& key : keys) batch.Erase(key);
+        m_db.WriteBatch(batch);
+    }
+}
+
+bool Database::WriteBlock(const uint256& block_hash, int height, const BlockUndo& undo, const std::vector<Deposit>& deposits, bool keep_undo)
 {
     CDBBatch batch{m_db};
     BlockRecord record;
-    record.undo = undo;
+    record.events.closed = undo.closed;
+    record.events.proposed = undo.proposed;
     for (const Deposit& deposit : deposits) {
         const DepositKey key{deposit.slot, static_cast<uint32_t>(height), deposit.tx_index};
         batch.Write(key, deposit);
+        batch.Write(DepositTxidKey{deposit.slot, deposit.tx->GetHash().ToUint256()}, key);
         record.deposits.push_back(key);
     }
-    batch.Write(std::make_pair(DB_BLOCK, block_hash), record);
+    batch.Write(std::make_pair(DB_EVENTS, block_hash), record);
+    if (keep_undo) {
+        batch.Write(std::make_pair(DB_UNDO, block_hash), undo);
+    } else {
+        batch.Erase(std::make_pair(DB_UNDO, block_hash));
+    }
     m_db.WriteBatch(batch);
     return true;
 }
 
 bool Database::ReadBlockUndo(const uint256& block_hash, BlockUndo& undo) const
 {
+    BlockUndo read;
+    UndoRecord record{read};
+    if (!m_db.Read(std::make_pair(DB_UNDO, block_hash), record)) return false;
+    undo = std::move(read);
+    return true;
+}
+
+bool Database::HasBlockUndo(const uint256& block_hash) const
+{
+    return m_db.Exists(std::make_pair(DB_UNDO, block_hash));
+}
+
+void Database::EraseBlockUndo(const uint256& block_hash)
+{
+    m_db.Erase(std::make_pair(DB_UNDO, block_hash));
+}
+
+bool Database::ReadBlockEvents(const uint256& block_hash, BlockEvents& events) const
+{
     BlockRecord record;
-    if (m_db.Read(std::make_pair(DB_BLOCK, block_hash), record)) {
-        undo = std::move(record.undo);
-        return true;
-    }
-    // Of the format before: usable only if it held no change to a sidechain state, which could not be taken back from it.
-    LegacyBlockRecord legacy;
-    if (!m_db.Read(std::make_pair(DB_BLOCK, block_hash), legacy) || !legacy.side_empty) return false;
-    undo = std::move(legacy.undo);
+    if (!m_db.Read(std::make_pair(DB_EVENTS, block_hash), record)) return false;
+    events = std::move(record.events);
     return true;
 }
 
 bool Database::EraseBlockDeposits(const uint256& block_hash)
 {
     BlockRecord record;
-    if (!m_db.Read(std::make_pair(DB_BLOCK, block_hash), record)) {
-        LegacyBlockRecord legacy;
-        if (!m_db.Read(std::make_pair(DB_BLOCK, block_hash), legacy)) return false;
-        record.deposits = std::move(legacy.deposits);
-    }
+    if (!m_db.Read(std::make_pair(DB_EVENTS, block_hash), record)) return false;
     if (record.deposits.empty()) return true;
     CDBBatch batch{m_db};
-    for (const DepositKey& key : record.deposits) batch.Erase(key);
+    for (const DepositKey& key : record.deposits) {
+        Deposit deposit;
+        if (m_db.Read(key, deposit)) {
+            // The txid entry goes with it, unless it is the entry of the transaction in another block.
+            const DepositTxidKey txid_key{deposit.slot, deposit.tx->GetHash().ToUint256()};
+            DepositKey indexed;
+            if (m_db.Read(txid_key, indexed) && indexed == key) batch.Erase(txid_key);
+        }
+        batch.Erase(key);
+    }
     m_db.WriteBatch(batch);
     return true;
 }
@@ -158,7 +254,7 @@ bool Database::WriteState(const std::string& chainstate, const SidechainDB& scdb
                           const std::map<sidechain::StoreBytes, std::optional<sidechain::StoreBytes>>* side_changes)
 {
     CDBBatch batch{m_db};
-    batch.Write(std::make_pair(DB_STATE, chainstate), scdb);
+    batch.Write(std::make_pair(DB_STATE, chainstate), StateWriteRecord{scdb});
     if (side_db && side_changes) side_db->Write(batch, *side_changes);
     m_db.WriteBatch(batch, /*fSync=*/true);
     if (side_db) side_db->Reset();
@@ -186,7 +282,15 @@ std::unique_ptr<sidechain::DbStore> Database::SideStore(const std::string& chain
 
 bool Database::ReadState(const std::string& chainstate, SidechainDB& scdb) const
 {
-    return m_db.Read(std::make_pair(DB_STATE, chainstate), scdb);
+    SidechainDB read;
+    StateRecord record{read};
+    if (!m_db.Read(std::make_pair(DB_STATE, chainstate), record)) {
+        // Whatever was read before the failure is not left behind.
+        scdb = SidechainDB{};
+        return false;
+    }
+    scdb = std::move(read);
+    return true;
 }
 
 std::vector<Deposit> Database::ListBlockDeposits(SidechainId slot, int height) const
@@ -206,21 +310,24 @@ std::vector<Deposit> Database::ListBlockDeposits(SidechainId slot, int height) c
 std::optional<std::vector<Deposit>> Database::ListDeposits(SidechainId slot, const std::optional<uint256>& after, size_t count) const
 {
     std::vector<Deposit> deposits;
-    bool found{!after};
+    DepositKey start{slot, 0, 0};
+    if (after) {
+        // Straight to the change the caller knows, by its txid: not through all those before it.
+        if (!m_db.Read(DepositTxidKey{slot, *after}, start)) return std::nullopt;
+        Deposit known;
+        if (!m_db.Read(start, known) || known.slot != slot || known.tx->GetHash().ToUint256() != *after) return std::nullopt;
+    }
     const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
-    for (it->Seek(DepositKey{slot, 0, 0}); it->Valid(); it->Next()) {
+    it->Seek(start);
+    if (after && it->Valid()) it->Next();
+    for (; it->Valid(); it->Next()) {
         DepositKey key;
         if (!it->GetKey(key) || key.slot != slot) break;
         Deposit deposit;
         if (!it->GetValue(deposit)) break;
-        if (!found) {
-            found = deposit.tx->GetHash().ToUint256() == *after;
-            continue;
-        }
         deposits.push_back(std::move(deposit));
         if (count != 0 && deposits.size() >= count) break;
     }
-    if (!found) return std::nullopt;
     return deposits;
 }
 

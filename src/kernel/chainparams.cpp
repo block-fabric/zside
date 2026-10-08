@@ -481,6 +481,7 @@ public:
         consensus.drivechain.replacement_period = 40;
         consensus.drivechain.withdrawal_period = 60;
         consensus.drivechain.withdrawal_min_score = 30;
+        consensus.drivechain.upvote_expiry_blocks = 20;
         consensus.BIP34Height = 1; // Always active unless overridden
         consensus.BIP34Hash = uint256();
         consensus.BIP65Height = 1;  // Always active unless overridden

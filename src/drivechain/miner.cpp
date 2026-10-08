@@ -409,7 +409,10 @@ BlockAdditions MinerState::CreateBlockAdditions(const SidechainDB& scdb, const C
 
     // Follow the escrow outputs through the transactions of the block: a
     // withdrawal spends the escrow output as the deposits of the block leave it.
-    SidechainDB after{scdb};
+    // Only the sidechains (not the proposals and closed bundles, which withdrawals do not touch).
+    std::set<SidechainId> slots;
+    for (const auto& [slot, state] : scdb.GetSlots()) slots.insert(slot);
+    SidechainDB after{scdb.Subset(slots)};
     SidechainDB::EscrowOutputs escrow_outputs{after.GetEscrowOutputs()};
     BlockUndo undo;
     std::string reject_reason;

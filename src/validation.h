@@ -79,6 +79,13 @@ class SignalInterrupt;
 
 /** Block files containing a block-height within MIN_BLOCKS_TO_KEEP of ActiveChain().Tip() will not be pruned. */
 inline constexpr unsigned int MIN_BLOCKS_TO_KEEP = 288;
+/**
+ * Blocks of the active chain at this depth or more lose the data that takes their changes to the
+ * sidechain database back (what they did that sidechains follow stays): no reorg can take them back.
+ * A reorg deeper than this, like one past the blocks a pruned node keeps, cannot be made.
+ */
+inline constexpr int DRIVECHAIN_UNDO_DEPTH{2880};
+static_assert(DRIVECHAIN_UNDO_DEPTH >= static_cast<int>(MIN_BLOCKS_TO_KEEP));
 inline constexpr signed int DEFAULT_CHECKBLOCKS = 6;
 inline constexpr int DEFAULT_CHECKLEVEL{3};
 // Require that user allocate at least 550 MiB for block & undo files (blk???.dat and rev???.dat)
@@ -790,10 +797,10 @@ public:
 
     // Block (dis)connection on a given view:
     //
-    // Like the coins, the sidechain database is passed in as a working copy.
+    // Like the coins, the sidechain database is passed in to be updated.
     // DisconnectBlock leaves it alone if scdb is null. ConnectBlock always
-    // checks the drivechain rules; if scdb is null it does so against a
-    // temporary copy of m_scdb.
+    // checks the drivechain rules; if scdb is null it does so against m_scdb,
+    // which it gives back as it was, whatever the block is.
     //
     // The state of this chain as a sidechain is in its store: `side_store` is the overlay the
     // block's changes go to (ConnectBlock, when it succeeds and is not only checking) or are
@@ -837,6 +844,16 @@ private:
     std::unique_ptr<sidechain::DbStore> m_side_db GUARDED_BY(::cs_main);
     std::unique_ptr<sidechain::StoreOverlay> m_side_cache GUARDED_BY(::cs_main);
 public:
+
+    /**
+     * Apply the blocks after the one `scdb` belongs to, up to `to` (a descendant of it), to `scdb`,
+     * from the blocks on disk, and store what each block did; its undo data only for the blocks above
+     * `keep_undo_above`. On a sidechain, the state of this chain as a sidechain is brought forward
+     * with it in `side_store`, which is required there (the chainstate's own store is also written
+     * out as it goes).
+     */
+    util::Result<void> RollForwardSidechainDB(drivechain::SidechainDB& scdb, const CBlockIndex* from, const CBlockIndex* to, int keep_undo_above,
+                                              sidechain::StoreOverlay* side_store = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Name under which the sidechain database of this chainstate is stored. */
     std::string DrivechainStateName() const;

@@ -15,6 +15,7 @@
 #include <string>
 
 class ClientModel;
+class QObject;
 class QTableWidgetItem;
 
 namespace NodeRpc {
@@ -27,6 +28,17 @@ using WalletNameFn = std::function<std::optional<QString>()>;
  * @param[out] error   set when the call fails
  */
 std::optional<UniValue> Call(ClientModel* client_model, const std::string& method, const UniValue& params, QString& error, const std::optional<QString>& wallet = std::nullopt);
+
+/** What CallAsync does with the result, on the GUI thread: the result, or nothing and the error. */
+using Done = std::function<void(std::optional<UniValue> result, const QString& error)>;
+
+/**
+ * Run an RPC method like Call, but on a thread of its own, one call after the other (as the RPC
+ * console does): some take long, a BMM request waits on the mainchain node for up to a minute.
+ * `done` runs on the GUI thread afterwards, unless `receiver` was deleted meanwhile.
+ */
+void CallAsync(QObject* receiver, ClientModel* client_model, const std::string& method, const UniValue& params, Done done,
+               const std::optional<QString>& wallet = std::nullopt);
 
 /** The parameters of a call. */
 UniValue Args(std::initializer_list<UniValue> values);

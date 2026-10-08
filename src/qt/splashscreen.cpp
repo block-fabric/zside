@@ -208,6 +208,8 @@ void SplashScreen::unsubscribeFromCoreSignals()
     // Disconnect signals from client
     m_handler_init_message->disconnect();
     m_handler_show_progress->disconnect();
+    // Waits for a load handler in flight, which uses the lists cleared below.
+    if (m_handler_load_wallet) m_handler_load_wallet->disconnect();
     for (const auto& handler : m_connected_wallet_handlers) {
         handler->disconnect();
     }

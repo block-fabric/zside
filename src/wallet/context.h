@@ -23,6 +23,14 @@ namespace wallet {
 class CWallet;
 using LoadWalletFn = std::function<void(std::unique_ptr<interfaces::Wallet> wallet)>;
 
+//! A registered handler of loaded wallets. Its mutex is held while it is called (and the
+//! wallets' lock is not): unregistering it waits for a call in flight and empties fn, so the
+//! handler is never called once its owner is gone.
+struct LoadWalletHandler {
+    Mutex mutex;
+    LoadWalletFn fn GUARDED_BY(mutex);
+};
+
 //! WalletContext struct containing references to state shared between CWallet
 //! instances, like the reference to the chain interface, and the list of opened
 //! wallets.
@@ -41,7 +49,7 @@ struct WalletContext {
     // this could introduce inconsistent lock ordering and cause deadlocks.
     Mutex wallets_mutex;
     std::vector<std::shared_ptr<CWallet>> wallets GUARDED_BY(wallets_mutex);
-    std::list<LoadWalletFn> wallet_load_fns GUARDED_BY(wallets_mutex);
+    std::list<std::shared_ptr<LoadWalletHandler>> wallet_load_fns GUARDED_BY(wallets_mutex);
 
     //! Declare default constructor and destructor that are not inline, so code
     //! instantiating the WalletContext struct doesn't need to #include class

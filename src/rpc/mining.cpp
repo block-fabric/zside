@@ -752,7 +752,9 @@ static RPCMethod getblocktemplate()
                 {"mode", RPCArg::Type::STR, /* treat as named arg */ RPCArg::Optional::OMITTED, "This must be set to \"template\", \"proposal\" (see BIP 23), or omitted"},
                 {"capabilities", RPCArg::Type::ARR, /* treat as named arg */ RPCArg::Optional::OMITTED, "A list of strings",
                 {
-                    {"str", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "client side supported feature, 'longpoll', 'coinbasevalue', 'proposal', 'serverlist', 'workid'"},
+                    {"str", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "client side supported feature, 'longpoll', 'coinbasevalue', 'proposal', 'serverlist', 'workid';\n"
+                                                                           "'coinbasetxn' or 'drivechain' for software that puts the drivechain_coinbase_outputs in its coinbase:\n"
+                                                                           "only then does the template have requests for blind merged mining (BIP301), which the coinbase has to accept"},
                 }},
                 {"rules", RPCArg::Type::ARR, RPCArg::Optional::NO, "A list of strings",
                 {
@@ -850,6 +852,7 @@ static RPCMethod getblocktemplate()
     UniValue lpval = NullUniValue;
     std::set<std::string> setClientRules;
     bool want_coinbasetxn{false};
+    bool drivechain_client{false};
     if (!request.params[0].isNull())
     {
         const UniValue& oparam = request.params[0].get_obj();
@@ -898,10 +901,16 @@ static RPCMethod getblocktemplate()
         const UniValue& capabilities = oparam.find_value("capabilities");
         if (capabilities.isArray()) {
             for (const UniValue& capability : capabilities.getValues()) {
-                if (capability.isStr() && capability.get_str() == "coinbasetxn") want_coinbasetxn = true;
+                if (!capability.isStr()) continue;
+                if (capability.get_str() == "coinbasetxn") want_coinbasetxn = true;
+                if (capability.get_str() == "drivechain") drivechain_client = true;
             }
         }
     }
+    // Requests for blind merged mining (M8) are only for mining software that puts the drivechain
+    // messages in its coinbase: a block with a request it does not accept (M7) is invalid. Software
+    // that takes the coinbase as this node makes it (coinbasetxn) does; other software says so.
+    const bool include_bmm_requests{drivechain_client || want_coinbasetxn || setClientRules.contains("drivechain")};
 
     if (strMode != "template")
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid mode");
@@ -917,7 +926,8 @@ static RPCMethod getblocktemplate()
         }
     }
 
-    static unsigned int nTransactionsUpdatedLast;
+    static unsigned int nTransactionsUpdatedLast_by_kind[2];
+    unsigned int& nTransactionsUpdatedLast{nTransactionsUpdatedLast_by_kind[include_bmm_requests]};
     const CTxMemPool& mempool = EnsureMemPool(node);
 
     WAIT_LOCK(cs_main, cs_main_lock);
@@ -999,10 +1009,13 @@ static RPCMethod getblocktemplate()
         throw JSONRPCError(RPC_INVALID_PARAMETER, "getblocktemplate must be called with the segwit rule set (call with {\"rules\": [\"segwit\"]})");
     }
 
-    // Update block
-    static CBlockIndex* pindexPrev;
-    static int64_t time_start;
-    static std::unique_ptr<BlockTemplate> block_template;
+    // Update block. A template with the requests for blind merged mining and one without are kept apart.
+    static CBlockIndex* pindexPrev_by_kind[2];
+    static int64_t time_start_by_kind[2];
+    static std::unique_ptr<BlockTemplate> block_template_by_kind[2];
+    CBlockIndex*& pindexPrev{pindexPrev_by_kind[include_bmm_requests]};
+    int64_t& time_start{time_start_by_kind[include_bmm_requests]};
+    std::unique_ptr<BlockTemplate>& block_template{block_template_by_kind[include_bmm_requests]};
     if (!pindexPrev || pindexPrev->GetBlockHash() != tip ||
         (mempool.GetTransactionsUpdated() != nTransactionsUpdatedLast && GetTime() - time_start > 5))
     {
@@ -1018,7 +1031,9 @@ static RPCMethod getblocktemplate()
         // a delay to each getblocktemplate call. This differs from typical
         // long-lived IPC usage, where the overhead is paid only when creating
         // the initial template.
-        block_template = miner.createNewBlock({}, /*cooldown=*/false);
+        node::BlockCreateOptions options;
+        options.include_bmm_requests = include_bmm_requests;
+        block_template = miner.createNewBlock(options, /*cooldown=*/false);
         CHECK_NONFATAL(block_template);
 
 
@@ -1193,8 +1208,7 @@ static RPCMethod getblocktemplate()
     result.pushKV("drivechain_votable", std::move(votable));
     // A coinbase as this node would make it, for mining software that builds its own from one: the
     // DATUM gateway and the enforcer of the drivechain wallets. They take its value and its commitments
-    // (the merged-mining accepts, the votes), and pay the value out their own way. Without them, such
-    // software leaves the merged-mining requests out of its blocks, or makes blocks that are invalid.
+    // (the merged-mining accepts, the votes), and pay the value out their own way.
     if (want_coinbasetxn) {
         UniValue coinbasetxn(UniValue::VOBJ);
         coinbasetxn.pushKV("data", EncodeHexTx(*block.vtx[0]));

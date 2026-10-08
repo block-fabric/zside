@@ -52,6 +52,8 @@ class WalletController : public QObject
     Q_OBJECT
 
     void removeAndDeleteWallet(WalletModel* wallet_model);
+    //! The registered model of the wallet with this name, if any.
+    WalletModel* findWallet(const std::string& name) const;
 
 public:
     WalletController(ClientModel& client_model, const PlatformStyle* platform_style, QObject* parent);

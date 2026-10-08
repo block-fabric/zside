@@ -5,6 +5,7 @@
 #include <qt/chainactivity.h>
 
 #include <qt/clientmodel.h>
+#include <qt/itemviews.h>
 #include <qt/noderpc.h>
 
 #include <QDateTime>
@@ -18,6 +19,8 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -27,10 +30,12 @@ using NodeRpc::Text;
 
 constexpr int ROWS{8};
 constexpr int REFRESH_DELAY_MS{1000};
+//! Most new mempool transactions looked up one by one; beyond, the mempool is listed verbosely.
+constexpr size_t MAX_MEMPOOL_LOOKUPS{100};
 
 QTableWidget* Table(const QStringList& headers, QWidget* parent, const char* name)
 {
-    auto* table{new QTableWidget(0, headers.size(), parent)};
+    auto* table{new ItemViews::Table(0, headers.size(), parent)};
     table->setObjectName(name);
     table->setHorizontalHeaderLabels(headers);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -117,19 +122,53 @@ void ChainActivity::refresh()
     m_blocks->setRowCount(row);
     m_blocks->resizeColumnsToContents();
 
-    const auto mempool{NodeRpc::Call(m_client_model, "getrawmempool", Args({true}), error)};
-    if (!mempool) return;
+    refreshMempool();
+}
+
+void ChainActivity::refreshMempool()
+{
+    QString error;
+    // The txids only: the verbose listing of a large mempool every second would hold up the window.
+    // What is known of a transaction is kept until it leaves the mempool, and only the new ones are
+    // looked up.
+    const auto txids{NodeRpc::Call(m_client_model, "getrawmempool", Args({}), error)};
+    if (!txids || !txids->isArray()) return;
+    std::unordered_set<std::string> current;
+    std::vector<std::string> unknown;
+    current.reserve(txids->size());
+    for (const UniValue& txid : txids->getValues()) {
+        current.insert(txid.get_str());
+        if (!m_mempool.contains(txid.get_str())) unknown.push_back(txid.get_str());
+    }
+    std::erase_if(m_mempool, [&](const auto& entry) { return !current.contains(entry.first); });
+    const auto remember{[this](const std::string& txid, const UniValue& entry) {
+        m_mempool[txid] = {entry["time"].getInt<int64_t>(), QString::number(entry["fees"]["base"].get_real(), 'f', 8), Text(entry["vsize"])};
+    }};
+    if (unknown.size() > MAX_MEMPOOL_LOOKUPS) {
+        // Many new ones (the first refresh, a burst): one verbose listing costs less than a call each.
+        const auto mempool{NodeRpc::Call(m_client_model, "getrawmempool", Args({true}), error)};
+        if (!mempool) return;
+        m_mempool.clear();
+        for (const std::string& txid : mempool->getKeys()) remember(txid, (*mempool)[txid]);
+    } else {
+        for (const std::string& txid : unknown) {
+            // Gone from the mempool meanwhile when this fails: left out until the next refresh.
+            if (const auto entry{NodeRpc::Call(m_client_model, "getmempoolentry", Args({txid}), error)}) remember(txid, *entry);
+        }
+    }
+
     // The newest first.
     std::vector<std::pair<int64_t, std::string>> newest;
-    for (const std::string& txid : mempool->getKeys()) newest.emplace_back((*mempool)[txid]["time"].getInt<int64_t>(), txid);
+    newest.reserve(m_mempool.size());
+    for (const auto& [txid, entry] : m_mempool) newest.emplace_back(entry.time, txid);
     const size_t rows{std::min<size_t>(newest.size(), ROWS)};
     std::partial_sort(newest.begin(), newest.begin() + rows, newest.end(), std::greater<>{});
     m_transactions->setRowCount(rows);
     for (size_t i{0}; i < rows; ++i) {
-        const UniValue& entry{(*mempool)[newest[i].second]};
-        m_transactions->setItem(i, 0, Item(Time(entry["time"])));
-        m_transactions->setItem(i, 1, Item(QString::number(entry["fees"]["base"].get_real(), 'f', 8)));
-        m_transactions->setItem(i, 2, Item(Text(entry["vsize"])));
+        const MempoolEntry& entry{m_mempool.at(newest[i].second)};
+        m_transactions->setItem(i, 0, Item(QLocale().toString(QDateTime::fromSecsSinceEpoch(entry.time), QLocale::ShortFormat)));
+        m_transactions->setItem(i, 1, Item(entry.fee));
+        m_transactions->setItem(i, 2, Item(entry.vsize));
         m_transactions->setItem(i, 3, Item(QString::fromStdString(newest[i].second)));
     }
     m_transactions->resizeColumnsToContents();

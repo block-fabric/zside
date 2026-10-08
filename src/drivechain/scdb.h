@@ -16,26 +16,123 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <ios>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 namespace drivechain {
 
-/** What a block changed in the sidechain database, in the form needed to revert it. */
+/** What became of a bundle that is no longer pending. */
+struct ClosedBundle {
+    //! Whether it was paid out; if not, it failed.
+    bool paid{false};
+    //! Height of the block that closed it.
+    int32_t height{0};
+
+    SERIALIZE_METHODS(ClosedBundle, obj) { READWRITE(obj.paid, obj.height); }
+
+    friend bool operator==(const ClosedBundle&, const ClosedBundle&) = default;
+};
+
+/**
+ * What a block changed in the sidechain database, in the form needed to revert it: the changes
+ * themselves rather than copies of what they changed, so that it stays small however many bundles
+ * are pending.
+ */
 struct BlockUndo {
+    /** What a slot was before the block, apart from its bundles; saved before its first change. */
     struct SlotUndo {
         SidechainId id{0};
         //! Whether the slot held a sidechain before the block.
         bool existed{false};
-        Slot slot;
+        int32_t activation_height{0};
+        bool has_ctip{false};
+        Ctip ctip;
+        //! The sidechain the slot held, if the block replaced it with another.
+        std::optional<Sidechain> sidechain;
 
-        SERIALIZE_METHODS(SlotUndo, obj) { READWRITE(obj.id, obj.existed, obj.slot); }
+        template <typename Stream>
+        void Serialize(Stream& s) const
+        {
+            s << id << existed << activation_height << has_ctip << ctip << sidechain.has_value();
+            if (sidechain) s << *sidechain;
+        }
+        template <typename Stream>
+        void Unserialize(Stream& s)
+        {
+            bool has_sidechain;
+            s >> id >> existed >> activation_height >> has_ctip >> ctip >> has_sidechain;
+            sidechain.reset();
+            if (has_sidechain) s >> sidechain.emplace();
+        }
+    };
+
+    /** A change of the pending bundles of a slot. They are taken back in reverse order. */
+    struct BundleChange {
+        enum class Type : uint8_t {
+            //! The bundle at `index` was removed: `bundle`.
+            ERASE = 0,
+            //! A bundle was added at the end.
+            APPEND = 1,
+            //! A vote: the bundle at `upvoted` went up (none for a downvote), the others down, except those at `at_zero`.
+            VOTE = 2,
+        };
+        static constexpr uint32_t NO_INDEX{std::numeric_limits<uint32_t>::max()};
+
+        Type type{Type::APPEND};
+        SidechainId id{0};
+        //! ERASE: the position and the bundle.
+        uint32_t index{0};
+        Bundle bundle;
+        //! VOTE: the position of the bundle upvoted, or NO_INDEX.
+        uint32_t upvoted{NO_INDEX};
+        //! VOTE: the last upvote of that bundle before, and whether its score could go no higher.
+        int32_t last_upvote{0};
+        bool saturated{false};
+        //! VOTE: the positions, in order, of the bundles a downvote left at a score of zero.
+        std::vector<uint32_t> at_zero;
+
+        template <typename Stream>
+        void Serialize(Stream& s) const
+        {
+            s << static_cast<uint8_t>(type) << id;
+            switch (type) {
+            case Type::ERASE: s << index << bundle; break;
+            case Type::APPEND: break;
+            case Type::VOTE: s << upvoted << last_upvote << saturated << at_zero; break;
+            }
+        }
+        template <typename Stream>
+        void Unserialize(Stream& s)
+        {
+            uint8_t value;
+            s >> value >> id;
+            if (value > static_cast<uint8_t>(Type::VOTE)) throw std::ios_base::failure("unknown bundle change");
+            type = static_cast<Type>(value);
+            switch (type) {
+            case Type::ERASE: s >> index >> bundle; break;
+            case Type::APPEND: break;
+            case Type::VOTE: s >> upvoted >> last_upvote >> saturated >> at_zero; break;
+            }
+        }
+    };
+
+    /** A bundle the block closed. */
+    struct Closed {
+        SidechainId id{0};
+        uint256 hash;
+        bool paid{false};
+
+        SERIALIZE_METHODS(Closed, obj) { READWRITE(obj.id, obj.hash, obj.paid); }
     };
 
     uint256 prev_block_hash;
-    //! The value each changed slot had before the block.
+    //! The slots the block changed, as they were before.
     std::vector<SlotUndo> slots;
+    //! The changes of pending bundles, in the order they were made.
+    std::vector<BundleChange> bundle_changes;
     //! Number of proposals the block added, at the end of the list.
     uint32_t proposals_added{0};
     //! Slots and hashes of the proposals whose ack count the block incremented.
@@ -43,7 +140,11 @@ struct BlockUndo {
     //! Proposals the block removed, with the position each had when it was removed, in order of removal.
     std::vector<std::pair<uint32_t, Proposal>> removed;
     //! Bundles the block closed, by being paid out or by failing.
-    std::vector<std::pair<SidechainId, uint256>> closed;
+    std::vector<Closed> closed;
+    //! Failed bundles the block forgot, as they were remembered.
+    std::vector<std::pair<std::pair<SidechainId, uint256>, ClosedBundle>> forgotten;
+    //! Bundles the block proposed (M3) and that became pending.
+    std::vector<std::pair<SidechainId, uint256>> proposed;
     //! The votes of the previous block, which this block replaced.
     std::map<SidechainId, Vote> last_votes;
 
@@ -51,7 +152,7 @@ struct BlockUndo {
     //! every entry of the store it changed (sidechain/store.h).
     sidechain::StoreUndo side;
 
-    SERIALIZE_METHODS(BlockUndo, obj) { READWRITE(obj.prev_block_hash, obj.slots, obj.proposals_added, obj.acked, obj.removed, obj.closed, obj.last_votes, obj.side); }
+    SERIALIZE_METHODS(BlockUndo, obj) { READWRITE(obj.prev_block_hash, obj.slots, obj.bundle_changes, obj.proposals_added, obj.acked, obj.removed, obj.closed, obj.forgotten, obj.proposed, obj.last_votes, obj.side); }
 };
 
 /** What the rules of a chain that is itself a sidechain need to check a block. */
@@ -144,8 +245,10 @@ public:
     std::optional<bool> WasPaid(SidechainId id, const uint256& bundle_hash) const
     {
         const auto it{m_closed.find({id, bundle_hash})};
-        return it == m_closed.end() ? std::nullopt : std::optional<bool>{it->second};
+        return it == m_closed.end() ? std::nullopt : std::optional<bool>{it->second.paid};
     }
+    /** Number of bundles remembered as paid out or failed. */
+    size_t ClosedCount() const { return m_closed.size(); }
 
     /**
      * The active sidechains, in slot order, with their pending bundles. The
@@ -163,6 +266,11 @@ public:
     static std::vector<Bundle>::const_iterator WeakestBundle(const std::vector<Bundle>& bundles);
     /** Number of blocks a bundle has left to reach the minimum work score, as of `height`. */
     static int BlocksLeft(const Bundle& bundle, int height, const Consensus::DrivechainParams& params);
+    /**
+     * Whether a bundle fails in the block at `height` before that block's votes count, for going
+     * too long without an upvote (DrivechainParams::upvote_expiry_blocks).
+     */
+    static bool UpvoteExpired(const Bundle& bundle, int height, const Consensus::DrivechainParams& params);
 
     /** Hash committing to the entire state. */
     uint256 GetHash() const;
@@ -170,25 +278,51 @@ public:
     // The state of this chain as a sidechain of another is not here: it is in its store
     // (sidechain/store.h), one entry per key, of which ConnectBlock is given an overlay.
 
-    SERIALIZE_METHODS(SidechainDB, obj) { READWRITE(obj.m_block_hash, obj.m_slots, obj.m_proposals, obj.m_closed, obj.m_last_votes); }
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        s << m_block_hash << m_slots << m_proposals << m_closed << m_last_votes;
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        s >> m_block_hash >> m_slots >> m_proposals >> m_closed >> m_last_votes;
+        m_failed_by_height.clear();
+        for (const auto& [key, closed] : m_closed) {
+            if (!closed.paid) m_failed_by_height.emplace(closed.height, key.first, key.second);
+        }
+    }
 
     friend bool operator==(const SidechainDB&, const SidechainDB&) = default;
 
 private:
     /** Remember the value of a slot before its first change in a block. */
-    void SaveSlot(SidechainId id, BlockUndo& undo) const;
-    void CloseBundle(SidechainId id, const uint256& hash, bool paid, BlockUndo& undo);
+    BlockUndo::SlotUndo& SaveSlot(SidechainId id, BlockUndo& undo) const;
+    void EraseBundle(Slot& slot, SidechainId id, size_t index, BlockUndo& undo);
+    void CloseBundle(SidechainId id, const uint256& hash, bool paid, int height, BlockUndo& undo);
     void RemoveProposal(size_t index, BlockUndo& undo);
+    /**
+     * Forget the bundles that failed withdrawal_period blocks or more before `height` (from
+     * audit2_height). A failed bundle is remembered so that it is not proposed again, which a
+     * sidechain that refunded its withdrawals would not expect; by then it has had a whole
+     * withdrawal period to act on the failure, the bundle is older than any bundle can be while
+     * pending, and paying it out again would take the same majority of the hashrate, upvoting for as
+     * long, as paying out any bundle nobody vouches for. Forgetting bounds what a miner can add to
+     * the state by proposing bundles nobody votes for: one per sidechain per block, for one period.
+     */
+    void ForgetFailedBundles(int height, const Consensus::DrivechainParams& params, BlockUndo& undo);
 
     uint256 m_block_hash;
     //! The active sidechains.
     std::map<SidechainId, Slot> m_slots;
     //! Proposals collecting acks, oldest first.
     std::vector<Proposal> m_proposals;
-    //! Bundles that were paid out (true) or failed (false); they cannot be proposed again.
-    std::map<std::pair<SidechainId, uint256>, bool> m_closed;
+    //! Bundles that were paid out or failed; they cannot be proposed again (until a failed one is forgotten).
+    std::map<std::pair<SidechainId, uint256>, ClosedBundle> m_closed;
     //! The votes the last block cast: an upvote of a bundle or a downvote, per sidechain.
     std::map<SidechainId, Vote> m_last_votes;
+    //! The failed bundles of m_closed by the height they failed at, oldest first; not stored, rebuilt on load.
+    std::set<std::tuple<int32_t, SidechainId, uint256>> m_failed_by_height;
 };
 
 } // namespace drivechain

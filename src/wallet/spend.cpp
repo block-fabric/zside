@@ -8,6 +8,7 @@
 #include <common/system.h>
 #include <consensus/amount.h>
 #include <consensus/validation.h>
+#include <drivechain/sidechain.h>
 #include <interfaces/chain.h>
 #include <node/types.h>
 #include <numeric>
@@ -313,6 +314,12 @@ util::Result<CoinsResult> FetchSelectedInputs(const CWallet& wallet, const CCoin
     return result;
 }
 
+bool IsDrivechainParent(const CTransaction& tx)
+{
+    return drivechain::GetBmmRequest(tx).has_value() ||
+           std::any_of(tx.vout.begin(), tx.vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); });
+}
+
 CoinsResult AvailableCoins(const CWallet& wallet,
                            const CCoinControl* coinControl,
                            std::optional<CFeeRate> feerate,
@@ -330,6 +337,7 @@ CoinsResult AvailableCoins(const CWallet& wallet,
     const int min_depth = {coinControl ? coinControl->m_min_depth : DEFAULT_MIN_DEPTH};
     const int max_depth = {coinControl ? coinControl->m_max_depth : DEFAULT_MAX_DEPTH};
     const bool only_safe = {coinControl ? !coinControl->m_include_unsafe_inputs : true};
+    const bool skip_drivechain_parents{params.skip_drivechain_parents && !(coinControl && coinControl->m_allow_drivechain_parents)};
     const bool can_grind_r = wallet.CanGrindR();
     std::vector<COutPoint> outpoints;
 
@@ -410,6 +418,11 @@ CoinsResult AvailableCoins(const CWallet& wallet,
             }
 
             if (only_safe && !safeTx) {
+                continue;
+            }
+
+            // A transaction spending them would be refused (MemPoolAccept::PreChecks).
+            if (nDepth == 0 && skip_drivechain_parents && IsDrivechainParent(*wtx.GetTx())) {
                 continue;
             }
 
@@ -550,6 +563,7 @@ std::map<CTxDestination, std::vector<COutput>> ListCoins(const CWallet& wallet)
     CCoinControl coin_control;
     CoinFilterParams coins_params;
     coins_params.skip_locked = false;
+    coins_params.skip_drivechain_parents = false;
     for (const COutput& coin : AvailableCoins(wallet, &coin_control, /*feerate=*/std::nullopt, coins_params).All()) {
         CTxDestination address;
         if (!ExtractDestination(FindNonChangeParentOutput(wallet, coin.outpoint).scriptPubKey, address)) {

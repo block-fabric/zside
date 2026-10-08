@@ -17,6 +17,7 @@
 
 #include <core_io.h>
 #include <interfaces/handler.h>
+#include <sync.h>
 #include <tinyformat.h>
 #include <uint256.h>
 
@@ -96,20 +97,24 @@ public:
     //! Local cache of wallet sorted by transaction hash
     QList<TransactionRecord> cachedWallet;
 
+    /** Guards the notification state below: the wallet notifies from its own threads (validation
+     *  notifications, RPC, rescan progress) while the model is loaded on another one. */
+    Mutex m_notifications_mutex;
     /** True when model finishes loading all wallet transactions on start */
-    bool m_loaded = false;
+    bool m_loaded GUARDED_BY(m_notifications_mutex) = false;
     /** True when transactions are being notified, for instance when scanning */
-    bool m_loading = false;
-    std::vector< TransactionNotification > vQueueNotifications;
+    bool m_loading GUARDED_BY(m_notifications_mutex) = false;
+    std::vector< TransactionNotification > vQueueNotifications GUARDED_BY(m_notifications_mutex);
 
-    void NotifyTransactionChanged(const Txid& hash, ChangeType status);
-    void DispatchNotifications();
+    void NotifyTransactionChanged(const Txid& hash, ChangeType status) EXCLUSIVE_LOCKS_REQUIRED(!m_notifications_mutex);
+    void NotifyShowProgress(int progress) EXCLUSIVE_LOCKS_REQUIRED(!m_notifications_mutex);
+    void DispatchNotifications() EXCLUSIVE_LOCKS_REQUIRED(m_notifications_mutex);
 
     /* Query entire wallet anew from core.
      */
-    void refreshWallet(interfaces::Wallet& wallet)
+    void refreshWallet(interfaces::Wallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(!m_notifications_mutex)
     {
-        assert(!m_loaded);
+        assert(!WITH_LOCK(m_notifications_mutex, return m_loaded));
         {
             for (const auto& wtx : wallet.getWalletTxs()) {
                 if (TransactionRecord::showTransaction()) {
@@ -117,6 +122,7 @@ public:
                 }
             }
         }
+        LOCK(m_notifications_mutex);
         m_loaded = true;
         DispatchNotifications();
     }
@@ -680,6 +686,8 @@ void TransactionTablePriv::NotifyTransactionChanged(const Txid& hash, ChangeType
 
     TransactionNotification notification(hash, status, showTransaction);
 
+    // Under the lock, so it is queued or posted in order with the queued ones (posting does not block).
+    LOCK(m_notifications_mutex);
     if (!m_loaded || m_loading)
     {
         vQueueNotifications.push_back(notification);
@@ -688,8 +696,16 @@ void TransactionTablePriv::NotifyTransactionChanged(const Txid& hash, ChangeType
     notification.invoke(parent);
 }
 
+void TransactionTablePriv::NotifyShowProgress(int progress)
+{
+    LOCK(m_notifications_mutex);
+    m_loading = progress < 100;
+    DispatchNotifications();
+}
+
 void TransactionTablePriv::DispatchNotifications()
 {
+    AssertLockHeld(m_notifications_mutex);
     if (!m_loaded || m_loading) return;
 
     if (vQueueNotifications.size() > 10) { // prevent balloon spam, show maximum 10 balloons
@@ -715,8 +731,7 @@ void TransactionTableModel::subscribeToCoreSignals()
         priv->NotifyTransactionChanged(hash, status);
     });
     m_handler_show_progress = walletModel->wallet().handleShowProgress([this](const std::string&, int progress) {
-        priv->m_loading = progress < 100;
-        priv->DispatchNotifications();
+        priv->NotifyShowProgress(progress);
     });
 }
 

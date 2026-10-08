@@ -6,6 +6,7 @@
 
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
+#include <qt/itemviews.h>
 #include <qt/noderpc.h>
 
 #include <QDateTime>
@@ -37,7 +38,7 @@ constexpr size_t MAX_MEMPOOL_ROWS{1000};
 
 QTableWidget* Table(const QStringList& headers, QWidget* parent)
 {
-    auto* table{new QTableWidget(0, headers.size(), parent)};
+    auto* table{new ItemViews::Table(0, headers.size(), parent)};
     table->setHorizontalHeaderLabels(headers);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -100,7 +101,7 @@ BlockExplorer::BlockExplorer(QWidget* parent) : QDialog(parent, GUIUtil::dialog_
     m_details_title->setTextInteractionFlags(Qt::TextSelectableByMouse);
     lower_layout->addWidget(m_details_title);
     auto* details_splitter{new QSplitter(Qt::Horizontal, lower)};
-    m_block_txs = new QListWidget(details_splitter);
+    m_block_txs = new ItemViews::List(details_splitter);
     m_block_txs->setObjectName("explorerBlockTxs");
     m_block_txs->setToolTip(tr("Transactions of the block. Click one to see it."));
     m_details = new QPlainTextEdit(details_splitter);

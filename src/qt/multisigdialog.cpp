@@ -6,6 +6,7 @@
 
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
+#include <qt/itemviews.h>
 
 #include <QApplication>
 #include <QComboBox>
@@ -40,7 +41,7 @@ enum { COL_NAME, COL_SIGNERS, COL_BALANCE, COL_ADDRESS, COL_DESCRIPTOR };
 
 QTableWidget* Table(const QStringList& headers, QWidget* parent, const char* name)
 {
-    auto* table{new QTableWidget(0, headers.size(), parent)};
+    auto* table{new ItemViews::Table(0, headers.size(), parent)};
     table->setObjectName(name);
     table->setHorizontalHeaderLabels(headers);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -102,7 +103,7 @@ MultisigDialog::MultisigDialog(NodeRpc::WalletNameFn wallet_name, QWidget* paren
     auto* addresses_layout{new QVBoxLayout(addresses_tab)};
     auto* create{new QGroupBox(tr("New shared address"), addresses_tab)};
     auto* create_layout{new QHBoxLayout(create)};
-    m_signers = new QListWidget(create);
+    m_signers = new ItemViews::List(create);
     m_signers->setObjectName("multisigSigners");
     m_signers->setToolTip(tr("Tick the keys that share the address."));
     create_layout->addWidget(m_signers, 1);

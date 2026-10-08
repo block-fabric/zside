@@ -6,6 +6,7 @@
 
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
+#include <qt/itemviews.h>
 #include <qt/noderpc.h>
 #include <qt/platformstyle.h>
 #include <qt/sidebarmining.h>
@@ -116,9 +117,9 @@ QWidget* SidechainPage::createWithdrawTab()
     m_withdraw_fee->setObjectName("withdrawFee");
     m_withdraw_fee->setToolTip(tr("Paid to the miners of the mainchain, on top of the amount. Withdrawals that offer more go first."));
     form->addRow(tr("Mainchain fee:"), m_withdraw_fee);
-    auto* withdraw_button{new QPushButton(tr("Withdraw"), box)};
-    withdraw_button->setObjectName("withdrawButton");
-    form->addRow(withdraw_button);
+    m_withdraw_button = new QPushButton(tr("Withdraw"), box);
+    m_withdraw_button->setObjectName("withdrawButton");
+    form->addRow(m_withdraw_button);
     layout->addWidget(box);
 
     m_bundle = new QLabel(tab);
@@ -126,7 +127,7 @@ QWidget* SidechainPage::createWithdrawTab()
     m_bundle->setWordWrap(true);
     layout->addWidget(m_bundle);
 
-    m_withdrawals = new QTableWidget(0, 7, tab);
+    m_withdrawals = new ItemViews::Table(0, 7, tab);
     m_withdrawals->setObjectName("withdrawals");
     m_withdrawals->setHorizontalHeaderLabels({tr("Status"), tr("Amount"), tr("Mainchain fee"), tr("Block"), tr("Refund address"), tr("Transaction"), tr("Output")});
     m_withdrawals->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -135,13 +136,13 @@ QWidget* SidechainPage::createWithdrawTab()
     m_withdrawals->verticalHeader()->hide();
     m_withdrawals->horizontalHeader()->setStretchLastSection(true);
     layout->addWidget(m_withdrawals, 1);
-    auto* refund_button{new QPushButton(tr("Take the selected withdrawal back"), tab)};
-    refund_button->setObjectName("refundButton");
-    refund_button->setToolTip(tr("Works for withdrawals of this wallet that are waiting, not for those in the bundle being voted on."));
-    layout->addWidget(refund_button, 0, Qt::AlignLeft);
+    m_refund_button = new QPushButton(tr("Take the selected withdrawal back"), tab);
+    m_refund_button->setObjectName("refundButton");
+    m_refund_button->setToolTip(tr("Works for withdrawals of this wallet that are waiting, not for those in the bundle being voted on."));
+    layout->addWidget(m_refund_button, 0, Qt::AlignLeft);
 
-    connect(withdraw_button, &QPushButton::clicked, this, &SidechainPage::withdraw);
-    connect(refund_button, &QPushButton::clicked, this, &SidechainPage::refund);
+    connect(m_withdraw_button, &QPushButton::clicked, this, &SidechainPage::withdraw);
+    connect(m_refund_button, &QPushButton::clicked, this, &SidechainPage::refund);
     return tab;
 }
 
@@ -182,12 +183,12 @@ QWidget* SidechainPage::createMiningTab()
     m_mining_amount->setObjectName("bmmAmount");
     m_mining_amount->setMaximumWidth(140);
     once->addWidget(m_mining_amount);
-    auto* mine_once{new QPushButton(tr("Mine one block"), tab)};
-    mine_once->setObjectName("bmmOnce");
-    once->addWidget(mine_once);
+    m_mine_once = new QPushButton(tr("Mine one block"), tab);
+    m_mine_once->setObjectName("bmmOnce");
+    once->addWidget(m_mine_once);
     once->addStretch();
     layout->addLayout(once);
-    connect(mine_once, &QPushButton::clicked, this, &SidechainPage::mineOnce);
+    connect(m_mine_once, &QPushButton::clicked, this, &SidechainPage::mineOnce);
 
     m_mining_status = new QLabel(tab);
     m_mining_status->setObjectName("bmmStatus");
@@ -195,8 +196,11 @@ QWidget* SidechainPage::createMiningTab()
     layout->addWidget(m_mining_status);
     layout->addStretch();
 
-    // Mining is also set from the bar at the left of the main window.
-    connect(MiningChanges(), &MiningSignals::changed, this, &SidechainPage::refresh);
+    // Mining is also set from the bar at the left of the main window. There is a page per wallet:
+    // only the one shown is refreshed, the others are when they are shown (showEvent).
+    connect(MiningChanges(), &MiningSignals::changed, this, [this] {
+        if (isVisible()) refresh();
+    });
     connect(m_mining_start, &QPushButton::clicked, this, [this] { setMining(true); });
     connect(m_mining_stop, &QPushButton::clicked, this, [this] { setMining(false); });
     return tab;
@@ -239,6 +243,27 @@ std::optional<UniValue> SidechainPage::call(const std::string& method, const Uni
     return result;
 }
 
+void SidechainPage::callAsync(const std::string& method, const UniValue& params, std::function<void(const UniValue&)> success,
+                              std::function<void()> finally, bool wallet)
+{
+    std::optional<QString> wallet_name;
+    if (wallet) {
+        if (!m_wallet_model) {
+            finally();
+            return;
+        }
+        wallet_name = m_wallet_model->getWalletName();
+    }
+    NodeRpc::CallAsync(this, m_client_model, method, params, [this, success = std::move(success), finally = std::move(finally)](std::optional<UniValue> result, const QString& error) {
+        finally();
+        if (!result) {
+            QMessageBox::warning(this, tr("Mainchain"), error);
+            return;
+        }
+        success(*result);
+    }, wallet_name);
+}
+
 void SidechainPage::newDepositAddress()
 {
     if (const auto address{call("getdepositaddress", Args({}), /*wallet=*/true)}) m_deposit_address->setText(Text((*address)["depositaddress"]));
@@ -255,12 +280,13 @@ void SidechainPage::withdraw()
     }
     if (QMessageBox::question(this, tr("Mainchain"), tr("Withdraw %1 to the mainchain address %2, offering mainchain miners %3? %4 leave this wallet now.")
                                                          .arg(amount, address, fee, QString::number(amount.toDouble() + fee.toDouble(), 'f', 8))) != QMessageBox::Yes) return;
-    const auto result{call("createwithdrawal", Args({address.toStdString(), amount.toStdString(), fee.toStdString()}), /*wallet=*/true)};
-    if (!result) return;
-    m_withdraw_address->clear();
-    m_withdraw_amount->clear();
-    QMessageBox::information(this, tr("Mainchain"), tr("The withdrawal is in transaction %1. It shows in the list once the transaction is mined.").arg(Text((*result)["txid"])));
-    refresh();
+    m_withdraw_button->setEnabled(false);
+    callAsync("createwithdrawal", Args({address.toStdString(), amount.toStdString(), fee.toStdString()}), [this](const UniValue& result) {
+        m_withdraw_address->clear();
+        m_withdraw_amount->clear();
+        QMessageBox::information(this, tr("Mainchain"), tr("The withdrawal is in transaction %1. It shows in the list once the transaction is mined.").arg(Text(result["txid"])));
+        refresh();
+    }, [this] { m_withdraw_button->setEnabled(true); });
 }
 
 void SidechainPage::refund()
@@ -270,10 +296,11 @@ void SidechainPage::refund()
         QMessageBox::information(this, tr("Mainchain"), tr("Select a withdrawal in the list first."));
         return;
     }
-    const auto result{call("refundwithdrawal", Args({m_withdrawals->item(row, COL_TXID)->text().toStdString(), m_withdrawals->item(row, COL_VOUT)->text().toInt()}), /*wallet=*/true)};
-    if (!result) return;
-    QMessageBox::information(this, tr("Mainchain"), tr("%1 will be paid back to %2 by the block that mines the request.").arg(Amount((*result)["amount"]), Text((*result)["refundaddress"])));
-    refresh();
+    m_refund_button->setEnabled(false);
+    callAsync("refundwithdrawal", Args({m_withdrawals->item(row, COL_TXID)->text().toStdString(), m_withdrawals->item(row, COL_VOUT)->text().toInt()}), [this](const UniValue& result) {
+        QMessageBox::information(this, tr("Mainchain"), tr("%1 will be paid back to %2 by the block that mines the request.").arg(Amount(result["amount"]), Text(result["refundaddress"])));
+        refresh();
+    }, [this] { m_refund_button->setEnabled(true); });
 }
 
 QString SidechainPage::miningAddress()
@@ -312,11 +339,14 @@ void SidechainPage::mineOnce()
     if (address.isEmpty()) return;
     UniValue params{Args({address.toStdString()})};
     params.push_back(amount.toStdString());
-    if (const auto result{call("requestbmmblock", params)}) {
+    m_mine_once->setEnabled(false);
+    callAsync("requestbmmblock", params, [this](const UniValue& result) {
         m_mining_once = tr("Asked for one block with %1 transactions and %2 of fees, offering %3. It is mined if the next block of the mainchain takes the offer.")
-                            .arg(QString::number((*result)["transactions"].getInt<int>() - 1), Amount((*result)["fees"]), Amount((*result)["amount"]));
-    }
-    Q_EMIT MiningChanges()->changed();
+                            .arg(QString::number(result["transactions"].getInt<int>() - 1), Amount(result["fees"]), Amount(result["amount"]));
+    }, [this] {
+        m_mine_once->setEnabled(true);
+        Q_EMIT MiningChanges()->changed();
+    }, /*wallet=*/false);
 }
 
 void SidechainPage::refresh()

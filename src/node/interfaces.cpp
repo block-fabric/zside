@@ -657,7 +657,7 @@ public:
             LOCK(m_node.mempool->cs);
             scdb = chainstate.GetMempoolSidechainDB({slot});
         } else {
-            scdb = chainstate.m_scdb;
+            scdb = chainstate.m_scdb.Subset({slot});
         }
         if (const drivechain::Slot* state{scdb.GetSlot(slot)}) {
             escrow.active = true;

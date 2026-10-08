@@ -228,23 +228,32 @@ std::shared_ptr<CWallet> GetWallet(WalletContext& context, const std::string& na
 
 std::unique_ptr<interfaces::Handler> HandleLoadWallet(WalletContext& context, LoadWalletFn load_wallet)
 {
+    auto handler = std::make_shared<LoadWalletHandler>();
+    WITH_LOCK(handler->mutex, handler->fn = std::move(load_wallet));
     LOCK(context.wallets_mutex);
-    auto it = context.wallet_load_fns.emplace(context.wallet_load_fns.end(), std::move(load_wallet));
-    return interfaces::MakeCleanupHandler([&context, it] { LOCK(context.wallets_mutex); context.wallet_load_fns.erase(it); });
+    auto it = context.wallet_load_fns.emplace(context.wallet_load_fns.end(), handler);
+    return interfaces::MakeCleanupHandler([&context, it, handler] {
+        WITH_LOCK(context.wallets_mutex, context.wallet_load_fns.erase(it));
+        // Wait for a call in flight (NotifyWalletLoaded holds this lock while calling), so the
+        // owner of the handler may be destroyed as soon as this returns.
+        LOCK(handler->mutex);
+        handler->fn = nullptr;
+    });
 }
 
 void NotifyWalletLoaded(WalletContext& context, const std::shared_ptr<CWallet>& wallet)
 {
-    // The handlers are called without the lock: the GUI's waits for its own thread, which may be
-    // waiting for the lock itself (to count the wallets for a notice of an incoming transaction).
-    // Holding it there deadlocked a node whose wallets received payments while one was loaded.
-    std::vector<LoadWalletFn> load_fns;
+    // The handlers are called without the wallets' lock: one waiting for another thread that
+    // waits for that lock (e.g. to count the wallets) would deadlock. Each is called under its
+    // own lock instead, which its unregistering takes, so none is called after it was removed.
+    std::vector<std::shared_ptr<LoadWalletHandler>> handlers;
     {
         LOCK(context.wallets_mutex);
-        load_fns.assign(context.wallet_load_fns.begin(), context.wallet_load_fns.end());
+        handlers.assign(context.wallet_load_fns.begin(), context.wallet_load_fns.end());
     }
-    for (auto& load_wallet : load_fns) {
-        load_wallet(interfaces::MakeWallet(context, wallet));
+    for (const auto& handler : handlers) {
+        LOCK(handler->mutex);
+        if (handler->fn) handler->fn(interfaces::MakeWallet(context, wallet));
     }
 }
 
@@ -1566,6 +1575,9 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
     // A drivechain transaction the mempool dropped can never be good again: a BMM request is for one
     // block only (or another bid replaced it), a deposit lost its treasury input to another. Left as
     // it is, it would keep its coins from the wallet; it is abandoned, which gives them back.
+    // Looked up again: SyncTransaction above may have inserted into mapWallet (a rehash
+    // invalidates its iterators).
+    it = mapWallet.find(tx->GetHash());
     if ((reason == MemPoolRemovalReason::CONFLICT || reason == MemPoolRemovalReason::REPLACED) && it != mapWallet.end() &&
         (drivechain::GetBmmRequest(*tx) || std::any_of(tx->vout.begin(), tx->vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); }))) {
         if (!it->second.isAbandoned() && GetTxDepthInMainChain(it->second) == 0 && !it->second.InMempool()) {

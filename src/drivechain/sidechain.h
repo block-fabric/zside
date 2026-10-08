@@ -149,8 +149,10 @@ struct Bundle {
     //! Height of the block that proposed the bundle.
     int32_t height{0};
     uint32_t score{0};
+    //! Height of the last block that upvoted the bundle, or of the block that proposed it if none did.
+    int32_t last_upvote{0};
 
-    SERIALIZE_METHODS(Bundle, obj) { READWRITE(obj.hash, obj.height, obj.score); }
+    SERIALIZE_METHODS(Bundle, obj) { READWRITE(obj.hash, obj.height, obj.score, obj.last_upvote); }
 
     friend bool operator==(const Bundle&, const Bundle&) = default;
 };

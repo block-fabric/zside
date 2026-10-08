@@ -555,6 +555,8 @@ RPCMethod listunspent()
 
     CoinFilterParams filter_coins;
     filter_coins.min_amount = 0;
+    // Listed, though only small drivechain transactions can spend them while unconfirmed.
+    filter_coins.skip_drivechain_parents = false;
 
     if (!request.params[4].isNull()) {
         const UniValue& options = request.params[4].get_obj();

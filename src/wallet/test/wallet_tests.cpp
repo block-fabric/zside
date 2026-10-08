@@ -4,17 +4,22 @@
 
 #include <wallet/wallet.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include <addresstype.h>
+#include <drivechain/sidechain.h>
 #include <interfaces/chain.h>
 #include <key_io.h>
 #include <node/blockstorage.h>
 #include <node/types.h>
 #include <policy/policy.h>
+#include <policy/truc_policy.h>
 #include <rpc/server.h>
 #include <script/solver.h>
 #include <test/util/common.h>
@@ -711,6 +716,50 @@ BOOST_FIXTURE_TEST_CASE(CreateWallet, TestChain100Setup)
     TestUnloadWallet(std::move(wallet));
 }
 
+//! A load handler is called without the wallets' lock, and once disconnected it is never called
+//! again: disconnecting waits for a call in flight (its owner may be deleted right after).
+BOOST_FIXTURE_TEST_CASE(load_wallet_handler_disconnect, TestingSetup)
+{
+    WalletContext context;
+    context.args = &m_args;
+    auto wallet = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase());
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    std::shared_future<void> released{release.get_future().share()};
+    std::atomic<int> calls{0};
+    std::atomic<int> other_calls{0};
+    auto handler = HandleLoadWallet(context, [&](std::unique_ptr<interfaces::Wallet>) {
+        GetWallets(context); // the wallets' lock is free
+        if (++calls == 1) {
+            entered.set_value();
+            released.wait();
+        }
+    });
+    auto other = HandleLoadWallet(context, [&](std::unique_ptr<interfaces::Wallet>) { ++other_calls; });
+
+    std::thread notifier{[&] { NotifyWalletLoaded(context, wallet); }};
+    entered.get_future().wait();
+    std::atomic<bool> disconnected{false};
+    std::thread remover{[&] { handler->disconnect(); disconnected = true; }};
+    std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    BOOST_CHECK(!disconnected); // waits for the call in flight
+    release.set_value();
+    remover.join();
+    notifier.join();
+    BOOST_CHECK(disconnected);
+    BOOST_CHECK_EQUAL(calls, 1);
+    BOOST_CHECK_EQUAL(other_calls, 1);
+
+    NotifyWalletLoaded(context, wallet);
+    BOOST_CHECK_EQUAL(calls, 1);
+    BOOST_CHECK_EQUAL(other_calls, 2);
+    handler.reset(); // destroying a disconnected handler is harmless
+    other.reset();
+    NotifyWalletLoaded(context, wallet);
+    BOOST_CHECK_EQUAL(other_calls, 2);
+}
+
 BOOST_FIXTURE_TEST_CASE(CreateWalletWithoutChain, BasicTestingSetup)
 {
     WalletContext context;
@@ -752,6 +801,72 @@ BOOST_FIXTURE_TEST_CASE(RemoveTxs, TestChain100Setup)
     }
 
     TestUnloadWallet(std::move(wallet));
+}
+
+BOOST_FIXTURE_TEST_CASE(drivechain_parents_not_selected, ListCoinsTestingSetup)
+{
+    // The mempool takes a transaction spending an unconfirmed output of a BMM request or a treasury
+    // transaction only if it is a small one of their kind (dc-unconfirmed-parent): the wallet does
+    // not select those outputs for anything else.
+    const auto request_recipient{[](uint8_t n) {
+        drivechain::BmmRequest request;
+        request.slot = 1;
+        request.side_block_hash = uint256{n};
+        request.prev_main_block_hash = uint256{2};
+        return CRecipient{CNoDestination{drivechain::BmmRequestScript(request)}, 0, /*fSubtractFeeFromAmount=*/false};
+    }};
+    CTransactionRef request;
+    {
+        CCoinControl coin_control;
+        auto res{CreateTransaction(*wallet, {request_recipient(1)}, /*change_pos=*/1, coin_control)};
+        BOOST_REQUIRE(res);
+        request = res->tx;
+    }
+    BOOST_CHECK(IsDrivechainParent(*request));
+    {
+        CMutableTransaction deposit;
+        deposit.vout.emplace_back(COIN, drivechain::EscrowScript(1));
+        BOOST_CHECK(IsDrivechainParent(CTransaction{deposit}));
+        BOOST_CHECK(!IsDrivechainParent(CTransaction{CMutableTransaction{}}));
+    }
+    // In the mempool (no sidechain is active on the test chain, which would let it in), it spends
+    // the only coin of the wallet: its change is all there is.
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_REQUIRE(wallet->AddToWallet(request, TxStateInMempool{}));
+        // (With coin control: unconfirmed coins are checked against its transaction version.)
+        const CCoinControl coin_control;
+        BOOST_CHECK_EQUAL(AvailableCoins(*wallet, &coin_control).Size(), 0U);
+        CoinFilterParams listed;
+        listed.skip_drivechain_parents = false;
+        const CoinsResult coins{AvailableCoins(*wallet, &coin_control, std::nullopt, listed)};
+        BOOST_REQUIRE_EQUAL(coins.Size(), 1U);
+        BOOST_CHECK(coins.All().at(0).outpoint == COutPoint(request->GetHash(), 1));
+        BOOST_CHECK_EQUAL(ListCoins(*wallet).size(), 1U);
+    }
+    // A payment cannot use it.
+    {
+        CCoinControl coin_control;
+        const CTxDestination dest{PKHash{coinbaseKey.GetPubKey()}};
+        BOOST_CHECK(!CreateTransaction(*wallet, {CRecipient{dest, COIN, /*fSubtractFeeFromAmount=*/false}}, /*change_pos=*/std::nullopt, coin_control));
+    }
+    // Another request can, made small enough.
+    {
+        CCoinControl coin_control;
+        coin_control.m_allow_drivechain_parents = true;
+        coin_control.m_max_tx_weight = TRUC_CHILD_MAX_WEIGHT;
+        auto res{CreateTransaction(*wallet, {request_recipient(3)}, /*change_pos=*/1, coin_control)};
+        BOOST_REQUIRE(res);
+        BOOST_CHECK(res->tx->vin.at(0).prevout == COutPoint(request->GetHash(), 1));
+        BOOST_CHECK_LE(GetTransactionWeight(*res->tx), TRUC_CHILD_MAX_WEIGHT);
+    }
+    // Once confirmed, it is a coin like any other.
+    {
+        LOCK(wallet->cs_wallet);
+        LOCK(Assert(m_node.chainman)->GetMutex());
+        wallet->mapWallet.at(request->GetHash()).m_state = TxStateConfirmed{m_node.chainman->ActiveChain().Tip()->GetBlockHash(), m_node.chainman->ActiveChain().Height(), /*index=*/1};
+        BOOST_CHECK_EQUAL(AvailableCoins(*wallet).Size(), 1U);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

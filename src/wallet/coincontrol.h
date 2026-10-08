@@ -117,6 +117,10 @@ public:
     std::optional<uint32_t> m_locktime;
     //! Caps weight of resulting tx
     std::optional<int> m_max_tx_weight{std::nullopt};
+    //! Whether the unconfirmed outputs of BMM requests and treasury transactions may be selected. The
+    //! mempool takes a transaction that spends them only if it is a small BMM request or treasury
+    //! transaction itself (dc-unconfirmed-parent): set for those only, with m_max_tx_weight.
+    bool m_allow_drivechain_parents{false};
 
     CCoinControl();
 

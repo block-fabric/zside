@@ -164,6 +164,17 @@ struct DrivechainParams {
      */
     int idle_expiry_height{0};
     int idle_expiry_blocks{1008};
+    /**
+     * From this height, the rules of the second audit:
+     *  - a bundle that upvote_expiry_blocks blocks in a row did not upvote, counting from the block
+     *    that proposed it or from its last upvote, fails. Whoever proposes a bundle nobody vouches
+     *    for (to stall the withdrawals and refunds of a sidechain, whose software waits on what is
+     *    pending) has to keep upvoting it to keep it, rather than wait for the idle expiry;
+     *  - a failed bundle is forgotten withdrawal_period blocks after it failed, so that proposals
+     *    nobody votes for do not add to the state forever (see SidechainDB::ForgetFailedBundles).
+     */
+    int audit2_height{0};
+    int upvote_expiry_blocks{144};
 };
 
 /**

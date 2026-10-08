@@ -9,6 +9,7 @@
 
 #include <QWidget>
 
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -65,6 +66,13 @@ private:
      * if the command fails.
      */
     std::optional<UniValue> call(const std::string& method, const UniValue& params, bool wallet = false, bool quiet = false);
+    /**
+     * Run an RPC command that can take long off the GUI thread. Then, on the GUI thread, `finally`,
+     * and `success` with the result, or the error is shown to the user. Nothing runs if the page is
+     * gone by then.
+     */
+    void callAsync(const std::string& method, const UniValue& params, std::function<void(const UniValue&)> success,
+                   std::function<void()> finally, bool wallet = true);
 
     QWidget* createDepositTab();
     QWidget* createWithdrawTab();
@@ -83,11 +91,14 @@ private:
     QLineEdit* m_withdraw_address{nullptr};
     QLineEdit* m_withdraw_amount{nullptr};
     QLineEdit* m_withdraw_fee{nullptr};
+    QPushButton* m_withdraw_button{nullptr};
     QLabel* m_bundle{nullptr};
     QTableWidget* m_withdrawals{nullptr};
+    QPushButton* m_refund_button{nullptr};
 
     QLineEdit* m_mining_address{nullptr};
     QLineEdit* m_mining_amount{nullptr};
+    QPushButton* m_mine_once{nullptr};
     QPushButton* m_mining_start{nullptr};
     QPushButton* m_mining_stop{nullptr};
     QLabel* m_mining_status{nullptr};

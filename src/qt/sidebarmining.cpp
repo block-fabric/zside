@@ -138,14 +138,18 @@ void SidebarMining::mineOnce()
     }
     const QString to{address()};
     if (to.isEmpty()) return;
-    QString error;
     UniValue params{Args({to.toStdString()})};
     params.push_back(fee.toStdString());
-    if (const auto result{NodeRpc::Call(m_client_model, "requestbmmblock", params, error)}) {
-        say(tr("Block asked for; the next mainchain block mines it."));
-    } else {
-        say(error, /*error=*/true);
-    }
+    // Off the GUI thread: the request waits on the mainchain node, for up to a minute.
+    m_once->setEnabled(false);
+    NodeRpc::CallAsync(this, m_client_model, "requestbmmblock", params, [this](std::optional<UniValue> result, const QString& error) {
+        m_once->setEnabled(true);
+        if (result) {
+            say(tr("Block asked for; the next mainchain block mines it."));
+        } else {
+            say(error, /*error=*/true);
+        }
+    });
 }
 
 void SidebarMining::refresh()
