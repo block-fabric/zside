@@ -154,7 +154,19 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
         for (uint32_t n{0}; n < tx.vout.size(); ++n) {
             if (state.GetWithdrawal(COutPoint{tx.GetHash(), n})) made.emplace_back(tx.GetHash(), n);
         }
-        (void)state.TakePayouts(payouts, tx_payouts);
+        {
+            // Never more than a block can pay, either way; shared, a queue with payouts owed gets at
+            // least its half, or all it has.
+            const bool shared{fdp.ConsumeBool()};
+            const size_t queued{state.Queue().size() + payouts.size()}, queued_tx{state.TxQueue().size() + tx_payouts.size()};
+            const auto paid{state.TakePayouts(payouts, tx_payouts, shared)};
+            assert(paid.size() == std::min(queued + queued_tx, sidechain::MAX_PAYOUTS_PER_BLOCK));
+            if (shared) {
+                const size_t half{sidechain::MAX_PAYOUTS_PER_BLOCK / 2};
+                assert(queued - state.Queue().size() >= std::min(queued, half));
+                assert(queued_tx - state.TxQueue().size() >= std::min(queued_tx, half));
+            }
+        }
         const sidechain::StoreUndo undo{block.TakeUndo()};
         block.MergeInto(cache);
 

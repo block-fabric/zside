@@ -290,7 +290,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
             drop({pblock->vtx[i]->GetHash()});
         }
         // As many of the payouts owed as a block may pay; the rest wait for the next block.
-        side_outputs = side.TakePayouts(std::move(side_outputs), std::move(side_tx_outputs));
+        side_outputs = side.TakePayouts(std::move(side_outputs), std::move(side_tx_outputs), nHeight >= side_params.audit2_height);
         if (bundle_hash) side_outputs.emplace_back(0, sidechain::BundleCommitScript(*bundle_hash));
     }
 

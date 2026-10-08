@@ -10,6 +10,7 @@
 #include <consensus/params.h>
 #include <kernel/caches.h>
 #include <node/blockstorage.h>
+#include <sidechain/store.h>
 #include <sync.h>
 #include <tinyformat.h>
 #include <txdb.h>
@@ -123,8 +124,8 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
-            if (!chainstate->LoadDrivechainState()) {
-                return {ChainstateLoadStatus::FAILURE, _("Error loading the sidechain database. You will need to rebuild the databases using -reindex.")};
+            if (auto loaded{chainstate->LoadDrivechainState()}; !loaded) {
+                return {ChainstateLoadStatus::FAILURE, Untranslated(strprintf("Error loading the sidechain database: %s", util::ErrorString(loaded).original))};
             }
         } else {
             // The chain is connected again from genesis: so is the sidechain state.
@@ -157,6 +158,10 @@ static ChainstateLoadResult CompleteChainstateInitialization(
 ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSizes& cache_sizes,
                                     const ChainstateLoadOptions& options)
 {
+    // Two tables of the sidechain state under the same key byte would read each other's entries.
+    if (const auto duplicates{sidechain::DuplicateTableIds()}; !duplicates.empty()) {
+        return {ChainstateLoadStatus::FAILURE_FATAL, Untranslated(strprintf("Two tables of the sidechain state take the key byte 0x%02x: this build is broken", duplicates.front()))};
+    }
     if (!chainman.AssumedValidBlock().IsNull()) {
         LogInfo("Assuming ancestors of block %s have valid signatures.", chainman.AssumedValidBlock().GetHex());
     } else {

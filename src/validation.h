@@ -826,7 +826,7 @@ public:
      * snapshot taken at the last flush and using the undo data and blocks on
      * disk for the difference.
      */
-    bool LoadDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    util::Result<void> LoadDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * Start the drivechain database over, for a chainstate that starts over: one whose coins are
      * empty (-reindex-chainstate, a deleted chainstate directory) derives it again from genesis, and
@@ -875,8 +875,13 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(::cs_main);
 
-    /** Mark a block as invalid. */
-    bool InvalidateBlock(BlockValidationState& state, CBlockIndex* pindex)
+    /**
+     * Mark a block as invalid.
+     * @param[in] by_record  on a sidechain: the block lost its commitment on the mainchain, or its
+     *                       commitment moved, and may be valid again (ReconsiderRecordFailure); if
+     *                       not, the operator marked it, and it stays invalid until reconsidered.
+     */
+    bool InvalidateBlock(BlockValidationState& state, CBlockIndex* pindex, bool by_record = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(::cs_main);
 
@@ -885,6 +890,14 @@ public:
 
     /** Remove invalidity status from a block, its descendants and ancestors and reconsider them for activation */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /**
+     * On a sidechain: take back the failure of a block whose failure depended on the record of the
+     * mainchain, now that the record changed. The failure is that of the lowest failed block below
+     * it, which must have failed against the record (sidechain::Mainchain::Failure::RECORD); then it,
+     * and the blocks above it, are reconsidered, but for those the operator marked invalid and what
+     * is built on them. @return whether anything was reconsidered
+     */
+    bool ReconsiderRecordFailure(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();

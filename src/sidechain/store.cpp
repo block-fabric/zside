@@ -7,7 +7,9 @@
 #include <hash.h>
 
 #include <algorithm>
+#include <map>
 #include <memory>
+#include <mutex>
 
 namespace sidechain {
 
@@ -124,14 +126,53 @@ void StoreOverlay::MergeInto(StoreOverlay& parent)
     Clear();
 }
 
-uint256 StoreHash(const StoreView& view, std::span<const unsigned char> prefix)
+uint256 StoreHash(const StoreView& view, std::span<const unsigned char> prefix,
+                  const std::function<void(const StoreBytes&, const StoreBytes&)>& each)
 {
     HashWriter hasher{};
     view.ForEach(prefix, [&](const StoreBytes& key, const StoreBytes& value) {
         hasher << key << value;
+        if (each) each(key, value);
         return true;
     });
     return hasher.GetHash();
+}
+
+namespace {
+std::mutex& TableIdMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+//! How many tables took each byte. Made on first use: tables are made before main, in any order.
+std::map<uint8_t, int>& TableIds()
+{
+    static std::map<uint8_t, int> ids;
+    return ids;
+}
+} // namespace
+
+TableId::TableId(uint8_t id) : m_id{id}, m_taken{true}
+{
+    std::lock_guard lock{TableIdMutex()};
+    ++TableIds()[id];
+}
+
+TableId::~TableId()
+{
+    if (!m_taken) return;
+    std::lock_guard lock{TableIdMutex()};
+    --TableIds()[m_id];
+}
+
+std::vector<uint8_t> DuplicateTableIds()
+{
+    std::lock_guard lock{TableIdMutex()};
+    std::vector<uint8_t> duplicates;
+    for (const auto& [id, count] : TableIds()) {
+        if (count > 1) duplicates.push_back(id);
+    }
+    return duplicates;
 }
 
 } // namespace sidechain

@@ -2475,6 +2475,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     uint256 block_hash{block.GetHash()};
     assert(*pindex->phashBlock == block_hash);
+    // VerifyDB connects blocks of the chain again, on a sidechain database of its own.
+    const bool verifying{scdb && scdb != &m_scdb};
 
     const auto time_start{SteadyClock::now()};
     const CChainParams& params{m_chainman.GetParams()};
@@ -2837,6 +2839,15 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         if (scdb != &scdb_copy && params.DefaultConsistencyChecks()) scdb_check.emplace(*scdb);
         std::string reject_reason;
         const auto side{m_chainman.SideContext(minted, block_store)};
+        // A record of the mainchain still missing the bundles its blocks proposed (Mainchain::NeedsBackfill)
+        // cannot tell whether one was pending: the block waits for it, as for a commitment not on record
+        // yet. Not when checking blocks connected before (VerifyDB).
+        if (side && !verifying && pindex->nHeight >= side->params.single_bundle_height && m_chainman.m_mainchain->NeedsBackfill()) {
+            if (!fJustCheck) m_chainman.m_mainchain->NoteFailure(block_hash, sidechain::Mainchain::Failure::RECORD);
+            state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "bad-sc-main-backfill", "the record of the mainchain is still being filled in");
+            LogInfo("Block validation error: %s", state.ToString());
+            return false;
+        }
         if (scdb != &scdb_copy) {
             // Field by field: assigning a temporary would run its destructor, which rolls back.
             scdb_rollback.undo = &scdb_undo;
@@ -2844,7 +2855,13 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             scdb_rollback.db = scdb;
         }
         if (!scdb->ConnectBlock(block, pindex->nHeight, params.GetConsensus().drivechain, scdb_undo, &scdb_deposits, reject_reason, side ? &*side : nullptr)) {
-            state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
+            // The rules of the sidechain are checked against the record of the mainchain, which can
+            // change: the follower takes the failure back if the block's commitment comes back.
+            if (side && side->failed && !fJustCheck && !verifying) m_chainman.m_mainchain->NoteFailure(block_hash, sidechain::Mainchain::Failure::RECORD);
+            // What is not on record yet is no fault of the peer that sent the block. Nor, to VerifyDB,
+            // is a block of the chain the record does not agree with any more a sign of a corrupt database.
+            const bool not_yet{reject_reason == "bmm-unknown" || reject_reason == "bad-sc-main-unknown" || (verifying && side && side->failed)};
+            state.Invalid(not_yet ? BlockValidationResult::BLOCK_TIME_FUTURE : BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
         } else if (scdb_check) {
             CAmount check_minted{0};
             sidechain::StoreOverlay check_store{side_base, /*journal=*/true};
@@ -2885,7 +2902,10 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (!m_blockman.WriteBlockUndo(blockundo, state, *pindex)) {
         return false;
     }
-    if (!m_blockman.m_drivechain_db->WriteBlock(block_hash, pindex->nHeight, scdb_undo, scdb_deposits)) {
+    // VerifyDB connects the blocks of the chain again, against the record of the mainchain as it is
+    // now: if a commitment moved, that is not what the block did when it was connected, which the
+    // undo data has to keep to take the block back.
+    if (!verifying && !m_blockman.m_drivechain_db->WriteBlock(block_hash, pindex->nHeight, scdb_undo, scdb_deposits)) {
         return FatalError(m_chainman.GetNotifications(), state, _("Failed to write drivechain undo data."));
     }
 
@@ -3801,7 +3821,7 @@ bool Chainstate::PreciousBlock(BlockValidationState& state, CBlockIndex* pindex)
     return ActivateBestChain(state, std::shared_ptr<const CBlock>());
 }
 
-bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const pindex)
+bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const pindex, bool by_record)
 {
     AssertLockNotHeld(m_chainstate_mutex);
     AssertLockNotHeld(::cs_main);
@@ -3809,6 +3829,11 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
     // Genesis block can't be invalidated
     assert(pindex);
     if (pindex->nHeight == 0) return false;
+
+    // On a sidechain the follower takes back what the record of the mainchain did, not what the operator did.
+    if (m_chainman.m_mainchain) {
+        m_chainman.m_mainchain->NoteFailure(pindex->GetBlockHash(), by_record ? sidechain::Mainchain::Failure::RECORD : sidechain::Mainchain::Failure::MANUAL);
+    }
 
     // We do not allow ActivateBestChain() to run while InvalidateBlock() is
     // running, as that could cause the tip to change while we disconnect
@@ -4008,8 +4033,41 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
                 // Reset invalid block marker if it was pointing to one of those.
                 m_chainman.m_best_invalid = nullptr;
             }
+            if (m_chainman.m_mainchain) m_chainman.m_mainchain->ForgetFailure(block_index.GetBlockHash());
         }
     }
+}
+
+bool Chainstate::ReconsiderRecordFailure(CBlockIndex* pindex)
+{
+    AssertLockHeld(cs_main);
+    if (!m_chainman.m_mainchain || !(pindex->nStatus & BLOCK_FAILED_VALID)) return false;
+    sidechain::Mainchain& mainchain{*m_chainman.m_mainchain};
+    // The failure of a block is that of the lowest failed block below it: what is built on a failed
+    // block is marked failed with it.
+    CBlockIndex* root{pindex};
+    while (root->pprev && (root->pprev->nStatus & BLOCK_FAILED_VALID)) root = root->pprev;
+    if (mainchain.GetFailure(root->GetBlockHash()) != sidechain::Mainchain::Failure::RECORD) return false;
+    std::vector<CBlockIndex*> failed;
+    for (auto& [_, block_index] : m_blockman.m_block_index) {
+        if ((block_index.nStatus & BLOCK_FAILED_VALID) && block_index.GetAncestor(root->nHeight) == root) failed.push_back(&block_index);
+    }
+    std::sort(failed.begin(), failed.end(), [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight < b->nHeight; });
+    for (CBlockIndex* block_index : failed) {
+        // Above a block that stays failed, everything does.
+        if (block_index != root && (block_index->pprev->nStatus & BLOCK_FAILED_VALID)) continue;
+        if (block_index != root && mainchain.GetFailure(block_index->GetBlockHash()) == sidechain::Mainchain::Failure::MANUAL) continue;
+        block_index->nStatus &= ~BLOCK_FAILED_VALID;
+        m_blockman.m_dirty_blockindex.insert(block_index);
+        if (block_index->IsValid(BLOCK_VALID_TRANSACTIONS) && block_index->HaveNumChainTxs() && setBlockIndexCandidates.value_comp()(m_chain.Tip(), block_index)) {
+            setBlockIndexCandidates.insert(block_index);
+        }
+        if (block_index == m_chainman.m_best_invalid) m_chainman.m_best_invalid = nullptr;
+        // Checked again when connected: if it fails, against the record or not, it is noted anew.
+        if (mainchain.GetFailure(block_index->GetBlockHash()) == sidechain::Mainchain::Failure::RECORD) mainchain.ForgetFailure(block_index->GetBlockHash());
+    }
+    m_chainman.RecalculateBestHeader();
+    return true;
 }
 
 void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
@@ -5097,33 +5155,36 @@ void Chainstate::ResetDrivechainState()
     m_scdb = drivechain::SidechainDB{};
 }
 
-bool Chainstate::LoadDrivechainState()
+util::Result<void> Chainstate::LoadDrivechainState()
 {
     AssertLockHeld(::cs_main);
     const CBlockIndex* tip{m_chain.Tip()};
-    if (!tip) return true;
+    if (!tip) return {};
 
     drivechain::Database& db{*m_blockman.m_drivechain_db};
     sidechain::StoreOverlay& cache{SideCache()};
     drivechain::SidechainDB scdb;
-    if (db.ReadState(DrivechainStateName(), scdb) && scdb.GetBlockHash() == tip->GetBlockHash()) {
+    const bool have_state{db.ReadState(DrivechainStateName(), scdb)};
+    if (have_state && scdb.GetBlockHash() == tip->GetBlockHash()) {
         m_scdb = std::move(scdb);
-        return true;
+        return {};
     }
 
-    if (m_from_snapshot_blockhash) {
-        // A chainstate created from a UTXO snapshot does not have the blocks
-        // the sidechain database would have to be derived from.
+    const CBlockIndex* pindex{!have_state || scdb.GetBlockHash().IsNull() ? nullptr : m_blockman.LookupBlockIndex(scdb.GetBlockHash())};
+    if (m_from_snapshot_blockhash && (!pindex || tip->GetAncestor(pindex->nHeight) != pindex)) {
+        // A chainstate created from a UTXO snapshot does not have the blocks the sidechain database
+        // would have to be derived from. One written since, at a block of the chain, is brought
+        // forward to the tip below; without one, it starts empty.
         LogWarning("No sidechain database for the chainstate loaded from a UTXO snapshot; starting with an empty one.");
         db.WipeState(DrivechainStateName(), *m_side_db);
         cache.Clear();
         m_scdb = drivechain::SidechainDB{};
         m_scdb.SetBlockHash(tip->GetBlockHash());
-        return true;
+        return {};
     }
 
-    const CBlockIndex* pindex{scdb.GetBlockHash().IsNull() ? nullptr : m_blockman.LookupBlockIndex(scdb.GetBlockHash())};
-    if (!pindex) {
+    const bool from_genesis{!pindex};
+    if (from_genesis) {
         // No usable snapshot -- none yet, or one of the format before the sidechain state had a
         // store of its own: derive everything from the blocks, the store emptied first.
         LogInfo("Deriving the sidechain database from the blocks");
@@ -5133,14 +5194,25 @@ bool Chainstate::LoadDrivechainState()
         pindex = m_chain.Genesis();
         scdb.SetBlockHash(pindex->GetBlockHash());
     }
+    // The blocks it is brought forward with have to be there: a pruned node may not have them.
+    const CBlockIndex* fork{tip->GetAncestor(pindex->nHeight) == pindex ? pindex : m_chain.FindFork(*pindex)};
+    for (const CBlockIndex* block{tip}; fork && block != fork; block = block->pprev) {
+        if (!(block->nStatus & BLOCK_HAVE_DATA)) {
+            if (from_genesis) {
+                return util::Error{_("The sidechain state of this node is in a format an earlier version wrote, and has to be derived again from "
+                                     "the blocks, which this node pruned. Restart with -reindex to download them again.")};
+            }
+            return util::Error{strprintf(_("The sidechain state of this node is as of block %d, and the blocks it has to be brought forward with "
+                                           "are pruned (block %d is missing). Restart with -reindex to download them again."), pindex->nHeight, block->nHeight)};
+        }
+    }
     LogInfo("Bringing the sidechain database from height %d to the chain tip at height %d", pindex->nHeight, tip->nHeight);
 
     // Rewind to the last block the snapshot has in common with the chain.
     while (tip->GetAncestor(pindex->nHeight) != pindex) {
         drivechain::BlockUndo undo;
         if (!db.ReadBlockUndo(pindex->GetBlockHash(), undo)) {
-            LogError("%s: no drivechain undo data for block %s", __func__, pindex->GetBlockHash().ToString());
-            return false;
+            return util::Error{strprintf(_("No drivechain undo data for block %s. Restart with -reindex."), pindex->GetBlockHash().ToString())};
         }
         scdb.DisconnectBlock(undo);
         cache.Revert(undo.side);
@@ -5154,8 +5226,7 @@ bool Chainstate::LoadDrivechainState()
         const CBlockIndex* next{tip->GetAncestor(height)};
         CBlock block;
         if (!m_blockman.ReadBlock(block, *next)) {
-            LogError("%s: failed to read block %s", __func__, next->GetBlockHash().ToString());
-            return false;
+            return util::Error{strprintf(_("Failed to read block %s. Restart with -reindex."), next->GetBlockHash().ToString())};
         }
         drivechain::BlockUndo undo;
         std::vector<drivechain::Deposit> deposits;
@@ -5164,8 +5235,7 @@ bool Chainstate::LoadDrivechainState()
         sidechain::StoreOverlay block_store{cache, /*journal=*/true};
         const auto side{m_chainman.SideContext(minted, block_store)};
         if (!scdb.ConnectBlock(block, height, params, undo, &deposits, reject_reason, side ? &*side : nullptr)) {
-            LogError("%s: block %s breaks the drivechain rules (%s)", __func__, next->GetBlockHash().ToString(), reject_reason);
-            return false;
+            return util::Error{strprintf(_("Block %s breaks the drivechain rules (%s). Restart with -reindex."), next->GetBlockHash().ToString(), reject_reason)};
         }
         db.WriteBlock(next->GetBlockHash(), height, undo, deposits);
         block_store.MergeInto(cache);
@@ -5175,12 +5245,12 @@ bool Chainstate::LoadDrivechainState()
             m_scdb = scdb;
             WriteDrivechainState();
         }
-        if (m_chainman.m_interrupt) return false;
+        if (m_chainman.m_interrupt) return util::Error{_("Interrupted while loading the sidechain database.")};
     }
 
     m_scdb = std::move(scdb);
     WriteDrivechainState();
-    return true;
+    return {};
 }
 
 VerifyDBResult CVerifyDB::VerifyDB(
@@ -5257,7 +5327,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
             }
         }
         // check level 3: check for inconsistencies during memory-only disconnect of tip blocks
-        size_t curr_coins_usage = coins.DynamicMemoryUsage() + chainstate.CoinsTip().DynamicMemoryUsage();
+        size_t curr_coins_usage = coins.DynamicMemoryUsage() + chainstate.CoinsTip().DynamicMemoryUsage() + side_store.Bytes();
 
         if (nCheckLevel >= 3) {
             if (curr_coins_usage <= chainstate.m_coinstip_cache_size_bytes) {
@@ -5307,6 +5377,12 @@ VerifyDBResult CVerifyDB::VerifyDB(
                 return VerifyDBResult::CORRUPTED_BLOCK_DB;
             }
             if (!chainstate.ConnectBlock(block, state, pindex, coins, /*fJustCheck=*/false, &scdb, &side_store)) {
+                if (state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE) {
+                    // A sidechain block that the record of the mainchain does not agree with any more
+                    // (its commitment moved): the follower checks it again. The blocks after it cannot be.
+                    LogWarning("Verification stopped at height %d, block %s: the record of the mainchain does not agree with it any more (%s)", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
+                    break;
+                }
                 LogError("Verification error: found unconnectable block at %d, hash=%s (%s)", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
                 return VerifyDBResult::CORRUPTED_BLOCK_DB;
             }
@@ -6301,6 +6377,8 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         }
     }
 
+    // Whatever an earlier attempt with the same snapshot left of a sidechain state goes: the chainstate starts without one.
+    snapshot_chainstate->ResetDrivechainState();
     Chainstate& chainstate{AddChainstate(std::move(snapshot_chainstate))};
     m_blockman.m_snapshot_height = Assert(chainstate.SnapshotBase())->nHeight;
 
@@ -6884,6 +6962,13 @@ bool ChainstateManager::ValidatedSnapshotCleanup(Chainstate& validated_cs, Chain
     const fs::path validated_path{validated_cs.StoragePath()};
     const fs::path assumed_valid_path{unvalidated_cs.StoragePath()};
     const fs::path delete_path{validated_path + "_todelete"};
+
+    // The snapshot chainstate becomes the chainstate: from then on its sidechain state is the one the
+    // background chainstate wrote, brought forward with the blocks. What it kept under its own name goes.
+    if (unvalidated_cs.m_from_snapshot_blockhash) {
+        const std::string name{unvalidated_cs.DrivechainStateName()};
+        m_blockman.m_drivechain_db->WipeState(name, *m_blockman.m_drivechain_db->SideStore(name));
+    }
 
     // Since we're going to be moving around the underlying leveldb filesystem content
     // for each chainstate, make sure that the chainstates (and their constituent

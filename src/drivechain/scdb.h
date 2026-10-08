@@ -63,6 +63,9 @@ struct SideContext {
     //! Where the sidechain state is read and written: an overlay that journals, whose journal
     //! becomes BlockUndo::side.
     sidechain::StoreOverlay& store;
+    //! Set when the block broke a rule of the sidechain: a verdict that depends on the record of the
+    //! mainchain, which may change.
+    mutable bool failed{false};
 };
 
 /**

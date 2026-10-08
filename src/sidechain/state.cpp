@@ -52,8 +52,8 @@ CMutableTransaction BuildBundle(const std::vector<const Withdrawal*>& withdrawal
 //
 
 const Table<COutPoint, Withdrawal> WITHDRAWALS{'w'};
-constexpr uint8_t BY_FEE{'f'};
-constexpr uint8_t BY_PAYOUT{'p'};
+const TableId BY_FEE{'f'};
+const TableId BY_PAYOUT{'p'};
 const Table<uint64_t, CTxOut> QUEUE{'q'};
 const Table<uint64_t, CTxOut> TX_QUEUE{'r'};
 
@@ -122,6 +122,7 @@ StoreBytes PayoutKey(const Withdrawal& w)
 COutPoint OutpointOf(const StoreBytes& key)
 {
     std::span<const unsigned char> rest{key};
+    NeedBytes(rest, 36);
     rest = rest.subspan(key.size() - 36);
     return KeyCodec<COutPoint>::Decode(rest);
 }
@@ -199,7 +200,11 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
         reject_reason = "bad-sc-main-height";
         return false;
     }
-    for (int h{from + 1}; h <= main_height; ++h) {
+    int first{from + 1};
+    // What the mainchain did up to the block that activated this sidechain in its slot, deposits
+    // included, was for whatever held the slot before.
+    if (height >= params.audit2_height) first = std::max(first, params.main_activation_height + 1);
+    for (int h{first}; h <= main_height; ++h) {
         const auto main_block{mainchain.GetBlock(h)};
         if (!main_block) {
             reject_reason = "bad-sc-main-unknown";
@@ -449,7 +454,7 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
     zside::ShieldedState{Writable()}.EndBlock();
 
     // The coinbase pays the deposits and the refunds, right after its first output, as many as a block can.
-    payouts = TakePayouts(std::move(payouts), std::move(tx_payouts));
+    payouts = TakePayouts(std::move(payouts), std::move(tx_payouts), height >= params.audit2_height);
     const std::vector<CTxOut>& coinbase{block.vtx[0]->vout};
     if (coinbase.size() < 1 + payouts.size()) {
         reject_reason = "bad-sc-payouts-missing";
@@ -470,7 +475,7 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
     return true;
 }
 
-std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx)
+std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, bool shared)
 {
     StoreOverlay& out{Writable()};
     // Each queue: what is owed goes at its end; what is paid comes from its front.
@@ -492,8 +497,20 @@ std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTx
     }};
     const uint64_t queued{push(QUEUE, QUEUE_ENDS, owed)};
     const uint64_t queued_tx{push(TX_QUEUE, TX_QUEUE_ENDS, owed_tx)};
-    const uint64_t count{std::min<uint64_t>(queued, MAX_PAYOUTS_PER_BLOCK)};
-    const uint64_t count_tx{std::min<uint64_t>(queued_tx, MAX_PAYOUTS_PER_BLOCK - count)};
+    uint64_t count, count_tx;
+    if (shared) {
+        // Half each; what one queue leaves of its half, the other may take.
+        const uint64_t half{MAX_PAYOUTS_PER_BLOCK / 2};
+        count = std::min<uint64_t>(queued, half);
+        count_tx = std::min<uint64_t>(queued_tx, MAX_PAYOUTS_PER_BLOCK - half);
+        const uint64_t left{MAX_PAYOUTS_PER_BLOCK - count - count_tx};
+        const uint64_t more{std::min<uint64_t>(queued - count, left)};
+        count += more;
+        count_tx += std::min<uint64_t>(queued_tx - count_tx, left - more);
+    } else {
+        count = std::min<uint64_t>(queued, MAX_PAYOUTS_PER_BLOCK);
+        count_tx = std::min<uint64_t>(queued_tx, MAX_PAYOUTS_PER_BLOCK - count);
+    }
     std::vector<CTxOut> paid;
     take(QUEUE, QUEUE_ENDS, count, paid);
     take(TX_QUEUE, TX_QUEUE_ENDS, count_tx, paid);

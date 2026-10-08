@@ -12,7 +12,10 @@
 
 #include <cstdint>
 #include <functional>
+#include <ios>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
@@ -97,23 +100,35 @@ public:
     std::optional<std::pair<StoreBytes, StoreBytes>> Next(std::span<const unsigned char>, std::span<const unsigned char>) const override { return std::nullopt; }
 };
 
-/** The entries in a database, under a prefix of their own (which the keys given here leave out). */
+/**
+ * The entries in a database, under a prefix of their own (which the keys given here leave out).
+ *
+ * Reads in key order (Next, as ForEach and the overlays over it make them) go on with the database
+ * iterator of the read before, rather than one per entry. That iterator sees the database as it was
+ * when it was made: whoever writes the database calls Reset after.
+ */
 class DbStore : public StoreView
 {
 public:
-    DbStore(CDBWrapper& db, StoreBytes prefix) : m_db{db}, m_prefix{std::move(prefix)} {}
+    DbStore(CDBWrapper& db, StoreBytes prefix);
+    ~DbStore() override;
     std::optional<StoreBytes> Get(std::span<const unsigned char> key) const override;
     std::optional<std::pair<StoreBytes, StoreBytes>> Next(std::span<const unsigned char> from, std::span<const unsigned char> prefix) const override;
     /** Put the changes in a batch. */
     void Write(CDBBatch& batch, const std::map<StoreBytes, std::optional<StoreBytes>>& changes) const;
-    /** Erase every entry (a state started over). */
-    void Wipe(CDBBatch& batch) const;
+    /** Erase every entry (a state started over), in batches of about `batch_bytes`; synced at the end. */
+    void Wipe(size_t batch_bytes = 16 << 20) const;
+    /** Drop the iterator kept for reads in order: the database changed. */
+    void Reset() const;
     CDBWrapper& Database() const { return m_db; }
 
 private:
+    struct Cursor;
     StoreBytes Full(std::span<const unsigned char> key) const;
     CDBWrapper& m_db;
     StoreBytes m_prefix;
+    mutable std::mutex m_cursor_mutex;
+    mutable std::unique_ptr<Cursor> m_cursor;
 };
 
 /** Changes over another view, kept apart from it until merged into it or dropped. */
@@ -161,8 +176,40 @@ private:
     size_t m_bytes{0};
 };
 
-/** A hash over every entry under `prefix`, in key order: the same for the same state, whatever stores it. */
-uint256 StoreHash(const StoreView& view, std::span<const unsigned char> prefix = {});
+/**
+ * A hash over every entry under `prefix`, in key order: the same for the same state, whatever stores it.
+ * @param[in] each  if given, called with every entry on the way
+ */
+uint256 StoreHash(const StoreView& view, std::span<const unsigned char> prefix = {},
+                  const std::function<void(const StoreBytes&, const StoreBytes&)>& each = {});
+
+/**
+ * The first bytes of keys that each table of the state has to itself. Every Table and Cell, and
+ * every index kept under a byte of its own, takes its byte here when it is made (TableId); two
+ * that take the same are a mistake, which DuplicateTableIds tells, and the node refuses to start.
+ */
+class TableId
+{
+public:
+    explicit TableId(uint8_t id);
+    //! A copy names the same table: it takes nothing more.
+    TableId(const TableId& other) : m_id{other.m_id}, m_taken{false} {}
+    TableId& operator=(const TableId&) = delete;
+    ~TableId();
+    operator uint8_t() const { return m_id; }
+
+private:
+    uint8_t m_id;
+    bool m_taken;
+};
+/** The bytes that more than one table took: empty unless two tables of the state collide. */
+std::vector<uint8_t> DuplicateTableIds();
+
+/** A key shorter than its format says. */
+inline void NeedBytes(std::span<const unsigned char> in, size_t n)
+{
+    if (in.size() < n) throw std::ios_base::failure("store key too short");
+}
 
 //
 // Keys. A table is a byte; then the key, encoded so that byte order is the order of the key.
@@ -180,6 +227,7 @@ struct KeyCodec<uint32_t> {
     }
     static uint32_t Decode(std::span<const unsigned char>& in)
     {
+        NeedBytes(in, 4);
         uint32_t v{0};
         for (int i{0}; i < 4; ++i) v = (v << 8) | in[i];
         in = in.subspan(4);
@@ -195,6 +243,7 @@ struct KeyCodec<uint64_t> {
     }
     static uint64_t Decode(std::span<const unsigned char>& in)
     {
+        NeedBytes(in, 8);
         uint64_t v{0};
         for (int i{0}; i < 8; ++i) v = (v << 8) | in[i];
         in = in.subspan(8);
@@ -207,6 +256,7 @@ struct KeyCodec<uint8_t> {
     static void Encode(StoreBytes& out, uint8_t v) { out.push_back(v); }
     static uint8_t Decode(std::span<const unsigned char>& in)
     {
+        NeedBytes(in, 1);
         const uint8_t v{in[0]};
         in = in.subspan(1);
         return v;
@@ -219,6 +269,7 @@ struct KeyCodec<uint256> {
     static void Encode(StoreBytes& out, const uint256& v) { out.insert(out.end(), v.begin(), v.end()); }
     static uint256 Decode(std::span<const unsigned char>& in)
     {
+        NeedBytes(in, 32);
         uint256 v;
         std::copy(in.begin(), in.begin() + 32, v.begin());
         in = in.subspan(32);
@@ -231,6 +282,7 @@ struct KeyCodec<uint160> {
     static void Encode(StoreBytes& out, const uint160& v) { out.insert(out.end(), v.begin(), v.end()); }
     static uint160 Decode(std::span<const unsigned char>& in)
     {
+        NeedBytes(in, 20);
         uint160 v;
         std::copy(in.begin(), in.begin() + 20, v.begin());
         in = in.subspan(20);
@@ -329,7 +381,7 @@ public:
     }
 
 private:
-    uint8_t m_id;
+    TableId m_id;
 };
 
 /** A single value of the state (a height, a counter), under a table byte of its own. */
@@ -354,7 +406,7 @@ public:
     }
 
 private:
-    uint8_t m_id;
+    TableId m_id;
     V m_fallback;
 };
 

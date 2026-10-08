@@ -421,15 +421,15 @@ RPCMethod getsidechainstate()
     const sidechain::StoreView& view{chainstate.SideCache()};
     std::map<unsigned char, uint64_t> tables;
     uint64_t entries{0};
-    view.ForEach({}, [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
+    // Counted on the way, in the one pass over the state that the hash takes.
+    const uint256 hash{sidechain::StoreHash(view, {}, [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
         ++tables[key.empty() ? 0 : key[0]];
         ++entries;
-        return true;
-    });
+    })};
     UniValue result(UniValue::VOBJ);
     result.pushKV("bestblock", chainstate.m_chain.Tip()->GetBlockHash().GetHex());
     result.pushKV("height", chainstate.m_chain.Height());
-    result.pushKV("hash", sidechain::StoreHash(view).GetHex());
+    result.pushKV("hash", hash.GetHex());
     result.pushKV("entries", entries);
     UniValue by_table(UniValue::VOBJ);
     for (const auto& [table, count] : tables) {

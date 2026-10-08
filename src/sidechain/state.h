@@ -173,12 +173,17 @@ public:
     bool MainPendingNext(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const;
     /**
      * The payouts a block pays: at most MAX_PAYOUTS_PER_BLOCK, of what was owed
-     * before it and of what it gave rise to, oldest first. What the mainchain
-     * gave rise to (`owed`: deposits) goes before what transactions did
-     * (`owed_tx`: refunds and the like), so that transactions, however many,
-     * cannot hold deposits back. The rest is queued for the next blocks.
+     * before it and of what it gave rise to, oldest first in each queue. What
+     * the mainchain gave rise to (`owed`: deposits) has a queue of its own, apart
+     * from what transactions did (`owed_tx`: refunds, and what a sidechain's own
+     * rules pay out), so that transactions, however many, cannot hold deposits
+     * back. The rest is queued for the next blocks.
+     *
+     * @param[in] shared  from SidechainParams::audit2_height: each queue has half of the block, and
+     *                    what one does not use goes to the other, so that neither holds the other
+     *                    back. Before, the queue of deposits went first, up to the whole block.
      */
-    std::vector<CTxOut> TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx);
+    std::vector<CTxOut> TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, bool shared);
     /** Payouts owed and not paid yet, oldest first: from the mainchain, and from transactions. */
     std::vector<CTxOut> Queue() const;
     std::vector<CTxOut> TxQueue() const;

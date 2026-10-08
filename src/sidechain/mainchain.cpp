@@ -6,12 +6,20 @@
 
 #include <logging.h>
 
+#include <set>
+
 namespace sidechain {
 namespace {
 constexpr uint8_t DB_BLOCK{'b'};
 //! Version of the record: 2 since blocks keep the bundles they proposed.
 constexpr uint8_t DB_VERSION{'v'};
 constexpr uint32_t RECORD_VERSION{2};
+//! The sidechain found in the slot (SlotIdentity).
+constexpr uint8_t DB_SLOT_IDENTITY{'i'};
+//! Set while blocks connected before the backfill are to be checked again.
+constexpr uint8_t DB_RECHECK{'r'};
+//! Why blocks of this chain failed (Mainchain::Failure), by hash.
+constexpr uint8_t DB_FAILURE{'F'};
 
 /** Key of a block: its height, big endian so that the blocks are stored in order. */
 struct BlockKey {
@@ -47,6 +55,17 @@ Mainchain::Mainchain(const std::optional<DBParams>& db_params)
         for (const MainBundleEvent& event : block.bundles) m_closed.emplace(event.hash, m_blocks.size());
         for (const uint256& hash : block.proposed) m_proposed.emplace(hash, m_blocks.size());
         m_blocks.push_back(std::move(block));
+    }
+    if (SlotIdentity identity; m_db->Read(DB_SLOT_IDENTITY, identity)) m_slot_identity = identity;
+    m_recheck = m_db->Exists(DB_RECHECK);
+    {
+        const std::unique_ptr<CDBIterator> failures{m_db->NewIterator()};
+        for (failures->Seek(std::make_pair(DB_FAILURE, uint256{})); failures->Valid(); failures->Next()) {
+            std::pair<uint8_t, uint256> key;
+            uint8_t failure;
+            if (!failures->GetKey(key) || key.first != DB_FAILURE || !failures->GetValue(failure)) break;
+            m_failures.emplace(key.second, static_cast<Failure>(failure));
+        }
     }
     uint32_t version{0};
     if (!m_db->Read(DB_VERSION, version) || version < RECORD_VERSION) {
@@ -102,15 +121,45 @@ std::optional<int> Mainchain::ClosedHeight(const uint256& hash) const
     return it->second;
 }
 
+void Mainchain::UpdatePending() const
+{
+    AssertLockHeld(m_mutex);
+    // Each block changes the count by the bundles it proposed first, less those it closed first that
+    // a block before it proposed first.
+    for (size_t h{m_pending.size()}; h < m_blocks.size(); ++h) {
+        int64_t count{h == 0 ? 0 : int64_t{m_pending[h - 1]}};
+        const int height{static_cast<int>(h)};
+        std::set<uint256> seen;
+        for (const uint256& hash : m_blocks[h].proposed) {
+            const auto first{m_proposed.find(hash)};
+            if (!seen.insert(hash).second || first == m_proposed.end() || first->second != height) continue;
+            const auto closed{m_closed.find(hash)};
+            if (closed == m_closed.end() || closed->second > height) ++count;
+        }
+        seen.clear();
+        for (const MainBundleEvent& event : m_blocks[h].bundles) {
+            const auto first{m_closed.find(event.hash)};
+            if (!seen.insert(event.hash).second || first == m_closed.end() || first->second != height) continue;
+            const auto proposed{m_proposed.find(event.hash)};
+            if (proposed != m_proposed.end() && proposed->second < height) --count;
+        }
+        m_pending.push_back(static_cast<uint32_t>(std::max<int64_t>(count, 0)));
+    }
+}
+
 bool Mainchain::BundlePending(int main_height) const
 {
     LOCK(m_mutex);
-    for (const auto& [hash, proposed] : m_proposed) {
-        if (proposed > main_height) continue;
-        const auto closed{m_closed.find(hash)};
-        if (closed == m_closed.end() || closed->second > main_height) return true;
-    }
-    return false;
+    if (main_height < 0 || m_blocks.empty()) return false;
+    UpdatePending();
+    return m_pending[std::min<size_t>(main_height, m_blocks.size() - 1)] > 0;
+}
+
+std::optional<uint256> Mainchain::BmmAt(int height) const
+{
+    LOCK(m_mutex);
+    if (height < 0 || height >= static_cast<int>(m_blocks.size())) return std::nullopt;
+    return m_blocks[height].bmm;
 }
 
 bool Mainchain::NeedsBackfill() const
@@ -129,7 +178,15 @@ bool Mainchain::Backfill(int height, const uint256& hash, const std::vector<uint
         if (it != m_proposed.end() && it->second == height) m_proposed.erase(it);
     }
     block.proposed = proposed;
-    for (const uint256& p : proposed) m_proposed.emplace(p, height);
+    for (const uint256& p : proposed) {
+        // The first proposal counts, which a block filled in below a later one is.
+        const auto [it, added]{m_proposed.emplace(p, height)};
+        if (!added && it->second > height) {
+            InvalidatePending(it->second);
+            it->second = height;
+        }
+    }
+    InvalidatePending(height);
     if (m_db) m_db->Write(BlockKey{static_cast<uint32_t>(height)}, block);
     return true;
 }
@@ -138,7 +195,62 @@ void Mainchain::BackfillDone()
 {
     LOCK(m_mutex);
     m_needs_backfill = false;
-    if (m_db) m_db->Write(DB_VERSION, RECORD_VERSION, /*fSync=*/true);
+    m_recheck = true;
+    if (m_db) {
+        CDBBatch batch{*m_db};
+        batch.Write(DB_VERSION, RECORD_VERSION);
+        batch.Write(DB_RECHECK, uint8_t{1});
+        m_db->WriteBatch(batch, /*fSync=*/true);
+    }
+}
+
+bool Mainchain::RecheckPending() const
+{
+    LOCK(m_mutex);
+    return m_recheck;
+}
+
+void Mainchain::RecheckDone()
+{
+    LOCK(m_mutex);
+    m_recheck = false;
+    if (m_db) m_db->Erase(DB_RECHECK, /*fSync=*/true);
+}
+
+void Mainchain::NoteFailure(const uint256& block_hash, Failure failure)
+{
+    LOCK(m_mutex);
+    m_failures[block_hash] = failure;
+    // Before the block is marked failed, which the block index writes later: a node that stops in
+    // between finds the reason, and takes the failure back if it was the record's.
+    if (m_db) m_db->Write(std::make_pair(DB_FAILURE, block_hash), static_cast<uint8_t>(failure), /*fSync=*/true);
+}
+
+std::optional<Mainchain::Failure> Mainchain::GetFailure(const uint256& block_hash) const
+{
+    LOCK(m_mutex);
+    const auto it{m_failures.find(block_hash)};
+    if (it == m_failures.end()) return std::nullopt;
+    return it->second;
+}
+
+void Mainchain::ForgetFailure(const uint256& block_hash)
+{
+    LOCK(m_mutex);
+    if (m_failures.erase(block_hash) && m_db) m_db->Erase(std::make_pair(DB_FAILURE, block_hash));
+}
+
+std::optional<SlotIdentity> Mainchain::GetSlotIdentity() const
+{
+    LOCK(m_mutex);
+    return m_slot_identity;
+}
+
+void Mainchain::SetSlotIdentity(const SlotIdentity& identity)
+{
+    LOCK(m_mutex);
+    m_slot_identity = identity;
+    if (m_db) m_db->Write(DB_SLOT_IDENTITY, identity, /*fSync=*/true);
 }
 
 bool Mainchain::Append(const MainBlock& block)
@@ -180,6 +292,7 @@ std::vector<MainBlock> Mainchain::Truncate(int height)
         if (it != m_bmm.end() && it->second == static_cast<int>(i)) m_bmm.erase(it);
     }
     m_blocks.resize(keep);
+    InvalidatePending(static_cast<int>(keep));
     return removed;
 }
 

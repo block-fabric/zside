@@ -66,8 +66,12 @@ MainBlock ParseMainBlock(const UniValue& obj)
     block.hash = Hash256(obj["hash"]);
     if (obj.exists("previousblockhash")) block.prev_hash = Hash256(obj["previousblockhash"]);
     // The median time of the block and the ten before it, which no single miner can set ahead (the
-    // time of the block itself can be two hours ahead); the time of the block from an older node.
-    block.time = obj.exists("mediantime") ? obj["mediantime"].getInt<int64_t>() : obj["time"].getInt<int64_t>();
+    // time of the block itself can be two hours ahead). Rules of sidechains depend on it: a node that
+    // does not say is too old to follow, as nodes that took another time would disagree.
+    if (!obj.exists("mediantime")) {
+        throw std::runtime_error("The mainchain node is too old: it does not report the median time of blocks. Upgrade Chains");
+    }
+    block.time = obj["mediantime"].getInt<int64_t>();
     if (obj.exists("bmm")) block.bmm = Hash256(obj["bmm"]);
     for (const UniValue& entry : obj["deposits"].getValues()) {
         MainDeposit deposit;
@@ -222,8 +226,15 @@ bool Follower::UpdateRecord(bool may_drop)
         if (events.size() <= first_new) break;
         for (size_t i{first_new}; i < events.size(); ++i) {
             const MainBlock block{ParseMainBlock(events[i])};
-            // Not the block that follows: the mainchain changed between two calls. Start over.
-            if (!record.Append(block)) break;
+            if (!record.Append(block)) {
+                // Not the block that follows. Blocks of the answer taken before it: the next call starts
+                // after them and finds out. None: the answer starts at the tip on record, then does not
+                // follow it; asking again at once would get the same answer, for ever.
+                if (i == first_new) {
+                    throw std::runtime_error(strprintf("The mainchain node sent blocks that do not follow each other (at height %d); asking again shortly", std::max(height, 0) + static_cast<int>(i)));
+                }
+                break;
+            }
             changed = true;
             if (block.bmm) {
                 LOCK(m_mutex);
@@ -256,12 +267,14 @@ bool Follower::Sync(std::string& error)
 {
     AssertLockNotHeld(::cs_main);
     try {
+        bool changed;
         {
             LOCK(m_sync_mutex);
-            UpdateRecord();
+            changed = UpdateRecord();
         }
         // Stopping cut the update short: the record may be partial, nothing to act on.
         if (m_stop) return false;
+        CheckSlot(changed);
         {
             // One at a time: two callers acting on the same changes could otherwise invalidate a
             // block after the other found it committed again.
@@ -291,6 +304,48 @@ bool Follower::Sync(std::string& error)
     }
     m_status = {true, {}};
     return true;
+}
+
+void Follower::CheckSlot(bool record_changed)
+{
+    // Another sidechain can take the slot only in a new mainchain block.
+    if (!record_changed && WITH_LOCK(m_mutex, return m_slot_checked)) return;
+    const Consensus::SidechainParams& params{m_node.chainman->GetConsensus().sidechain};
+    Mainchain& record{*Assert(m_node.chainman->m_mainchain)};
+    const auto known{record.GetSlotIdentity()};
+    UniValue slot;
+    try {
+        slot = m_client.Call("getsidechain", Params({static_cast<uint64_t>(params.slot)}));
+    } catch (const MainClientError& e) {
+        if (!e.rpc_error) throw;
+        // No sidechain in the slot: before this one activated there is nothing to compare, and
+        // nothing of this chain on the mainchain either.
+        if (known || params.main_activation_height > 0) {
+            throw std::runtime_error(strprintf("The mainchain has no sidechain in slot %u (%s); waiting for it", params.slot, e.what()));
+        }
+        LOCK(m_mutex);
+        m_slot_checked = true;
+        return;
+    }
+    const SlotIdentity seen{slot["activationheight"].getInt<int32_t>(), Hash256(slot["proposalhash"])};
+    std::string followed;
+    if (params.main_activation_height > 0 && seen.activation_height != params.main_activation_height) {
+        followed = strprintf("this chain is the one activated at height %d", params.main_activation_height);
+    } else if (known && *known != seen) {
+        followed = strprintf("this node followed the one activated at height %d by proposal %s", known->activation_height, known->proposal_hash.ToString());
+    }
+    if (!followed.empty()) {
+        // Following on would credit this chain with what the mainchain does for another sidechain.
+        const std::string message{strprintf("The sidechain in slot %u of the mainchain is another one: activated at height %d by proposal %s, while %s. "
+                                            "This node stops rather than follow another sidechain.",
+                                            params.slot, seen.activation_height, seen.proposal_hash.ToString(), followed)};
+        m_stop = true;
+        m_node.chainman->GetNotifications().fatalError(Untranslated(message));
+        throw std::runtime_error(message);
+    }
+    if (!known) record.SetSlotIdentity(seen);
+    LOCK(m_mutex);
+    m_slot_checked = true;
 }
 
 void Follower::Act()
@@ -323,16 +378,16 @@ void Follower::Act()
         if (!pindex) continue;
         LogInfo("Block %s lost its commitment on the mainchain", hash.ToString());
         BlockValidationState state;
-        chainman.ActiveChainstate().InvalidateBlock(state, pindex);
+        chainman.ActiveChainstate().InvalidateBlock(state, pindex, /*by_record=*/true);
     }
     {
         LOCK(::cs_main);
         for (const uint256& hash : committed) {
             CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(hash)};
-            if (pindex && (pindex->nStatus & BLOCK_FAILED_VALID)) {
+            // Only a failure that depended on the record: not that of a block that broke a rule
+            // whatever the mainchain did, nor one the operator marked invalid.
+            if (pindex && chainman.ActiveChainstate().ReconsiderRecordFailure(pindex)) {
                 LogInfo("Block %s has a commitment on the mainchain again", hash.ToString());
-                chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
-                chainman.RecalculateBestHeader();
             }
         }
     }
@@ -365,7 +420,7 @@ void Follower::CheckActiveChain()
 {
     if (WITH_LOCK(m_mutex, return m_chain_checked)) return;
     ChainstateManager& chainman{*m_node.chainman};
-    const Mainchain& record{*Assert(chainman.m_mainchain)};
+    Mainchain& record{*Assert(chainman.m_mainchain)};
     // Blocks that lost their commitment are dropped as soon as the record changes, but a node that
     // stopped in between, or that was down meanwhile, starts with them on its active chain. The
     // mainchain commits to the blocks of a chain in order: the uncommitted ones are at the top.
@@ -395,45 +450,95 @@ void Follower::CheckActiveChain()
             }
         }
     }
+    // Blocks connected while the record missed the bundles that mainchain blocks proposed were checked
+    // as if none was pending (State::MainPending): the lowest that started a bundle or refunded a
+    // withdrawal while one was pending is checked again, with those above it.
+    const bool recheck{!lowest && record.RecheckPending()};
+    if (recheck) {
+        LOCK(::cs_main);
+        const int from{chainman.GetConsensus().sidechain.single_bundle_height};
+        CBlockIndex* first{nullptr};
+        for (CBlockIndex* pindex{chainman.ActiveChain().Tip()}; pindex && pindex->nHeight > 0 && pindex->nHeight >= from; pindex = pindex->pprev) {
+            // A block follows the mainchain up to the block before its commitment, then checks.
+            const auto bmm_height{record.CommittedHeight(pindex->GetBlockHash())};
+            if (!bmm_height || !record.BundlePending(*bmm_height - 1)) continue;
+            // A pruned block cannot be checked again: it is left as it is.
+            CBlock block;
+            if (!chainman.m_blockman.ReadBlock(block, *pindex)) continue;
+            const bool acts{std::any_of(block.vtx.begin(), block.vtx.end(), [](const CTransactionRef& tx) {
+                return std::any_of(tx->vout.begin(), tx->vout.end(), [&](const CTxOut& out) {
+                    return tx->IsCoinBase() ? ParseBundleCommitScript(out.scriptPubKey).has_value() : ParseRefundScript(out.scriptPubKey).has_value();
+                });
+            })};
+            if (acts) first = pindex;
+        }
+        if (first) {
+            LogInfo("The record of the mainchain is complete again: checking block %s and the blocks after it again", first->GetBlockHash().ToString());
+            if (!moved || first->nHeight < moved->nHeight) moved = first;
+        }
+    }
     if (lowest) {
         LogInfo("Block %s and the blocks after it have no commitment on the mainchain", lowest->GetBlockHash().ToString());
         BlockValidationState state;
-        chainman.ActiveChainstate().InvalidateBlock(state, lowest);
+        chainman.ActiveChainstate().InvalidateBlock(state, lowest, /*by_record=*/true);
     } else if (moved) {
-        LogInfo("The commitment of block %s moved on the mainchain; checking it and the blocks after it again", moved->GetBlockHash().ToString());
+        LogInfo("The commitment of block %s moved on the mainchain, or the record before it changed; checking it and the blocks after it again", moved->GetBlockHash().ToString());
         BlockValidationState state;
-        chainman.ActiveChainstate().InvalidateBlock(state, moved);
-        {
-            LOCK(::cs_main);
-            chainman.ActiveChainstate().ResetBlockFailureFlags(moved);
-            chainman.RecalculateBestHeader();
-        }
+        chainman.ActiveChainstate().InvalidateBlock(state, moved, /*by_record=*/true);
+        WITH_LOCK(::cs_main, chainman.ActiveChainstate().ReconsiderRecordFailure(moved));
         chainman.ActiveChainstate().ActivateBestChain(state);
     }
-    // Blocks marked failed for want of a commitment that the record has now: a node that stopped
-    // between learning of the commitment and acting on it would otherwise never take them again.
-    // Each has a commitment on the mainchain, which costs a fee: there cannot be many.
-    std::vector<CBlockIndex*> again;
+    if (recheck) record.RecheckDone();
+    // Blocks marked failed against the record, whose commitment the record has now: a node that
+    // stopped between learning of the commitment and acting on it would otherwise never take them
+    // again. Each has a commitment on the mainchain, which costs a fee: there cannot be many.
+    size_t again{0};
     {
         LOCK(::cs_main);
+        std::vector<CBlockIndex*> failed;
         for (auto& [hash, index] : chainman.m_blockman.m_block_index) {
-            if ((index.nStatus & BLOCK_FAILED_VALID) && record.CommittedHeight(hash)) again.push_back(&index);
+            if ((index.nStatus & BLOCK_FAILED_VALID) && record.CommittedHeight(hash)) failed.push_back(&index);
         }
-        for (CBlockIndex* pindex : again) chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
-        if (!again.empty()) chainman.RecalculateBestHeader();
+        for (CBlockIndex* pindex : failed) again += chainman.ActiveChainstate().ReconsiderRecordFailure(pindex);
     }
-    if (!again.empty()) {
-        LogInfo("Checking again %d blocks that failed and have a commitment on the mainchain", again.size());
+    if (again > 0) {
+        LogInfo("Checking again %d blocks that failed against the record and have a commitment on the mainchain", again);
         BlockValidationState state;
         chainman.ActiveChainstate().ActivateBestChain(state);
     }
+    // A recheck left for after the blocks without commitment went: on the next round.
+    const bool done{!record.RecheckPending()};
     LOCK(m_mutex);
-    m_chain_checked = true;
+    m_chain_checked = done;
+}
+
+bool Follower::CatchingUp() const
+{
+    ChainstateManager& chainman{*m_node.chainman};
+    if (chainman.IsInitialBlockDownload()) return true;
+    const Mainchain& record{*Assert(chainman.m_mainchain)};
+    LOCK(::cs_main);
+    const CBlockIndex* tip{chainman.ActiveChain().Tip()};
+    const int tip_commitment{tip->nHeight == 0 ? -1 : record.CommittedHeight(tip->GetBlockHash()).value_or(-1)};
+    // The last commitment on record, if it is to another block than the tip, well after the tip's: to
+    // one this node has yet to connect, or does not know (a block it has not had yet). Not to a block
+    // known to have failed, or to be on a branch with no more work.
+    const int top{record.Height()};
+    for (int height{top}; height > tip_commitment + CATCH_UP_MARGIN && height > top - CATCH_UP_WINDOW; --height) {
+        const auto bmm{record.BmmAt(height)};
+        if (!bmm) continue;
+        const CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(*bmm)};
+        return !pindex || (!(pindex->nStatus & BLOCK_FAILED_VALID) && !chainman.ActiveChain().Contains(*pindex) && pindex->nChainWork > tip->nChainWork);
+    }
+    return false;
 }
 
 void Follower::SendBundle()
 {
     ChainstateManager& chainman{*m_node.chainman};
+    // A node still catching up knows the bundle of its chain as it was: it says nothing on it rather
+    // than something the mainchain would vote by. What it said last stands meanwhile.
+    if (CatchingUp()) return;
     std::optional<CMutableTransaction> tx;
     uint256 hash;
     {

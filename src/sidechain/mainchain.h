@@ -12,6 +12,7 @@
 #include <sync.h>
 #include <uint256.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -84,6 +85,17 @@ struct MainBlock {
     friend bool operator==(const MainBlock&, const MainBlock&) = default;
 };
 
+/** Which sidechain holds the slot of this chain on the mainchain: what the Follower saw first. */
+struct SlotIdentity {
+    //! Height of the mainchain block that activated the sidechain in the slot.
+    int32_t activation_height{0};
+    //! Hash of the proposal that activated it, which describes the sidechain.
+    uint256 proposal_hash;
+
+    SERIALIZE_METHODS(SlotIdentity, obj) { READWRITE(obj.activation_height, obj.proposal_hash); }
+    friend bool operator==(const SlotIdentity&, const SlotIdentity&) = default;
+};
+
 /**
  * The record this node keeps of the mainchain: for every block of its active
  * chain, what the block did that concerns this sidechain.
@@ -120,6 +132,8 @@ public:
      * any withdrawal, those of other branches of this chain too.
      */
     bool BundlePending(int main_height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** The sidechain block that the mainchain block at `height` committed to, if any. */
+    std::optional<uint256> BmmAt(int height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
      * Whether the record was written before it kept the proposals of bundles: then the Follower
@@ -131,8 +145,33 @@ public:
      * @return false if the record has another block there.
      */
     bool Backfill(int height, const uint256& hash, const std::vector<uint256>& proposed) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /** The record is complete again: mark it so. */
+    /** The record is complete again: mark it so, with the blocks checked without it to be checked again (RecheckPending). */
     void BackfillDone() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Whether the blocks of the active chain, connected while the record missed the proposals, are still
+     * to be checked again against the complete record; the Follower does so, then clears it.
+     */
+    bool RecheckPending() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    void RecheckDone() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Why a block of this chain is marked failed, as far as the Follower is concerned: whether it may
+     * take the failure back when the record changes.
+     */
+    enum class Failure : uint8_t {
+        //! The block failed against the record (its commitment lost or moved, a rule of the sidechain
+        //! as the record stood): it is checked again when its commitment comes back.
+        RECORD = 1,
+        //! The operator marked it invalid (invalidateblock): it stays so, and what is built on it.
+        MANUAL = 2,
+    };
+    void NoteFailure(const uint256& block_hash, Failure failure) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    std::optional<Failure> GetFailure(const uint256& block_hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    void ForgetFailure(const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** The sidechain this node found in its slot, once it found one. */
+    std::optional<SlotIdentity> GetSlotIdentity() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    void SetSlotIdentity(const SlotIdentity& identity) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Add the block that follows the last one on record. @return false if it does not follow it. */
     bool Append(const MainBlock& block) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -171,7 +210,18 @@ private:
     std::map<uint256, int> m_closed GUARDED_BY(m_mutex);
     //! Bundle hash to the height of the mainchain block that proposed it.
     std::map<uint256, int> m_proposed GUARDED_BY(m_mutex);
+    /**
+     * Number of bundles pending after each block on record (BundlePending), up to m_pending_valid
+     * blocks; the rest is worked out again when asked for. A bundle is pending from the block that
+     * first proposed it to the one before the block that first closed it.
+     */
+    mutable std::vector<uint32_t> m_pending GUARDED_BY(m_mutex);
+    void UpdatePending() const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void InvalidatePending(int height) EXCLUSIVE_LOCKS_REQUIRED(m_mutex) { if (static_cast<int>(m_pending.size()) > height) m_pending.resize(std::max(height, 0)); }
     bool m_needs_backfill GUARDED_BY(m_mutex){false};
+    bool m_recheck GUARDED_BY(m_mutex){false};
+    std::map<uint256, Failure> m_failures GUARDED_BY(m_mutex);
+    std::optional<SlotIdentity> m_slot_identity GUARDED_BY(m_mutex);
     std::optional<int> m_assumed_height GUARDED_BY(m_mutex);
     std::unique_ptr<CDBWrapper> m_db;
 };

@@ -1172,14 +1172,14 @@ BOOST_AUTO_TEST_CASE(payout_queue)
     sidechain::State& state{side.state};
     std::vector<CTxOut> owed;
     for (size_t i{0}; i < sidechain::MAX_PAYOUTS_PER_BLOCK + 500; ++i) owed.emplace_back(static_cast<CAmount>(i + 1), CScript() << OP_TRUE);
-    const auto paid1{state.TakePayouts(owed, {})};
+    const auto paid1{state.TakePayouts(owed, {}, /*shared=*/false)};
     const sidechain::StoreUndo first{side.store.TakeUndo()};
     BOOST_REQUIRE_EQUAL(paid1.size(), sidechain::MAX_PAYOUTS_PER_BLOCK);
     BOOST_CHECK(paid1.front() == owed.front() && paid1.back() == owed[sidechain::MAX_PAYOUTS_PER_BLOCK - 1]);
     BOOST_CHECK_EQUAL(state.Queue().size(), 500U);
     const uint256 after_first{state.Hash()};
     const CTxOut extra{7 * COIN, CScript() << OP_TRUE << OP_TRUE};
-    const auto paid2{state.TakePayouts({}, {extra})};
+    const auto paid2{state.TakePayouts({}, {extra}, /*shared=*/false)};
     const sidechain::StoreUndo second{side.store.TakeUndo()};
     BOOST_REQUIRE_EQUAL(paid2.size(), 501U);
     BOOST_CHECK(paid2.front() == owed[sidechain::MAX_PAYOUTS_PER_BLOCK] && paid2.back() == extra);
@@ -1193,16 +1193,67 @@ BOOST_AUTO_TEST_CASE(payout_queue)
 
     // Payouts of transactions, however many, do not hold back deposits: those go first.
     std::vector<CTxOut> spam(sidechain::MAX_PAYOUTS_PER_BLOCK + 10, CTxOut{1, CScript() << OP_TRUE});
-    BOOST_CHECK_EQUAL(state.TakePayouts({}, spam).size(), sidechain::MAX_PAYOUTS_PER_BLOCK);
+    BOOST_CHECK_EQUAL(state.TakePayouts({}, spam, /*shared=*/false).size(), sidechain::MAX_PAYOUTS_PER_BLOCK);
     side.store.TakeUndo();
     const CTxOut deposit{5 * COIN, CScript() << OP_TRUE << OP_TRUE};
-    const auto paid4{state.TakePayouts({deposit}, {})};
+    const auto paid4{state.TakePayouts({deposit}, {}, /*shared=*/false)};
     const sidechain::StoreUndo fourth{side.store.TakeUndo()};
     BOOST_REQUIRE_EQUAL(paid4.size(), 11U);
     BOOST_CHECK(paid4.front() == deposit);
     BOOST_CHECK(state.TxQueue().empty());
     side.store.Revert(fourth);
     BOOST_CHECK_EQUAL(state.TxQueue().size(), 10U);
+}
+
+BOOST_AUTO_TEST_CASE(payout_queues_share_a_block)
+{
+    // From audit2_height: a flood in one queue does not hold the other back for many blocks. Each has
+    // half of a block; what one leaves, the other takes.
+    const size_t max{sidechain::MAX_PAYOUTS_PER_BLOCK}, half{max / 2};
+    SideStore side;
+    sidechain::State& state{side.state};
+    std::vector<CTxOut> deposits, others;
+    for (size_t i{0}; i < 3 * max; ++i) deposits.emplace_back(static_cast<CAmount>(i + 1), CScript() << OP_TRUE);
+    for (size_t i{0}; i < 3 * max; ++i) others.emplace_back(static_cast<CAmount>(i + 1), CScript() << OP_TRUE << OP_TRUE);
+    // Both full: half each, deposits first, each queue in order.
+    const auto paid{state.TakePayouts(deposits, others, /*shared=*/true)};
+    BOOST_REQUIRE_EQUAL(paid.size(), max);
+    BOOST_CHECK(std::equal(paid.begin(), paid.begin() + half, deposits.begin()));
+    BOOST_CHECK(std::equal(paid.begin() + half, paid.end(), others.begin()));
+    BOOST_CHECK_EQUAL(state.Queue().size(), 3 * max - half);
+    BOOST_CHECK_EQUAL(state.TxQueue().size(), 3 * max - half);
+    side.store.Revert(side.store.TakeUndo());
+    side.store.TakeUndo();
+    BOOST_CHECK(state.Queue().empty() && state.TxQueue().empty());
+
+    // One deposit behind a flood of other payouts: paid in the first block, not after the flood.
+    const auto first{state.TakePayouts({}, others, /*shared=*/true)};
+    BOOST_CHECK_EQUAL(first.size(), max);
+    const CTxOut deposit{5 * COIN, CScript() << OP_2};
+    const auto second{state.TakePayouts({deposit}, {}, /*shared=*/true)};
+    BOOST_REQUIRE_EQUAL(second.size(), max);
+    BOOST_CHECK(second.front() == deposit);
+    // What the deposits leave of their half goes to the others: all of the block is used.
+    BOOST_CHECK(second[1] == others[max]);
+    BOOST_CHECK_EQUAL(state.TxQueue().size(), 3 * max - max - (max - 1));
+    side.store.Revert(side.store.TakeUndo());
+    side.store.TakeUndo();
+    BOOST_CHECK(state.Queue().empty() && state.TxQueue().empty());
+
+    // And the other way: a flood of deposits leaves half of every block to the other queue.
+    const auto flood{state.TakePayouts(deposits, {}, /*shared=*/true)};
+    BOOST_CHECK_EQUAL(flood.size(), max);
+    const CTxOut refund{COIN, CScript() << OP_3};
+    const auto next{state.TakePayouts({}, {refund}, /*shared=*/true)};
+    BOOST_REQUIRE_EQUAL(next.size(), max);
+    BOOST_CHECK(next.back() == refund);
+    BOOST_CHECK(next.front() == deposits[max]);
+    // Before the rule: the deposits first, up to the whole block.
+    side.store.Revert(side.store.TakeUndo());
+    side.store.TakeUndo();
+    (void)state.TakePayouts(deposits, {}, /*shared=*/false);
+    const auto old_rule{state.TakePayouts({}, {refund}, /*shared=*/false)};
+    BOOST_CHECK(std::find(old_rule.begin(), old_rule.end(), refund) == old_rule.end());
 }
 
 BOOST_AUTO_TEST_CASE(bundle_nonce)
@@ -1372,6 +1423,127 @@ BOOST_AUTO_TEST_CASE(no_refund_while_a_bundle_is_pending_on_the_mainchain)
     // A record truncated below the proposal forgets it.
     mainchain.Truncate(0);
     BOOST_CHECK(!mainchain.BundlePending(1));
+}
+
+BOOST_AUTO_TEST_CASE(events_before_the_slot_activated_are_left_out)
+{
+    // A slot used before by another sidechain: what the mainchain did for that one, up to the block
+    // that activated this one, is not this chain's.
+    Consensus::SidechainParams params;
+    params.main_activation_height = 2;
+    sidechain::Mainchain mainchain;
+    for (int h{0}; h <= 3; ++h) {
+        sidechain::MainBlock block;
+        block.hash = uint256{static_cast<uint8_t>(h + 1)};
+        if (h > 0) block.prev_hash = uint256{static_cast<uint8_t>(h)};
+        sidechain::MainDeposit deposit;
+        deposit.destination = "anything";
+        deposit.amount = (h + 1) * COIN;
+        deposit.txid = uint256{static_cast<uint8_t>(0x10 + h)};
+        block.deposits.push_back(deposit);
+        BOOST_REQUIRE(mainchain.Append(block));
+    }
+    std::string reason;
+    {
+        // With the rule: only what came after the activation block (height 3).
+        SideStore side;
+        std::vector<CTxOut> payouts;
+        BOOST_REQUIRE_MESSAGE(side.state.ApplyMainEvents(3, mainchain, 1, params, payouts, reason), reason);
+        BOOST_REQUIRE_EQUAL(payouts.size(), 1U);
+        BOOST_CHECK_EQUAL(payouts[0].nValue, 4 * COIN);
+        BOOST_CHECK_EQUAL(side.state.MainHeight(), 3);
+        // A block that stops before the activation applies nothing, and the next goes on from there.
+        SideStore early;
+        payouts.clear();
+        BOOST_REQUIRE_MESSAGE(early.state.ApplyMainEvents(1, mainchain, 1, params, payouts, reason), reason);
+        BOOST_CHECK(payouts.empty());
+        BOOST_REQUIRE_MESSAGE(early.state.ApplyMainEvents(3, mainchain, 2, params, payouts, reason), reason);
+        BOOST_REQUIRE_EQUAL(payouts.size(), 1U);
+    }
+    {
+        // Before the rule activates: everything from the start, as before.
+        params.audit2_height = 10;
+        SideStore side;
+        std::vector<CTxOut> payouts;
+        BOOST_REQUIRE_MESSAGE(side.state.ApplyMainEvents(3, mainchain, 1, params, payouts, reason), reason);
+        BOOST_CHECK_EQUAL(payouts.size(), 4U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(bundle_pending_index)
+{
+    // Whether a bundle was pending after a block, kept as a count per block, against the scan of every
+    // proposal it replaces: random proposals, closes, reorgs and fill-ins.
+    FastRandomContext rng{/*fDeterministic=*/true};
+    sidechain::Mainchain mainchain;
+    std::vector<sidechain::MainBlock> blocks;
+    const auto scan{[&](int h) {
+        std::map<uint256, int> proposed, closed;
+        for (size_t i{0}; i < blocks.size(); ++i) {
+            for (const uint256& p : blocks[i].proposed) proposed.emplace(p, i);
+            for (const auto& e : blocks[i].bundles) closed.emplace(e.hash, i);
+        }
+        for (const auto& [hash, p] : proposed) {
+            if (p > h) continue;
+            const auto c{closed.find(hash)};
+            if (c == closed.end() || c->second > h) return true;
+        }
+        return false;
+    }};
+    uint8_t salt{0};
+    for (int round{0}; round < 400; ++round) {
+        const int action{static_cast<int>(rng.randrange(10))};
+        if (action == 0 && !blocks.empty()) {
+            const int keep{static_cast<int>(rng.randrange(blocks.size()))};
+            mainchain.Truncate(keep - 1);
+            blocks.resize(keep);
+        } else if (action == 1 && !blocks.empty()) {
+            const int h{static_cast<int>(rng.randrange(blocks.size()))};
+            if (blocks[h].proposed.empty()) {
+                blocks[h].proposed.push_back(uint256{static_cast<uint8_t>(rng.randrange(8) + 1)});
+                BOOST_REQUIRE(mainchain.Backfill(h, blocks[h].hash, blocks[h].proposed));
+            }
+        } else {
+            sidechain::MainBlock block;
+            block.hash = uint256{++salt};
+            block.hash.data()[31] = static_cast<uint8_t>(round);
+            if (!blocks.empty()) block.prev_hash = blocks.back().hash;
+            if (rng.randbool()) block.proposed.push_back(uint256{static_cast<uint8_t>(rng.randrange(8) + 1)});
+            if (rng.randbool()) block.bundles.push_back({uint256{static_cast<uint8_t>(rng.randrange(8) + 1)}, rng.randbool()});
+            BOOST_REQUIRE(mainchain.Append(block));
+            blocks.push_back(block);
+        }
+        for (int h{-1}; h <= static_cast<int>(blocks.size()) + 1; ++h) BOOST_REQUIRE_EQUAL(mainchain.BundlePending(h), scan(h));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(record_keeps_what_the_follower_needs)
+{
+    // The sidechain found in the slot, why blocks failed, and a recheck still to do survive a restart.
+    const DBParams params{.path = m_args.GetDataDirBase() / "mainchain_record", .cache_bytes = 1 << 20};
+    const uint256 block_a{0xa1}, block_b{0xb2};
+    {
+        sidechain::Mainchain record{params};
+        BOOST_CHECK(!record.GetSlotIdentity());
+        record.SetSlotIdentity({7, uint256{0x77}});
+        record.NoteFailure(block_a, sidechain::Mainchain::Failure::RECORD);
+        record.NoteFailure(block_b, sidechain::Mainchain::Failure::MANUAL);
+        BOOST_CHECK(!record.RecheckPending());
+        record.BackfillDone();
+    }
+    {
+        sidechain::Mainchain record{params};
+        BOOST_CHECK(record.GetSlotIdentity() == (sidechain::SlotIdentity{7, uint256{0x77}}));
+        BOOST_CHECK(record.GetFailure(block_a) == sidechain::Mainchain::Failure::RECORD);
+        BOOST_CHECK(record.GetFailure(block_b) == sidechain::Mainchain::Failure::MANUAL);
+        BOOST_CHECK(record.RecheckPending());
+        record.RecheckDone();
+        record.ForgetFailure(block_a);
+    }
+    sidechain::Mainchain record{params};
+    BOOST_CHECK(!record.RecheckPending());
+    BOOST_CHECK(!record.GetFailure(block_a));
+    BOOST_CHECK(record.GetFailure(block_b) == sidechain::Mainchain::Failure::MANUAL);
 }
 
 BOOST_AUTO_TEST_CASE(record_of_old_format_is_filled_in)

@@ -133,10 +133,21 @@ private:
      *                      Poll, called with the main lock held, leaves that to the thread of the follower
      */
     bool UpdateRecord(bool may_drop = true) EXCLUSIVE_LOCKS_REQUIRED(m_sync_mutex, !m_mutex);
+    /**
+     * Check that the slot of this chain on the mainchain still holds the sidechain this node follows
+     * (SidechainParams::main_activation_height, and the one found first); if not, stop the node.
+     */
+    void CheckSlot(bool record_changed) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Do what the changes of the record call for. */
     void Act() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void Mine() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
     void SendBundle() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Whether this node is still catching up with its chain: in initial block download, or behind the commitments on record. */
+    bool CatchingUp() const;
+    //! Mainchain blocks the last commitment on record may be ahead of that of the tip, as blocks come in.
+    static constexpr int CATCH_UP_MARGIN{6};
+    //! How far back from the tip of the record the last commitment is looked for.
+    static constexpr int CATCH_UP_WINDOW{144};
     /** Once, when the record has caught up: drop from the active chain the blocks the mainchain does not commit to. */
     void CheckActiveChain() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     //! How far below the tip of the mainchain record commitments are checked at start (CheckActiveChain).
@@ -177,6 +188,7 @@ private:
     Mutex m_act_mutex;
     NodeClock::time_point m_last_poll GUARDED_BY(m_mutex){};
     bool m_chain_checked GUARDED_BY(m_mutex){false};
+    bool m_slot_checked GUARDED_BY(m_mutex){false};
     //! The bundle whose payout was last asked of the mainchain node, and at which mainchain height.
     std::pair<uint256, int> m_payout_tried GUARDED_BY(m_mutex){uint256{}, -1};
 };

@@ -115,6 +115,18 @@ struct SidechainParams {
      * it would pay them a second time.
      */
     int single_bundle_height{0};
+    /**
+     * Height of the mainchain block that activated this sidechain in its slot (activationheight in
+     * the mainchain's getsidechain). What the mainchain did up to that block, deposits included, was
+     * for whatever held the slot before: from audit2_height on it is not applied. The follower also
+     * stops if the mainchain says another activation. 0 if unknown (nothing is left out).
+     */
+    int main_activation_height{0};
+    /**
+     * From this height, the rules of the second audit (2026-10-07): the mainchain's events up to
+     * main_activation_height are left out, and each payout queue gets its share of a block.
+     */
+    int audit2_height{0};
     /** zSide: the shielded pool. */
     ZsideParams zside;
 };
