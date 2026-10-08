@@ -64,7 +64,7 @@ public:
     Database(const DBParams& params, const uint256& params_fingerprint);
 
     /** Version of the way the data is laid out; a database of another version is wiped and built anew from the blocks. */
-    static constexpr uint32_t FORMAT_VERSION{7};
+    static constexpr uint32_t FORMAT_VERSION{8};
     enum class Format {
         CURRENT,
         //! Laid out another way (by an older version of this software), or not marked at all.
@@ -92,8 +92,13 @@ public:
     void EraseBlockUndo(const uint256& block_hash);
     /** The same for several blocks, in one batch. */
     void EraseBlockUndo(const std::vector<uint256>& block_hashes);
+    /** The blocks that have undo data. */
+    std::vector<uint256> ListUndoBlocks() const;
     bool ReadBlockEvents(const uint256& block_hash, BlockEvents& events) const;
-    /** Remove the escrow changes of a block that is no longer in the active chain from the index. */
+    /**
+     * Remove the escrow changes of a block from the index. Not needed for correctness (readers skip
+     * the records of blocks out of the active chain): it only frees the records of stale blocks.
+     */
     bool EraseBlockDeposits(const uint256& block_hash);
 
     /**
@@ -120,8 +125,7 @@ public:
 
     /**
      * Escrow changes of a sidechain in chain order, of the blocks `in_active_chain` accepts. Records
-     * of other blocks (a crash between a reorg and the next flush can leave some) are skipped, and
-     * do not count towards `count`.
+     * of other blocks (blocks that left the chain keep theirs) are skipped, and do not count towards `count`.
      *
      * @param[in] after  if set, the txid of the last change the caller knows about; only later ones are returned
      * @param[in] count  maximum number of changes to return, zero for no limit
@@ -129,8 +133,8 @@ public:
      */
     std::optional<std::vector<Deposit>> ListDeposits(SidechainId slot, const std::optional<uint256>& after, size_t count,
                                                      const std::function<bool(const uint256&)>& in_active_chain) const;
-    /** Escrow changes of a sidechain made by the block of the active chain at `height`, in block order. */
-    std::vector<Deposit> ListBlockDeposits(SidechainId slot, int height) const;
+    /** Escrow changes of a sidechain made by the block `block_hash` at `height`, in block order. */
+    std::vector<Deposit> ListBlockDeposits(SidechainId slot, int height, const uint256& block_hash) const;
 
 private:
     mutable CDBWrapper m_db;

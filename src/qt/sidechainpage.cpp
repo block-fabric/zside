@@ -285,14 +285,18 @@ void SidechainPage::withdraw()
         QMessageBox::information(this, tr("Mainchain"), tr("Enter a mainchain address, and the amount and the fee as numbers, like 1.5"));
         return;
     }
+    // The page, or the wallet, may be gone after a message box: its event loop runs everything else.
+    const QPointer<SidechainPage> self{this};
     if (QMessageBox::question(this, tr("Mainchain"), tr("Withdraw %1 to the mainchain address %2, offering mainchain miners %3? %4 leave this wallet now.")
                                                          .arg(amount, address, fee, QString::number(amount.toDouble() + fee.toDouble(), 'f', 8))) != QMessageBox::Yes) return;
+    if (!self || !m_wallet_model) return;
     m_withdraw_button->setEnabled(false);
     callAsync("createwithdrawal", Args({address.toStdString(), amount.toStdString(), fee.toStdString()}), [this](const UniValue& result) {
         m_withdraw_address->clear();
         m_withdraw_amount->clear();
+        const QPointer<SidechainPage> self{this};
         QMessageBox::information(this, tr("Mainchain"), tr("The withdrawal is in transaction %1. It shows in the list once the transaction is mined.").arg(Text(result["txid"])));
-        refresh();
+        if (self) refresh();
     }, [this] { m_withdraw_button->setEnabled(true); });
 }
 
@@ -305,8 +309,9 @@ void SidechainPage::refund()
     }
     m_refund_button->setEnabled(false);
     callAsync("refundwithdrawal", Args({m_withdrawals->item(row, COL_TXID)->text().toStdString(), m_withdrawals->item(row, COL_VOUT)->text().toInt()}), [this](const UniValue& result) {
+        const QPointer<SidechainPage> self{this};
         QMessageBox::information(this, tr("Mainchain"), tr("%1 will be paid back to %2 by the block that mines the request.").arg(Amount(result["amount"]), Text(result["refundaddress"])));
-        refresh();
+        if (self) refresh();
     }, [this] { m_refund_button->setEnabled(true); });
 }
 

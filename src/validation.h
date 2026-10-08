@@ -85,6 +85,8 @@ inline constexpr unsigned int MIN_BLOCKS_TO_KEEP = 288;
  * A reorg deeper than this, like one past the blocks a pruned node keeps, cannot be made.
  */
 inline constexpr int DRIVECHAIN_UNDO_DEPTH{2880};
+/** How far the flushed block moves between two sweeps of the drivechain undo data (Chainstate::SweepDrivechainUndo). */
+inline constexpr int DRIVECHAIN_UNDO_SWEEP_INTERVAL{1000};
 static_assert(DRIVECHAIN_UNDO_DEPTH >= static_cast<int>(MIN_BLOCKS_TO_KEEP));
 inline constexpr signed int DEFAULT_CHECKBLOCKS = 6;
 inline constexpr int DEFAULT_CHECKLEVEL{3};
@@ -832,17 +834,26 @@ public:
      * Bring m_scdb in line with the chain tip after startup, starting from the
      * snapshot taken at the last flush and using the undo data and blocks on
      * disk for the difference. A database of another format, or derived under other
-     * parameters, is wiped (the store of the sidechain state with it) and derived again.
-     * An error if that fails, or is interrupted (m_chainman.m_interrupt; what was done
-     * is kept for the next start).
+     * parameters, is wiped (the store of the sidechain state with it) and derived again
+     * (PrepareDrivechainDB). An error if that fails, or is interrupted (m_chainman.m_interrupt;
+     * what was done is kept for the next start).
      */
     util::Result<void> LoadDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * Start the drivechain database over, for a chainstate that starts over: one whose coins are
      * empty (-reindex-chainstate, a deleted chainstate directory) derives it again from genesis, and
-     * what the store held for the old tip must not be read as the state before block 1.
+     * what the store held for the old tip must not be read as the state before block 1. The
+     * database is checked first (PrepareDrivechainDB): one of another format, or derived under
+     * other parameters, is wiped whole.
      */
-    void ResetDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    util::Result<void> ResetDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Drop the database iterator that the store of the sidechain state keeps between reads in order
+     * (sidechain::DbStore): it holds on to the database as it was when made, files LevelDB would
+     * otherwise let go included. Done after every block connected or disconnected, after block
+     * assembly and after loading; the next read in order makes another.
+     */
+    void ReleaseSideCursor() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 private:
     std::unique_ptr<sidechain::DbStore> m_side_db GUARDED_BY(::cs_main);
     std::unique_ptr<sidechain::StoreOverlay> m_side_cache GUARDED_BY(::cs_main);
@@ -859,9 +870,28 @@ public:
      *                         may change), or that waits for it to be filled in, stops it there; the
      *                         database is left at the block before, and this set to the block. Without
      *                         it, that is an error.
+     * @param[out] invalid     if given: a block that breaks the rules whatever the record says stops
+     *                         it there too, the database left at the block before; this is set to
+     *                         the block, and an error returned.
      */
     util::Result<void> RollForwardSidechainDB(drivechain::SidechainDB& scdb, const CBlockIndex* from, const CBlockIndex* to, int keep_undo_above,
-                                              sidechain::StoreOverlay* side_store = nullptr, const CBlockIndex** stopped_at = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+                                              sidechain::StoreOverlay* side_store = nullptr, const CBlockIndex** stopped_at = nullptr,
+                                              const CBlockIndex** invalid = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Clear the failure flags of every block, so that blocks found invalid under former drivechain
+     * parameters are judged again under the current ones; written to disk at once. On a sidechain,
+     * not those the operator marked invalid (Mainchain::Failure::MANUAL).
+     */
+    void ResetAllBlockFailureFlags() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * At startup: take the chainstate back from the tip to the parent of `invalid`, a block of the
+     * active chain that breaks the drivechain rules, mark it invalid, and make `scdb` (the sidechain
+     * database at that parent) the chainstate's; the store of the sidechain state, at that parent
+     * too, is written with it. False, with `error` set, if the blocks cannot be disconnected.
+     */
+    bool RollBackFromInvalidBlock(CBlockIndex* invalid, drivechain::SidechainDB&& scdb, bilingual_str& error) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Name under which the sidechain database of this chainstate is stored. */
     std::string DrivechainStateName() const;
@@ -875,6 +905,23 @@ public:
     void EraseDrivechainUndo() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Height up to which EraseDrivechainUndo erased the undo data of the active chain.
     int m_drivechain_undo_erased_height GUARDED_BY(::cs_main){-1};
+    /**
+     * Erase the drivechain undo data of every block (of any branch) DRIVECHAIN_UNDO_DEPTH or more
+     * below `flushed`, by a pass over the undo records (a few thousand), and the deposit records of
+     * those not in the active chain.
+     */
+    void SweepDrivechainUndo(const CBlockIndex& flushed) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Height of the flushed block of the last SweepDrivechainUndo.
+    int m_drivechain_undo_swept_height GUARDED_BY(::cs_main){-1};
+
+    /**
+     * Check the format of the drivechain database, and wipe it if it was laid out another way or
+     * derived under other drivechain parameters (resetting the failure flags of all blocks, in the
+     * latter case). With `rebuild_from` (the chain tip to rebuild it up to), nothing is wiped if a
+     * block below it is no longer on disk: false, with `error` set. Without (no chainstate yet, as
+     * with -reindex-chainstate), the database is marked as of the current format at once.
+     */
+    bool PrepareDrivechainDB(const CBlockIndex* rebuild_from, bilingual_str& error) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
      * Remove the mempool transactions that the drivechain rules no longer

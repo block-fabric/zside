@@ -246,7 +246,8 @@ class MiningTemplateVerificationTest(BitcoinTestFramework):
         assert_equal(len(block_3.vtx), 3)
         add_witness_commitment(block_3)
 
-        assert_template(node, block_3, "bad-txns-inputs-missingorspent", submit=False)
+        # The same transaction twice: refused as a duplicate before its inputs are looked at.
+        assert_template(node, block_3, "bad-txns-duplicate", submit=False)
 
         return block_3
 
@@ -255,7 +256,7 @@ class MiningTemplateVerificationTest(BitcoinTestFramework):
         self.log.info("Check blocks in parallel")
         def check_50_blocks(n):
             return [
-                assert_template(n, block_3, "bad-txns-inputs-missingorspent", submit=False)
+                assert_template(n, block_3, "bad-txns-duplicate", submit=False)
                 for _ in range(50)
             ]
         rpcs = [node.cli for _ in range(6)]

@@ -132,6 +132,17 @@ bool Mainchain::ProposedBetween(const uint256& hash, int from, int to) const
     return at != it->second.end() && *at <= to;
 }
 
+bool Mainchain::ProposedSince(const uint256& hash, int committed, int to) const
+{
+    LOCK(m_mutex);
+    // Pending after the block before the commitment: proposed before it, and not closed since.
+    if (PendingAfter(hash, committed - 1)) return true;
+    const auto it{m_proposed.find(hash)};
+    if (it == m_proposed.end()) return false;
+    const auto at{it->second.lower_bound(committed)};
+    return at != it->second.end() && *at <= to;
+}
+
 void Mainchain::IndexEvents(const MainBlock& block, int height, bool add)
 {
     AssertLockHeld(m_mutex);
@@ -201,6 +212,33 @@ bool Mainchain::SupportedPending(int main_height, uint32_t min_score, const uint
     return std::any_of(block.pending.begin(), block.pending.end(), [&](const MainPendingBundle& bundle) {
         return bundle.hash != ours && bundle.score >= min_score;
     });
+}
+
+bool Mainchain::RisingLeader(int main_height, int window, uint32_t min_rise, const uint256& ours) const
+{
+    LOCK(m_mutex);
+    if (main_height < 0 || m_blocks.empty()) return false;
+    const int at{std::min(main_height, static_cast<int>(m_blocks.size()) - 1)};
+    const std::vector<MainPendingBundle>& pending{m_blocks[at].pending};
+    // The leader: the one score above all others. A tie leads nobody (as LEADING_BY_50 sees it).
+    const MainPendingBundle* leader{nullptr};
+    bool tie{false};
+    for (const MainPendingBundle& bundle : pending) {
+        if (!leader || bundle.score > leader->score) {
+            leader = &bundle;
+            tie = false;
+        } else if (bundle.score == leader->score) {
+            tie = true;
+        }
+    }
+    if (!leader || tie || leader->hash == ours) return false;
+    // Its score `window` blocks before (or after the first block on record, if fewer); a bundle
+    // proposed since started at NEW_BUNDLE_SCORE (1).
+    uint32_t before{1};
+    for (const MainPendingBundle& bundle : m_blocks[std::max(at - window, 0)].pending) {
+        if (bundle.hash == leader->hash) before = bundle.score;
+    }
+    return leader->score >= before + min_rise;
 }
 
 std::optional<uint256> Mainchain::BmmAt(int height) const

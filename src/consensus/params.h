@@ -132,8 +132,9 @@ struct SidechainParams {
      *  - a bundle of another branch of this chain pending on the mainchain no longer holds back a new
      *    bundle: paying one fails the other, and the withdrawals the other pays are matched here
      *    (State::ApplyMainEvents);
-     *  - it holds back refunds only with a score of pending_min_score or more on the mainchain, so
-     *    that a bundle proposed by anyone (a bare M3) does not freeze them;
+     *  - it holds back refunds only with a score of pending_min_score or more on the mainchain, or
+     *    while it leads the slot with a rising score, so that a bundle proposed by anyone (a bare M3)
+     *    does not freeze them;
      *  - a bundle this chain committed to that the mainchain has not proposed unproposed_expiry_blocks
      *    mainchain blocks after the commitment fails here.
      */
@@ -145,6 +146,15 @@ struct SidechainParams {
      * needs about a tenth of the hashrate upvoting it to get there before it expires. Below it, a
      * bundle is far from being paid: paying it would take a majority of the hashrate upvoting it over
      * the downvotes of the miners who vouch for this chain's bundle.
+     *
+     * A bundle that leads the slot is held to less: mainchain miners in follow mode (LEADING_BY_50)
+     * upvote whichever bundle leads, so one below pending_min_score can still be paid. So refunds
+     * also wait while the bundle with the highest score (strictly; this chain's own excepted) has
+     * risen by sidechain::PENDING_TREND_MIN_RISE or more over the last sidechain::PENDING_TREND_BLOCKS
+     * mainchain blocks (from 1, the score of a new proposal, if proposed since): it is on its way to
+     * being paid rather than to failing. A bare proposal nobody upvotes never rises, and so does not
+     * freeze refunds; one on its way down -- downvoted by the miners who vouch for this chain -- does
+     * not either. Keeping one rising so takes net upvotes in a quarter of the blocks, all along.
      */
     uint32_t pending_min_score{6480};
     /** Mainchain blocks after its commitment in which the mainchain has to propose a bundle (from audit2_height). */

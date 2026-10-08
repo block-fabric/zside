@@ -7,6 +7,7 @@
 
 #include <univalue.h>
 
+#include <QPointer>
 #include <QWidget>
 
 #include <functional>
@@ -81,7 +82,9 @@ private:
     QWidget* createMiningTab();
 
     ClientModel* m_client_model{nullptr};
-    WalletModel* m_wallet_model{nullptr};
+    //! Guarded: the wallet may be unloaded while a message box of this page, or a call off the GUI
+    //! thread, is under way.
+    QPointer<WalletModel> m_wallet_model;
     QTimer* m_timer{nullptr};
 
     QLabel* m_summary{nullptr};

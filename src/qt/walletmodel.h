@@ -13,6 +13,7 @@
 #include <primitives/transaction_identifier.h>
 #include <support/allocators/secure.h>
 
+#include <atomic>
 #include <vector>
 
 #include <QObject>
@@ -150,6 +151,11 @@ public:
 
     uint256 getLastBlockProcessed() const;
 
+    //! Whether the wallet is being unloaded (the model is then deleted soon). Any thread.
+    bool isUnloading() const { return m_unloading; }
+    //! Called by the unload notification, on the thread unloading the wallet.
+    void setUnloading() { m_unloading = true; }
+
     // Retrieve the cached wallet balance
     interfaces::WalletBalances getCachedBalance() const;
 
@@ -168,6 +174,7 @@ private:
     /** Shared with the wallet notification handlers, which may run on other threads while this
      *  model is deleted: they reach the model only through it, under its lock. */
     std::shared_ptr<WalletModelNotificationGuard> m_notification_guard;
+    std::atomic<bool> m_unloading{false};
     ClientModel* m_client_model;
     interfaces::Node& m_node;
 

@@ -10,6 +10,7 @@
 #include <consensus/params.h>
 #include <kernel/caches.h>
 #include <node/blockstorage.h>
+#include <sidechain/mainchain.h>
 #include <sidechain/store.h>
 #include <sync.h>
 #include <tinyformat.h>
@@ -124,13 +125,25 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
-            if (auto loaded{chainstate->LoadDrivechainState()}; !loaded) {
+            auto loaded{chainstate->LoadDrivechainState()};
+            chainstate->ReleaseSideCursor();
+            if (!loaded) {
                 if (chainman.m_interrupt) return {ChainstateLoadStatus::INTERRUPTED, {}};
                 return {ChainstateLoadStatus::FAILURE, Untranslated(strprintf("Error loading the sidechain database: %s", util::ErrorString(loaded).original))};
             }
         } else {
-            // The chain is connected again from genesis: so is the sidechain state.
-            chainstate->ResetDrivechainState();
+            // The chainstate is built from the blocks (-reindex-chainstate, a new node): the
+            // drivechain database too, which has to be in the current format, derived under the
+            // current parameters, before the blocks are connected; and the sidechain state with it.
+            if (auto reset{chainstate->ResetDrivechainState()}; !reset) {
+                return {ChainstateLoadStatus::FAILURE, util::ErrorString(reset)};
+            }
+            // Every block is checked again against the record as it is: a recheck left from a record
+            // filled in after blocks were connected (Mainchain::RecheckPending) has nothing left to do.
+            if (sidechain::Mainchain* record{chainman.m_mainchain.get()}; record && !record->NeedsBackfill() && record->RecheckPending()) {
+                LogInfo("The chainstate is built anew against the complete record of the mainchain: no blocks left to check again");
+                record->RecheckDone();
+            }
         }
     }
 

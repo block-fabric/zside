@@ -6,8 +6,8 @@
 
 The mainchain node is a stand-in, an RPC server of the test, so that answers no real node gives can
 be tried: blocks that do not follow each other, blocks without their median time or pending bundles,
-amounts that are none, a node on another chain, a reorg deeper than the node can take back,
-commitments to blocks nobody has, another sidechain in the slot.
+amounts that are none, a node on another chain, a node behind the record, a reorg deeper than the
+node can take back, commitments to blocks nobody has, another sidechain in the slot.
 """
 
 import json
@@ -83,6 +83,8 @@ class Mainchain:
             self.calls[method] = self.calls.get(method, 0) + 1
             if method == "getsidechainevents":
                 return self.events(params[1], params[2] if len(params) > 2 else 1), None
+            if method == "getblockcount":
+                return len(self.blocks) - 1, None
             if method == "getblockchaininfo":
                 return {"chain": "regtest", "blocks": len(self.blocks) - 1, "initialblockdownload": False}, None
             if method == "getsidechain":
@@ -208,6 +210,18 @@ class SidechainFollowerTest(BitcoinTestFramework):
             for _ in range(12):
                 main.add_block(branch=5)
         self.wait_until(lambda: "on another chain" in node.getmainchaininfo().get("error", ""))
+        assert_equal(node.getmainchaininfo()["height"], 10)
+        assert_equal(node.getmainchaininfo()["bestblockhash"], block_hash(10, 0))
+        with main.lock:
+            main.blocks = good
+        self.on_record(10)
+
+        self.log.info("A mainchain node behind the record, on the same chain: the node waits, nothing is dropped")
+        with main.lock:
+            # Restarted after losing its last blocks, say: its tip is the record's block at that height.
+            main.blocks = good[:7]
+        self.wait_until(lambda: "behind the record" in node.getmainchaininfo().get("error", ""))
+        time.sleep(2)
         assert_equal(node.getmainchaininfo()["height"], 10)
         assert_equal(node.getmainchaininfo()["bestblockhash"], block_hash(10, 0))
         with main.lock:

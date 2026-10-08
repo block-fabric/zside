@@ -322,9 +322,9 @@ class SidechainNetworkTest(BitcoinTestFramework):
         held_by = [2, 3]
         b.stop()
         self.bmm(0, "A", sync=False)
-        self.bmm(1, "A", sync=False)
-        tip = self.nodes[0].getbestblockhash()
-        self.check_in_sync([self.nodes[0], self.nodes[1]])
+        # The last block, built by node 1: node 0 may not have it yet.
+        tip = self.bmm(1, "A", sync=False)
+        assert_equal(self.check_in_sync([self.nodes[0], self.nodes[1]]), tip)
         for i in held_by:
             # The follower learns it at its next poll.
             self.wait_until(lambda: self.nodes[i].getmainchaininfo()["connected"] is False, timeout=60)

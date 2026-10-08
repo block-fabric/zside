@@ -5,6 +5,7 @@
 #include <chainparams.h>
 #include <consensus/amount.h>
 #include <consensus/merkle.h>
+#include <consensus/validation.h>
 #include <core_io.h>
 #include <hash.h>
 #include <net.h>
@@ -366,6 +367,55 @@ BOOST_AUTO_TEST_CASE(block_malleation)
             block.hashMerkleRoot = BlockMerkleRoot(block);
         }
         BOOST_CHECK(is_mutated(block, /*check_witness_root=*/true));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(block_duplicate_transactions)
+{
+    // A block with the same transaction twice, in positions the merkle "mutated" check does not
+    // catch, is refused by CheckBlock as a consensus failure.
+    CMutableTransaction coinbase;
+    coinbase.vin.resize(1);
+    coinbase.vin[0].scriptSig = CScript() << OP_1 << OP_1;
+    coinbase.vout.resize(1);
+    coinbase.vout[0].nValue = 1;
+
+    auto make_tx = [](uint8_t n) {
+        CMutableTransaction mtx;
+        mtx.vin.resize(1);
+        mtx.vin[0].prevout = COutPoint{Txid::FromUint256(uint256{n}), 0};
+        mtx.vout.resize(1);
+        mtx.vout[0].nValue = 1;
+        return MakeTransactionRef(mtx);
+    };
+    const auto tx_a{make_tx(1)};
+    const auto tx_b{make_tx(2)};
+    const auto tx_c{make_tx(3)};
+
+    auto check = [](std::vector<CTransactionRef> txs, BlockValidationState& state) {
+        CBlock block;
+        block.vtx = std::move(txs);
+        bool mutated;
+        block.hashMerkleRoot = BlockMerkleRoot(block, &mutated);
+        BOOST_CHECK(!mutated);
+        return CheckBlock(block, state, Params().GetConsensus(), /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true);
+    };
+
+    const auto cb{MakeTransactionRef(coinbase)};
+    {
+        BlockValidationState state;
+        BOOST_CHECK(check({cb, tx_a, tx_b}, state));
+    }
+    {
+        BlockValidationState state;
+        BOOST_CHECK(!check({cb, tx_a, tx_b, tx_a}, state));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-txns-duplicate");
+        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_CONSENSUS);
+    }
+    {
+        BlockValidationState state;
+        BOOST_CHECK(!check({cb, tx_a, tx_b, tx_c, tx_b}, state));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-txns-duplicate");
     }
 }
 

@@ -982,21 +982,27 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         InitWarning(_("Option '-limitdescendantsize' is given but descendant size limits have been replaced with cluster size limits (see -limitclustersize). This option has no effect."));
     }
 
-    // A sidechain built from the template names its slot; then it has to name the mainchain block that
-    // activated it there (SidechainParams::main_activation_height). Without it, the deposits the
-    // mainchain made to whatever held the slot before are credited on this chain, and a node that first
-    // meets the mainchain after a replacement follows the wrong sidechain. On the main network that is
-    // a release that must not run; a test network is launched before its slot activates, so it is said
-    // loudly instead. (The template's own networks have no slot: slot 0, never activated.)
-    if (const Consensus::SidechainParams& side{chainparams.GetConsensus().sidechain}; side.enabled && side.slot > 0 && side.main_activation_height == 0) {
+    // A sidechain has to name the mainchain block that activated it in its slot
+    // (SidechainParams::main_activation_height), whatever the slot, slot 0 included. Without it, the
+    // deposits the mainchain made to whatever held the slot before are credited on this chain, and a
+    // node that first meets the mainchain after a replacement follows the wrong sidechain. On the main
+    // network that is a release that must not run; a test network or signet is launched before its slot
+    // activates, so it is said loudly instead. Regtest sets its slot with -sidechainslot, and needs
+    // nothing more. The template's own networks, which no slot activated, are left out: their first
+    // block says so, and a sidechain made from the template has a first block of its own.
+    const auto is_template_chain{[&] {
+        static constexpr std::string_view tag{"Sidechain template, "};
+        const CScript& script{chainparams.GenesisBlock().vtx[0]->vin[0].scriptSig};
+        return std::search(script.begin(), script.end(), tag.begin(), tag.end()) != script.end();
+    }};
+    if (const Consensus::SidechainParams& side{chainparams.GetConsensus().sidechain};
+        side.enabled && side.main_activation_height == 0 && chainparams.GetChainType() != ChainType::REGTEST && !is_template_chain()) {
         if (chainparams.GetChainType() == ChainType::MAIN) {
             return InitError(Untranslated(strprintf("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
                                                     "(SidechainParams::main_activation_height): it must not run on the main network.", side.slot)));
         }
-        if (chainparams.GetChainType() == ChainType::TESTNET) {
-            InitWarning(Untranslated(strprintf("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
-                                               "(SidechainParams::main_activation_height): set it once the slot activates.", side.slot)));
-        }
+        InitWarning(Untranslated(strprintf("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
+                                           "(SidechainParams::main_activation_height): set it once the slot activates.", side.slot)));
     }
 
     // Error if network-specific options (-addnode, -connect, etc) are

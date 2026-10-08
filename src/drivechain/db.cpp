@@ -24,7 +24,7 @@ constexpr uint8_t DB_EVENTS{'E'};
 constexpr uint8_t DB_STATE{'s'};
 //! An escrow change (Deposit), by DepositKey.
 constexpr uint8_t DB_DEPOSIT{'D'};
-//! Where an escrow change is (DepositKey), by sidechain and txid.
+//! Where an escrow change is (DepositKey), by DepositTxidKey.
 constexpr uint8_t DB_DEPOSIT_TXID{'T'};
 constexpr uint8_t DB_FORMAT_VERSION{'v'};
 //! The blocks that closed a bundle (std::vector<Closure>), by slot and bundle hash.
@@ -62,10 +62,16 @@ struct UndoRecord {
     }
 };
 
-/** Key of an escrow change; big endian so that the database orders the changes of a sidechain by position in the chain. */
+/**
+ * Key of an escrow change; big endian so that the database orders the changes of a sidechain by
+ * position in the chain. With the block hash: blocks of different branches at the same height each
+ * keep their own records (readers skip those of blocks out of the active chain), so that no reorg,
+ * crash or restart leaves the active block's records overwritten by another branch's.
+ */
 struct DepositKey {
     SidechainId slot{0};
     uint32_t height{0};
+    uint256 block_hash;
     uint32_t tx_index{0};
 
     template <typename Stream>
@@ -74,6 +80,7 @@ struct DepositKey {
         ser_writedata8(s, DB_DEPOSIT);
         ser_writedata32be(s, slot);
         ser_writedata32be(s, height);
+        s << block_hash;
         ser_writedata32be(s, tx_index);
     }
     template <typename Stream>
@@ -82,23 +89,32 @@ struct DepositKey {
         if (ser_readdata8(s) != DB_DEPOSIT) throw std::ios_base::failure("not a deposit key");
         slot = ser_readdata32be(s);
         height = ser_readdata32be(s);
+        s >> block_hash;
         tx_index = ser_readdata32be(s);
     }
 
     friend bool operator==(const DepositKey&, const DepositKey&) = default;
 };
 
-/** Key of the position of an escrow change by its transaction. */
+/** Key of the position of an escrow change by its transaction: one per block (of any branch) that has it. */
 struct DepositTxidKey {
     SidechainId slot{0};
     uint256 txid;
+    uint256 block_hash;
 
     template <typename Stream>
     void Serialize(Stream& s) const
     {
         ser_writedata8(s, DB_DEPOSIT_TXID);
         ser_writedata32be(s, slot);
-        s << txid;
+        s << txid << block_hash;
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        if (ser_readdata8(s) != DB_DEPOSIT_TXID) throw std::ios_base::failure("not a deposit txid key");
+        slot = ser_readdata32be(s);
+        s >> txid >> block_hash;
     }
 };
 
@@ -228,9 +244,9 @@ bool Database::WriteBlock(const uint256& block_hash, int height, const BlockUndo
         for (const Bundle& bundle : slot.bundles) bundles.emplace_back(bundle.hash, bundle.score);
     }
     for (const Deposit& deposit : deposits) {
-        const DepositKey key{deposit.slot, static_cast<uint32_t>(height), deposit.tx_index};
+        const DepositKey key{deposit.slot, static_cast<uint32_t>(height), block_hash, deposit.tx_index};
         batch.Write(key, deposit);
-        batch.Write(DepositTxidKey{deposit.slot, deposit.tx->GetHash().ToUint256()}, key);
+        batch.Write(DepositTxidKey{deposit.slot, deposit.tx->GetHash().ToUint256(), block_hash}, key);
         record.deposits.push_back(key);
     }
     batch.Write(std::make_pair(DB_EVENTS, block_hash), record);
@@ -278,6 +294,18 @@ void Database::EraseBlockUndo(const std::vector<uint256>& block_hashes)
     m_db.WriteBatch(batch);
 }
 
+std::vector<uint256> Database::ListUndoBlocks() const
+{
+    std::vector<uint256> hashes;
+    const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
+    for (it->Seek(std::make_pair(DB_UNDO, uint256{})); it->Valid(); it->Next()) {
+        std::pair<uint8_t, uint256> key;
+        if (!it->GetKey(key) || key.first != DB_UNDO) break;
+        hashes.push_back(key.second);
+    }
+    return hashes;
+}
+
 bool Database::ReadBlockEvents(const uint256& block_hash, BlockEvents& events) const
 {
     BlockRecord record;
@@ -294,12 +322,8 @@ bool Database::EraseBlockDeposits(const uint256& block_hash)
     CDBBatch batch{m_db};
     for (const DepositKey& key : record.deposits) {
         Deposit deposit;
-        if (m_db.Read(key, deposit)) {
-            // The txid entry goes with it, unless it is the entry of the transaction in another block.
-            const DepositTxidKey txid_key{deposit.slot, deposit.tx->GetHash().ToUint256()};
-            DepositKey indexed;
-            if (m_db.Read(txid_key, indexed) && indexed == key) batch.Erase(txid_key);
-        }
+        // The txid entry goes with it (both are the block's own).
+        if (m_db.Read(key, deposit)) batch.Erase(DepositTxidKey{deposit.slot, deposit.tx->GetHash().ToUint256(), block_hash});
         batch.Erase(key);
     }
     m_db.WriteBatch(batch);
@@ -360,13 +384,13 @@ bool Database::ReadState(const std::string& chainstate, SidechainDB& scdb) const
     return true;
 }
 
-std::vector<Deposit> Database::ListBlockDeposits(SidechainId slot, int height) const
+std::vector<Deposit> Database::ListBlockDeposits(SidechainId slot, int height, const uint256& block_hash) const
 {
     std::vector<Deposit> deposits;
     const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
-    for (it->Seek(DepositKey{slot, static_cast<uint32_t>(height), 0}); it->Valid(); it->Next()) {
+    for (it->Seek(DepositKey{slot, static_cast<uint32_t>(height), block_hash, 0}); it->Valid(); it->Next()) {
         DepositKey key;
-        if (!it->GetKey(key) || key.slot != slot || key.height != static_cast<uint32_t>(height)) break;
+        if (!it->GetKey(key) || key.slot != slot || key.height != static_cast<uint32_t>(height) || key.block_hash != block_hash) break;
         Deposit deposit;
         if (!it->GetValue(deposit)) break;
         deposits.push_back(std::move(deposit));
@@ -378,29 +402,24 @@ std::optional<std::vector<Deposit>> Database::ListDeposits(SidechainId slot, con
                                                            const std::function<bool(const uint256&)>& in_active_chain) const
 {
     std::vector<Deposit> deposits;
-    DepositKey start{slot, 0, 0};
+    DepositKey start{slot, 0, uint256{}, 0};
     if (after) {
-        // Straight to the change the caller knows, by its txid: not through all those before it.
-        Deposit known;
-        const bool indexed{m_db.Read(DepositTxidKey{slot, *after}, start) && m_db.Read(start, known) &&
-                           known.slot == slot && known.tx->GetHash().ToUint256() == *after};
-        if (!indexed || !in_active_chain(known.block_hash)) {
-            // The txid entry names the record of a block that left the chain, or the entry went with
-            // such a record (a crash after a reorg can leave either). Going on from there would skip,
-            // or repeat, changes: the record of the transaction in the active chain is looked for
-            // instead, through the sidechain's records (an `after` that is no change at all costs that).
-            std::optional<DepositKey> found;
-            const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
-            for (it->Seek(DepositKey{slot, 0, 0}); it->Valid(); it->Next()) {
-                DepositKey key;
-                if (!it->GetKey(key) || key.slot != slot) break;
-                Deposit deposit;
-                if (!it->GetValue(deposit)) break;
-                if (deposit.tx->GetHash().ToUint256() == *after && in_active_chain(deposit.block_hash)) found = key;
+        // Straight to the change the caller knows, by its txid: not through all those before it. The
+        // transaction has one entry per block that has it (blocks of other branches too, at most a few):
+        // the one of the active chain is where to go on from.
+        std::optional<DepositKey> found;
+        const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
+        for (it->Seek(DepositTxidKey{slot, *after, uint256{}}); it->Valid(); it->Next()) {
+            DepositTxidKey txid_key;
+            if (!it->GetKey(txid_key) || txid_key.slot != slot || txid_key.txid != *after) break;
+            DepositKey key;
+            if (it->GetValue(key) && in_active_chain(key.block_hash)) {
+                found = key;
+                break;
             }
-            if (!found) return std::nullopt;
-            start = *found;
         }
+        if (!found) return std::nullopt;
+        start = *found;
     }
     const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
     it->Seek(start);

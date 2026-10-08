@@ -63,6 +63,16 @@ inline constexpr size_t MAX_PAYOUTS_PER_BLOCK{1000};
  * (block assembly policy, not a rule): after that, a bundle goes before refund requests.
  */
 inline constexpr int REFUND_GRACE_BLOCKS{6};
+/**
+ * A bundle of another branch that leads the slot on the mainchain holds refunds back whatever its
+ * score while it rose by PENDING_TREND_MIN_RISE or more over the last PENDING_TREND_BLOCKS mainchain
+ * blocks (from SidechainParams::audit2_height; see pending_min_score): net upvotes in a quarter of the
+ * blocks, half the pace at which a bundle reaches the mainchain's withdrawal_min_score in its
+ * withdrawal_period. Slower, it is on its way to failing; keeping it at that pace against the
+ * downvotes of the miners who vouch for this chain takes a good share of the hashrate, block after block.
+ */
+inline constexpr int PENDING_TREND_BLOCKS{12};
+inline constexpr uint32_t PENDING_TREND_MIN_RISE{3};
 
 /** Coins burned on this chain, to be paid out on the mainchain. */
 struct Withdrawal {

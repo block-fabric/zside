@@ -144,6 +144,14 @@ public:
     /** Whether a mainchain block from `from` to `to` proposed the bundle `hash`. */
     bool ProposedBetween(const uint256& hash, int from, int to) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
+     * Whether the bundle `hash`, which the mainchain block at `committed` committed to, was proposed
+     * by the block at `to`: in a block from `committed` to `to`, or before `committed` and still
+     * pending then. A bundle's hash can be worked out before the block that commits to it (it
+     * depends on public state and on the block before), and the mainchain proposes a hash once
+     * while it is pending: a proposal made ahead of the commitment counts.
+     */
+    bool ProposedSince(const uint256& hash, int committed, int to) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
      * Whether a withdrawal bundle of this sidechain was pending on the mainchain after the block at
      * `main_height`, as the proposals and closes on record say: proposed at or below it, and not
      * closed since. Each proposal and each close counts: a bundle closed, forgotten by the mainchain
@@ -157,6 +165,13 @@ public:
      * as the mainchain said (MainBlock::pending).
      */
     bool SupportedPending(int main_height, uint32_t min_score, const uint256& ours) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Whether, after the block at `main_height` (the last one on record if above it), the bundle
+     * with the highest score -- strictly, a tie leads nobody -- was one other than `ours`, and its
+     * score had risen by `min_rise` or more over the last `window` blocks: from what it was then, or
+     * from the score a proposal starts with (1) for one proposed since. See SidechainParams::pending_min_score.
+     */
+    bool RisingLeader(int main_height, int window, uint32_t min_rise, const uint256& ours) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** The sidechain block that the mainchain block at `height` committed to, if any. */
     std::optional<uint256> BmmAt(int height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 

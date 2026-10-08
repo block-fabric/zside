@@ -340,10 +340,18 @@ class SidechainTest(BitcoinTestFramework):
         last = self.bmm()
         main_tip = main.getbestblockhash()
         main.invalidateblock(main_tip)
+        # Shorter, and the same chain up to its tip: the mainchain node may only be behind (restarted
+        # after losing its last block, say), and the nodes of this chain wait for it.
+        for node in self.nodes:
+            assert_raises_rpc_error(-1, "behind the record", node.syncmainchain)
+            assert_equal(node.getbestblockhash(), last)
+        # Another block in its place: the mainchain dropped it.
+        replacement = main.generateblock(self.main_address, [])["hash"]
         for node in self.nodes:
             node.syncmainchain()
             assert_equal(node.getbestblockhash(), tip)
             assert_equal(node.getmainchaininfo()["height"], main.getblockcount())
+        main.invalidateblock(replacement)
         main.reconsiderblock(main_tip)
         for node in self.nodes:
             node.syncmainchain()
@@ -428,7 +436,8 @@ class SidechainTest(BitcoinTestFramework):
         # A transaction with a fee does.
         txid = side.sendtoaddress(side.getnewaddress(), 1)
         fee = -side.gettransaction(txid)["fee"]
-        self.wait_until(lambda: len(main.getrawmempool()) == 1)
+        # The request reaches the mainchain mempool a moment before the node notes it.
+        self.wait_until(lambda: len(main.getrawmempool()) == 1 and side.getbmminfo()["lastfees"] == fee)
         mining = side.getbmminfo()
         assert_equal(mining["idle"], False)
         assert_equal(mining["lastfees"], fee)
@@ -548,11 +557,11 @@ class SidechainTest(BitcoinTestFramework):
         # with X: those go, and with them X, on this sidechain. (Only the block with X gone, the next
         # block on its parent would commit to X again, the same bundle.)
         main.invalidateblock(withdrawal_commitment)
-        # The nodes of this chain learn it, and tell the mainchain node that their chain has no bundle
-        # any more. (Their followers may have done so already, on their own: they poll every second.)
+        # Until another block takes their place, the mainchain node may only be behind: the nodes of
+        # this chain wait.
         for node in self.nodes:
-            node.syncmainchain()
-            assert committed != node.getbestblockhash()
+            assert_raises_rpc_error(-1, "behind the record", node.syncmainchain)
+            assert_equal(node.getbestblockhash(), committed)
         # The mainchain node still has X, and a block built before it heard that proposes X again on
         # the new branch. That order is not left to the timing of the followers: the word for X is
         # given back for that one block, then taken back as the sidechain nodes gave it.
@@ -561,6 +570,8 @@ class SidechainTest(BitcoinTestFramework):
         # block first, after which it is stale, so that nothing commits to that sidechain block again.
         main.generateblock(main.getnewaddress(), [])
         main.vouchwithdrawalbundle(SLOT)
+        # The nodes of this chain learn that the blocks went, and tell the mainchain node that their
+        # chain has no bundle any more.
         for node in self.nodes:
             node.syncmainchain()
             assert committed != node.getbestblockhash()

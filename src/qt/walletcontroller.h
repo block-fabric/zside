@@ -17,6 +17,7 @@
 
 #include <QMessageBox>
 #include <QMutex>
+#include <QPointer>
 #include <QProgressDialog>
 #include <QThread>
 #include <QTimer>
@@ -52,14 +53,15 @@ class WalletController : public QObject
     Q_OBJECT
 
     void removeAndDeleteWallet(WalletModel* wallet_model);
-    //! The registered model of the wallet with this name, if any.
-    WalletModel* findWallet(const std::string& name) const;
+    //! The registered model of the wallet with this name, if any, unless its wallet is being unloaded.
+    QPointer<WalletModel> findWallet(const std::string& name) const;
 
 public:
     WalletController(ClientModel& client_model, const PlatformStyle* platform_style, QObject* parent);
     ~WalletController();
 
-    WalletModel* getOrCreateWallet(std::unique_ptr<interfaces::Wallet> wallet);
+    //! The model of the wallet: guarded, since it may be unloaded and deleted on the GUI thread at any time.
+    QPointer<WalletModel> getOrCreateWallet(std::unique_ptr<interfaces::Wallet> wallet);
 
     //! Returns all wallet names in the wallet dir mapped to whether the wallet
     //! is loaded.
@@ -111,7 +113,8 @@ protected:
 
     WalletController* const m_wallet_controller;
     QWidget* const m_parent_widget;
-    WalletModel* m_wallet_model{nullptr};
+    //! Set on the worker thread; the model may be unloaded while a message box is shown, hence the guard.
+    QPointer<WalletModel> m_wallet_model;
     bilingual_str m_error_message;
     std::vector<bilingual_str> m_warning_message;
 };

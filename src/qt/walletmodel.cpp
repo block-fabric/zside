@@ -391,6 +391,9 @@ bool WalletModel::changePassphrase(const SecureString &oldPass, const SecureStri
 static void NotifyUnload(WalletModel* walletModel)
 {
     qDebug() << "NotifyUnload";
+    // Known at once, before the unload signal is handled on the GUI thread: the controller no
+    // longer hands this model out (WalletController::findWallet).
+    walletModel->setUnloading();
     bool invoked = QMetaObject::invokeMethod(walletModel, "unload");
     assert(invoked);
 }

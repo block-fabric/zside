@@ -128,7 +128,7 @@ void WalletController::closeAllWallets(QWidget* parent)
     }
 }
 
-WalletModel* WalletController::getOrCreateWallet(std::unique_ptr<interfaces::Wallet> wallet)
+QPointer<WalletModel> WalletController::getOrCreateWallet(std::unique_ptr<interfaces::Wallet> wallet)
 {
     // This runs on the GUI thread, an activity's thread or the thread loading a wallet (e.g. an
     // RPC thread, from the load handler). It never waits for the GUI thread: the GUI thread takes
@@ -137,18 +137,20 @@ WalletModel* WalletController::getOrCreateWallet(std::unique_ptr<interfaces::Wal
     const std::string name = wallet->getWalletName();
 
     // Return model instance if exists.
-    if (WalletModel* existing = findWallet(name)) return existing;
+    if (QPointer<WalletModel> existing = findWallet(name)) return existing;
 
     // Instantiate the model without the lock, it may take a while (all transactions are read).
     WalletModel* wallet_model = new WalletModel(std::move(wallet), m_client_model, m_platform_style,
                                                 nullptr /* required for the following moveToThread() call */);
     {
         QMutexLocker locker(&m_mutex);
-        // Another thread may have registered the same wallet meanwhile.
+        // Another thread may have registered the same wallet meanwhile. (A model whose wallet is
+        // being unloaded is on its way out: this wallet, loaded again, gets a model of its own.)
         for (WalletModel* other : m_wallets) {
-            if (other->wallet().getWalletName() == name) {
+            if (!other->isUnloading() && other->wallet().getWalletName() == name) {
                 delete wallet_model; // still owned by this thread
-                return other;
+                // Under the lock: the GUI thread unregisters a model under it before deleting it.
+                return QPointer<WalletModel>{other};
             }
         }
         m_wallets.push_back(wallet_model);
@@ -174,8 +176,16 @@ WalletModel* WalletController::getOrCreateWallet(std::unique_ptr<interfaces::Wal
     // Re-emit coinsSent signal from wallet model.
     connect(wallet_model, &WalletModel::coinsSent, this, &WalletController::coinsSent);
 
-    // The model may be unloaded and deleted on the GUI thread before it is announced below.
+    // The model may be unloaded and deleted on the GUI thread once it belongs to it (its unload
+    // signal is only emitted there), so before it is announced below: made while it cannot be.
     QPointer<WalletModel> guard{wallet_model};
+
+    // WalletModel::startPollBalance needs to be called in a thread managed by
+    // Qt because of startTimer. Posted while the model still belongs to this
+    // thread, so that it cannot be deleted meanwhile: moveToThread takes the
+    // posted call along, and it runs on the GUI event loop.
+    const bool called = QMetaObject::invokeMethod(wallet_model, "startPollBalance", Qt::QueuedConnection);
+    assert(called);
 
     // Move WalletModel object to the thread that created the WalletController
     // object (GUI main thread), instead of the current thread, which could be
@@ -183,12 +193,6 @@ WalletModel* WalletController::getOrCreateWallet(std::unique_ptr<interfaces::Wal
     // This ensures queued signals sent to the WalletModel object will be
     // handled on the GUI event loop.
     wallet_model->moveToThread(thread());
-
-    // WalletModel::startPollBalance needs to be called in a thread managed by
-    // Qt because of startTimer. Considering the current thread can be a RPC
-    // thread, better delegate the calling to Qt with Qt::AutoConnection.
-    const bool called = QMetaObject::invokeMethod(wallet_model, "startPollBalance");
-    assert(called);
 
     // setParent(parent) must be called in the thread which created the parent object. More
     // details in #18948. Queued (direct on the GUI thread), never waited for: see above. If the
@@ -199,14 +203,18 @@ WalletModel* WalletController::getOrCreateWallet(std::unique_ptr<interfaces::Wal
         Q_EMIT walletAdded(guard.data());
     }, QThread::currentThread() == thread() ? Qt::DirectConnection : Qt::QueuedConnection);
 
-    return wallet_model;
+    return guard;
 }
 
-WalletModel* WalletController::findWallet(const std::string& name) const
+QPointer<WalletModel> WalletController::findWallet(const std::string& name) const
 {
     QMutexLocker locker(&m_mutex);
     for (WalletModel* wallet_model : m_wallets) {
-        if (wallet_model->wallet().getWalletName() == name) return wallet_model;
+        // A model whose wallet is being unloaded is about to be deleted, and is not the model of
+        // the wallet if it is loaded again.
+        if (wallet_model->isUnloading()) continue;
+        // Made under the lock: the GUI thread unregisters a model under it before deleting it.
+        if (wallet_model->wallet().getWalletName() == name) return QPointer<WalletModel>{wallet_model};
     }
     return nullptr;
 }
@@ -325,7 +333,8 @@ void CreateWalletActivity::finish()
         QMessageBox::warning(m_parent_widget, tr("Create wallet warning"), QString::fromStdString(Join(m_warning_message, Untranslated("\n")).translated));
     }
 
-    if (m_wallet_model) Q_EMIT created(m_wallet_model);
+    // Checked after the message box above: the model may have been unloaded while it was shown.
+    if (WalletModel* wallet_model = m_wallet_model.data()) Q_EMIT created(wallet_model);
 
     Q_EMIT finished();
 }
@@ -377,7 +386,8 @@ void OpenWalletActivity::finish()
         QMessageBox::warning(m_parent_widget, tr("Open wallet warning"), QString::fromStdString(Join(m_warning_message, Untranslated("\n")).translated));
     }
 
-    if (m_wallet_model) Q_EMIT opened(m_wallet_model);
+    // Checked after the message box above: the model may have been unloaded while it was shown.
+    if (WalletModel* wallet_model = m_wallet_model.data()) Q_EMIT opened(wallet_model);
 
     Q_EMIT finished();
 }
@@ -472,7 +482,8 @@ void RestoreWalletActivity::finish()
         QMessageBox::information(m_parent_widget, tr("Restore wallet message"), QString::fromStdString(Untranslated("Wallet restored successfully \n").translated));
     }
 
-    if (m_wallet_model) Q_EMIT restored(m_wallet_model);
+    // Checked after the message box above: the model may have been unloaded while it was shown.
+    if (WalletModel* wallet_model = m_wallet_model.data()) Q_EMIT restored(wallet_model);
 
     Q_EMIT finished();
 }
@@ -583,7 +594,8 @@ void MigrateWalletActivity::finish()
         QMessageBox::information(m_parent_widget, tr("Migration Successful"), m_success_message);
     }
 
-    if (m_wallet_model) Q_EMIT migrated(m_wallet_model);
+    // Checked after the message box above: the model may have been unloaded while it was shown.
+    if (WalletModel* wallet_model = m_wallet_model.data()) Q_EMIT migrated(wallet_model);
 
     Q_EMIT finished();
 }
