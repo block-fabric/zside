@@ -448,6 +448,21 @@ void CTxMemPool::removeConflicts(const CTransaction &tx)
             }
         }
     }
+    // zSide: and those that reveal a nullifier it reveals (spend a note it spends), by its nullifiers
+    // alone: not a pass over the mempool's.
+    if (!m_shielded_nullifiers.empty() && zside::HasShieldedMarker(tx)) {
+        std::string error;
+        if (const auto bundle{zside::Bundle::FromTx(tx, error)}) {
+            for (const uint256& nf : bundle->Nullifiers()) {
+                const auto entry{m_shielded_nullifiers.find(nf)};
+                if (entry == m_shielded_nullifiers.end() || entry->second == tx.GetHash()) continue;
+                const auto conflict{GetIter(entry->second)};
+                if (!conflict) continue;
+                ClearPrioritisation(entry->second);
+                removeRecursive(*conflict, MemPoolRemovalReason::CONFLICT);
+            }
+        }
+    }
 }
 
 std::vector<RemovedMempoolTransactionInfo> CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx)

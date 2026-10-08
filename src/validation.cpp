@@ -949,6 +949,22 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         }
     }
 
+    // zSide: a shielded transaction that reveals a nullifier one of the mempool reveals spends the same
+    // note: a conflict, as one that spends the same coin, which it replaces under the same rules.
+    if (m_active_chainstate.m_chainman.GetConsensus().sidechain.enabled && zside::HasShieldedMarker(tx)) {
+        std::string error;
+        if (const auto bundle{zside::Bundle::FromTx(tx, error)}) {
+            for (const uint256& nf : bundle->Nullifiers()) {
+                const auto other{m_pool.m_shielded_nullifiers.find(nf)};
+                if (other == m_pool.m_shielded_nullifiers.end() || other->second == hash) continue;
+                if (!args.m_allow_replacement) {
+                    return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bip125-replacement-disallowed");
+                }
+                ws.m_conflicts.insert(other->second);
+            }
+        }
+    }
+
     m_view.SetBackend(m_viewmempool);
 
     const CCoinsViewCache& coins_cache = m_active_chainstate.CoinsTip();
@@ -4990,26 +5006,30 @@ void Chainstate::RemoveStaleDrivechainTxs()
             if (side.GetWithdrawal(withdrawal) && !side.InBundle(withdrawal) && !main_pending) continue;
             if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
         }
-        // Shielded transactions whose notes another spent in a block (they reveal a nullifier the chain
-        // has), or whose anchor a reorg took away: a block with them would be invalid, and no block
-        // could be built.
-        std::set<Txid> shielded, checked;
-        for (const auto& [nf, txid] : m_mempool->m_shielded_nullifiers) {
-            if (SideState().Shielded().IsSpent(nf) && shielded.insert(txid).second) {
-                if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
-            }
-        }
-        // Anchors only go when blocks are undone: the transactions are looked at only then.
+        // Shielded transactions whose anchor a reorg took away: a block with them would be invalid,
+        // and no block could be built. (Those whose notes another spent in a block, revealing one of
+        // their nullifiers, went with the block's conflicts: CTxMemPool::removeForBlock.)
+        // Anchors only go when blocks are undone: the transactions are looked at only then. The
+        // sighash domain changes at audit2_height: then, or back below it, their proofs are checked
+        // again (those still valid are found in the cache).
         const bool anchors_went{m_blocks_disconnected};
         m_blocks_disconnected = false;
+        const int next_height{tip->nHeight + 1};
+        const int audit2_height{m_chainman.GetConsensus().sidechain.zside.audit2_height};
+        const bool domain_changed{next_height == audit2_height || (anchors_went && next_height < audit2_height)};
+        std::set<Txid> checked;
         for (const auto& [nf, txid] : m_mempool->m_shielded_nullifiers) {
-            if (!anchors_went) break;
-            if (shielded.contains(txid) || !checked.insert(txid).second) continue;
+            if (!anchors_went && !domain_changed) break;
+            if (!checked.insert(txid).second) continue;
             const CTransactionRef tx{m_mempool->get(txid)};
             if (!tx) continue;
             std::string error;
             const auto bundle{zside::Bundle::FromTx(*tx, error)};
-            if (bundle && !SideState().Shielded().IsAnchor(bundle->Anchor()) && shielded.insert(txid).second) stale.push_back(tx);
+            if (bundle && anchors_went && !SideState().Shielded().IsAnchor(bundle->Anchor())) {
+                stale.push_back(tx);
+            } else if (domain_changed && !zside::CheckShieldedTx(*tx, error, zside::SighashDomainAt(m_chainman.GetConsensus(), next_height))) {
+                stale.push_back(tx);
+            }
         }
     }
 
