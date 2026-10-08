@@ -331,4 +331,27 @@ BOOST_AUTO_TEST_CASE(bundles_of_a_block_in_one_batch)
     BOOST_CHECK(!VerifyBundles(block, std::nullopt));
 }
 
+namespace {
+struct RegTestSetup : public BasicTestingSetup {
+    RegTestSetup() : BasicTestingSetup{ChainType::REGTEST} {}
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(no_inputs_only_on_a_sidechain, RegTestSetup)
+{
+    // Regtest (without -sidechainslot) is no sidechain: a transaction with a marker and no transparent
+    // input passes the checks that know no chain, and not those of the chain.
+    BOOST_REQUIRE(!Params().GetConsensus().sidechain.enabled);
+    CMutableTransaction mtx{ShieldingTx(1000, std::nullopt)};
+    mtx.vin.clear();
+    mtx.vout[0].nValue = 0;
+    const CTransaction tx{mtx};
+    TxValidationState state;
+    BOOST_CHECK(CheckTransaction(tx, state));
+    CCoinsViewCache view{&CoinsViewEmpty::Get()};
+    CAmount fee;
+    BOOST_CHECK(!Consensus::CheckTxInputs(tx, state, view, 1, fee));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-txns-vin-empty");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

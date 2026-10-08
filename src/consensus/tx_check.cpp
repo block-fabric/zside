@@ -21,7 +21,8 @@
 bool CheckTransaction(const CTransaction& tx, TxValidationState& state)
 {
     // Basic checks that don't depend on any context
-    // zSide: a transaction that spends shielded notes only has no transparent input.
+    // zSide: a transaction that spends shielded notes only has no transparent input. Only on a
+    // sidechain, where the shielded rules apply: Consensus::CheckTxInputs refuses it elsewhere.
     if (tx.vin.empty() && !zside::HasShieldedMarker(tx))
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-vin-empty");
     if (tx.vout.empty())

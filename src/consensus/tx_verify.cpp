@@ -182,7 +182,12 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
     // zSide: what the transaction takes out of the shielded pool counts as an input.
     // What a bundle takes out of the shielded pool: only where the pool's rules apply (a sidechain), or
     // a marker could create coins on a chain that checks no bundle.
-    CAmount nValueIn = ::Params().GetConsensus().sidechain.enabled ? zside::ShieldedValueIn(tx) : 0;
+    const bool shielded_pool{::Params().GetConsensus().sidechain.enabled};
+    CAmount nValueIn = shielded_pool ? zside::ShieldedValueIn(tx) : 0;
+    // Nor is a transaction without transparent inputs valid there (CheckTransaction lets those with a
+    // marker by, knowing no chain): its marker would be all it had, the same transaction valid again
+    // in any block.
+    if (tx.vin.empty() && !shielded_pool) return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-vin-empty");
     for (unsigned int i = 0; i < tx.vin.size(); ++i) {
         const COutPoint &prevout = tx.vin[i].prevout;
         const Coin& coin = inputs.AccessCoin(prevout);

@@ -6161,6 +6161,12 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         if (this->CurrentChainstate().m_from_snapshot_blockhash) {
             return util::Error{Untranslated("Can't activate a snapshot-based chainstate more than once")};
         }
+        // zSide: a snapshot has the coins, not the shielded pool (nor the rest of the sidechain
+        // state), which would start empty: every note made before it unspendable, the pool's
+        // balance wrong. Only regtest has snapshots (MakeSidechain clears them); not as a sidechain.
+        if (GetConsensus().sidechain.enabled) {
+            return util::Error{Untranslated("A sidechain cannot start from a UTXO snapshot: its state (the shielded pool) is not in it")};
+        }
         if (!GetParams().AssumeutxoForBlockhash(base_blockhash).has_value()) {
             auto available_heights = GetParams().GetAvailableSnapshotHeights();
             std::string heights_formatted = util::Join(available_heights, ", ", [&](const auto& i) { return util::ToString(i); });
