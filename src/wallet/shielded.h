@@ -168,7 +168,9 @@ std::variant<CTransactionRef, std::string> BumpShieldedFee(CWallet& wallet, cons
 /**
  * Whether the mempool refused a transaction the wallet just committed: then it is abandoned, and this
  * is the error. One a block took from the mempool since the commit went, and is kept (no error):
- * waits for the wallet to catch up with the chain to tell. Not with the wallet's lock held.
+ * waits for the wallet to catch up with the chain to tell. A wallet that does not broadcast
+ * (-walletbroadcast=0) refuses nothing: it never hands its transactions to the mempool.
+ * Not with the wallet's lock held.
  */
 std::optional<std::string> RefusedCommit(CWallet& wallet, const CTransactionRef& tx);
 /** Move transparent coins of the wallet into its shielded account (or to another shielded address). Not with the wallet's lock held. */

@@ -941,10 +941,18 @@ BOOST_FIXTURE_TEST_CASE(shielded_commit_a_block_took, ListCoinsTestingSetup)
     BOOST_CHECK(!WITH_LOCK(wallet->cs_wallet, return wallet->GetWalletTx(waiting->GetHash())->isAbandoned()));
     CreateAndProcessBlock({CMutableTransaction{*waiting}}, coinbase_script);
 
-    // One the mempool never took (here: not handed to it) is abandoned, its coins free again, and the
+    // One the mempool refused (here: not final yet) is abandoned, its coins free again, and the
     // error says so.
-    wallet->SetBroadcastTransactions(false);
-    const CTransactionRef refused{make()};
+    const CTransactionRef refused{[&] {
+        CCoinControl coin_control;
+        auto res{CreateTransaction(*wallet, {CRecipient{PKHash{coinbaseKey.GetPubKey()}, COIN, /*fSubtractFeeFromAmount=*/false}}, /*change_pos=*/std::nullopt, coin_control, /*sign=*/false)};
+        BOOST_REQUIRE(res);
+        CMutableTransaction mtx{*res->tx};
+        mtx.nLockTime = WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Height()) + 100;
+        for (CTxIn& in : mtx.vin) in.nSequence = CTxIn::MAX_SEQUENCE_NONFINAL;
+        BOOST_REQUIRE(WITH_LOCK(wallet->cs_wallet, return wallet->SignTransaction(mtx)));
+        return MakeTransactionRef(std::move(mtx));
+    }()};
     wallet->CommitTransaction(refused);
     BOOST_CHECK(!m_node.chain->isInMempool(refused->GetHash()));
     const auto error{RefusedCommit(*wallet, refused)};
@@ -956,6 +964,21 @@ BOOST_FIXTURE_TEST_CASE(shielded_commit_a_block_took, ListCoinsTestingSetup)
         BOOST_REQUIRE(wtx);
         BOOST_CHECK(wtx->isAbandoned());
         for (const CTxIn& in : refused->vin) BOOST_CHECK(!wallet->IsSpent(in.prevout));
+    }
+
+    // A wallet that does not broadcast (-walletbroadcast=0) never hands it to the mempool: kept for
+    // the user to send, neither abandoned nor reported as a failure.
+    wallet->SetBroadcastTransactions(false);
+    const CTransactionRef kept{make()};
+    wallet->CommitTransaction(kept);
+    BOOST_CHECK(!m_node.chain->isInMempool(kept->GetHash()));
+    BOOST_CHECK(!RefusedCommit(*wallet, kept));
+    {
+        LOCK(wallet->cs_wallet);
+        const CWalletTx* wtx{wallet->GetWalletTx(kept->GetHash())};
+        BOOST_REQUIRE(wtx);
+        BOOST_CHECK(!wtx->isAbandoned());
+        for (const CTxIn& in : kept->vin) BOOST_CHECK(wallet->IsSpent(in.prevout));
     }
 }
 

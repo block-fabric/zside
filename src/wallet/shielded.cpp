@@ -380,6 +380,9 @@ std::variant<CTransactionRef, std::string> Settle(CWallet& wallet, std::variant<
 std::optional<std::string> RefusedCommit(CWallet& wallet, const CTransactionRef& tx)
 {
     AssertLockNotHeld(wallet.cs_wallet);
+    // A wallet that does not broadcast (-walletbroadcast=0) never hands it to the mempool: it is
+    // kept for the user to send, not abandoned for not being there.
+    if (!wallet.GetBroadcastTransactions()) return std::nullopt;
     // A block may have taken it from the mempool since the commit: it went, and is kept.
     if (!CommittedTransactionRefused(wallet, tx)) return std::nullopt;
     wallet.AbandonTransaction(tx->GetHash());
