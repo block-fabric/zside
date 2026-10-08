@@ -5,6 +5,7 @@
 #include <qt/shieldedpage.h>
 
 #include <qt/clientmodel.h>
+#include <qt/itemviews.h>
 #include <qt/qrimagewidget.h>
 
 #include <QApplication>
@@ -21,6 +22,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QRegularExpressionValidator>
 #include <QShowEvent>
@@ -39,29 +41,14 @@ const char* const ORANGE{"#f59e0b"};
 const char* const RED{"#ef4444"};
 const char* const PURPLE{"#8b5cf6"};
 
-/**
- * A table that leaves input method events to its editors. Under Wayland (WSL), an input method
- * event that reaches a view starts an edit, the edit moves the focus, and moving the focus sends
- * the view another such event: the program runs out of stack.
- */
-class Table : public QTableWidget
-{
-public:
-    using QTableWidget::QTableWidget;
-
-protected:
-    void inputMethodEvent(QInputMethodEvent* event) override { event->ignore(); }
-};
-
 QTableWidget* ViewTable(const QStringList& headers, QWidget* parent)
 {
-    auto* table{new Table(0, headers.size(), parent)};
+    // Read-only, no input method (ItemViews: the Wayland crash).
+    auto* table{new ItemViews::Table(0, headers.size(), parent)};
     table->setHorizontalHeaderLabels(headers);
     table->verticalHeader()->hide();
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setAlternatingRowColors(true);
-    table->setAttribute(Qt::WA_InputMethodEnabled, false);
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     table->horizontalHeader()->setStretchLastSection(true);
     return table;
@@ -348,7 +335,7 @@ ShieldedPage::ShieldedPage(NodeRpc::WalletNameFn wallet_name, QWidget* parent)
         if (const auto a{call("getshieldedaddress", Args({true}))}) showAddress(Text(*a));
     });
     connect(m_send_to, &QLineEdit::textChanged, this, &ShieldedPage::updateSendHint);
-    connect(send, &QPushButton::clicked, this, [this] {
+    connect(send, &QPushButton::clicked, this, [this, send] {
         const QString to{m_send_to->text().trimmed()};
         const QString amount{m_send_amount->text()};
         if (to.isEmpty() || amount.isEmpty()) return say(tr("Give an address and an amount."), true);
@@ -361,16 +348,12 @@ ShieldedPage::ShieldedPage(NodeRpc::WalletNameFn wallet_name, QWidget* parent)
         UniValue value;
         value.setNumStr(amount.toStdString());
         amounts.pushKV(to.toStdString(), value);
-        // Proving takes a few seconds.
-        QApplication::setOverrideCursor(Qt::WaitCursor);
-        const auto r{call("sendshielded", Args({amounts, memo.toStdString()}))};
-        QApplication::restoreOverrideCursor();
-        if (r) {
+        // Proving takes a few seconds: off the GUI thread.
+        callAsync("sendshielded", Args({amounts, memo.toStdString()}), send, tr("Proving the payment…"), [this, amount](const UniValue&) {
             say(tr("Paid: %1 CHN, with the next block.").arg(amount));
             m_send_amount->clear();
             m_send_memo->clear();
-            refresh();
-        }
+        });
     });
     connect(all, &QPushButton::clicked, this, [this] {
         if (const auto b{call("getbalance", UniValue{UniValue::VARR}, true)}) {
@@ -379,21 +362,17 @@ ShieldedPage::ShieldedPage(NodeRpc::WalletNameFn wallet_name, QWidget* parent)
             if (left > 0) m_shield_amount->setText(QString::number(left, 'f', 8));
         }
     });
-    connect(shield, &QPushButton::clicked, this, [this] {
+    connect(shield, &QPushButton::clicked, this, [this, shield] {
         const QString amount{m_shield_amount->text()};
         if (amount.isEmpty()) return say(tr("Give an amount."), true);
         if (!confirm(tr("Shield"), tr("Move %1 CHN of transparent coins into the shielded balance?").arg(amount))) return;
         UniValue value;
         value.setNumStr(amount.toStdString());
-        QApplication::setOverrideCursor(Qt::WaitCursor);
-        const auto r{call("shieldcoins", Args({value, UniValue{}, m_shield_memo->toPlainText().toStdString()}))};
-        QApplication::restoreOverrideCursor();
-        if (r) {
+        callAsync("shieldcoins", Args({value, UniValue{}, m_shield_memo->toPlainText().toStdString()}), shield, tr("Shielding…"), [this, amount](const UniValue&) {
             say(tr("Shielding %1 CHN: spendable after the next block.").arg(amount));
             m_shield_amount->clear();
             m_shield_memo->clear();
-            refresh();
-        }
+        });
     });
     connect(unshield_all, &QPushButton::clicked, this, [this] {
         if (const auto b{call("getshieldedbalance", UniValue{UniValue::VARR}, true)}) {
@@ -403,7 +382,7 @@ ShieldedPage::ShieldedPage(NodeRpc::WalletNameFn wallet_name, QWidget* parent)
         }
     });
     connect(m_unshield_amount, &QLineEdit::textEdited, this, [this] { m_unshield_everything = false; });
-    connect(unshield, &QPushButton::clicked, this, [this] {
+    connect(unshield, &QPushButton::clicked, this, [this, unshield] {
         const QString amount{m_unshield_amount->text().trimmed()};
         const QString to{m_unshield_to->text().trimmed()};
         if (amount.isEmpty()) return say(tr("Give an amount."), true);
@@ -418,16 +397,12 @@ ShieldedPage::ShieldedPage(NodeRpc::WalletNameFn wallet_name, QWidget* parent)
         } else {
             value.setNumStr(amount.toStdString());
         }
-        QApplication::setOverrideCursor(Qt::WaitCursor);
-        const auto r{call("unshieldcoins", Args({value, to.isEmpty() ? UniValue{} : UniValue{to.toStdString()}}))};
-        QApplication::restoreOverrideCursor();
-        if (r) {
-            say(tr("Unshielding %1 CHN to %2: spendable after the next block.").arg(Text((*r)["amount"]), Text((*r)["address"])));
+        callAsync("unshieldcoins", Args({value, to.isEmpty() ? UniValue{} : UniValue{to.toStdString()}}), unshield, tr("Proving the unshielding…"), [this](const UniValue& r) {
+            say(tr("Unshielding %1 CHN to %2: spendable after the next block.").arg(Text(r["amount"]), Text(r["address"])));
             m_unshield_amount->clear();
             m_unshield_everything = false;
             m_unshield_to->clear();
-            refresh();
-        }
+        });
     });
     connect(melt, &QPushButton::clicked, this, [this] {
         if (!confirm(tr("Melt"), tr("Shield every transparent coin of this wallet, each one alone, over about the next 36 blocks? "
@@ -506,6 +481,26 @@ std::optional<UniValue> ShieldedPage::call(const std::string& method, const UniV
     return result;
 }
 
+void ShieldedPage::callAsync(const std::string& method, const UniValue& params, QPushButton* button, const QString& working,
+                             std::function<void(const UniValue&)> success)
+{
+    if (!m_client_model) return;
+    const auto wallet{m_wallet_name()};
+    if (!wallet) return say(tr("Open or create a wallet first."), true);
+    // The wallet is busy proving: the lists wait for it rather than the GUI thread (refresh).
+    ++m_calls_running;
+    button->setEnabled(false);
+    say(working);
+    QPointer<QPushButton> guard{button};
+    NodeRpc::CallAsync(this, m_client_model, method, params, [this, guard, success = std::move(success)](std::optional<UniValue> result, const QString& error) {
+        --m_calls_running;
+        if (guard) guard->setEnabled(true);
+        if (!result) return say(error, true);
+        success(*result);
+        refresh();
+    }, wallet);
+}
+
 void ShieldedPage::say(const QString& text, bool error)
 {
     m_status->setStyleSheet(QStringLiteral("color: %1;").arg(QLatin1String(error ? RED : GREEN)));
@@ -564,7 +559,7 @@ void ShieldedPage::updateCastBills()
 
 void ShieldedPage::refresh()
 {
-    if (!m_client_model || m_busy) return;
+    if (!m_client_model || m_busy || m_calls_running > 0) return;
     if (const auto b{call("getshieldedbalance", UniValue{UniValue::VARR}, true)}) {
         m_available->setText(tr("%1 CHN").arg(Text((*b)["available"])));
         const double pending{(*b)["pending"].get_real()};

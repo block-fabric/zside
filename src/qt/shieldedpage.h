@@ -9,6 +9,8 @@
 
 #include <QWidget>
 
+#include <functional>
+
 class ClientModel;
 class QRImageWidget;
 
@@ -40,6 +42,9 @@ protected:
 
 private:
     std::optional<UniValue> call(const std::string& method, const UniValue& params, bool quiet = false);
+    /** Run a method that takes long (proving) off the GUI thread, `button` disabled meanwhile; `success` on the GUI thread. */
+    void callAsync(const std::string& method, const UniValue& params, QPushButton* button, const QString& working,
+                   std::function<void(const UniValue&)> success);
     void say(const QString& text, bool error = false);
     bool confirm(const QString& title, const QString& text);
     void refresh();
@@ -50,6 +55,7 @@ private:
     NodeRpc::WalletNameFn m_wallet_name;
     ClientModel* m_client_model{nullptr};
     bool m_busy{false};
+    int m_calls_running{0};
 
     QLabel* m_available{nullptr};
     QLabel* m_pending{nullptr};
