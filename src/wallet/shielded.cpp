@@ -17,6 +17,7 @@
 #include <util/strencodings.h>
 #include <wallet/coincontrol.h>
 #include <wallet/fees.h>
+#include <wallet/rpc/util.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
@@ -366,16 +367,24 @@ std::optional<std::string> FinishBundle(const CWallet& wallet, CMutableTransacti
     return std::nullopt;
 }
 
-std::optional<std::string> Commit(CWallet& wallet, const CTransactionRef& tx, std::optional<Txid> replaces = std::nullopt)
+/** What a payment made under the wallet's lock comes to once the lock is released (RefusedCommit). */
+std::variant<CTransactionRef, std::string> Settle(CWallet& wallet, std::variant<CTransactionRef, std::string> result) EXCLUSIVE_LOCKS_REQUIRED(!wallet.cs_wallet)
 {
-    wallet.CommitTransaction(tx, replaces);
-    if (!wallet.chain().isInMempool(tx->GetHash())) {
-        wallet.AbandonTransaction(tx->GetHash());
-        return "The transaction was not accepted into the mempool (see the debug log for why)";
+    if (const auto* tx{std::get_if<CTransactionRef>(&result)}) {
+        if (auto error{RefusedCommit(wallet, *tx)}) return std::move(*error);
     }
-    return std::nullopt;
+    return result;
 }
 } // namespace
+
+std::optional<std::string> RefusedCommit(CWallet& wallet, const CTransactionRef& tx)
+{
+    AssertLockNotHeld(wallet.cs_wallet);
+    // A block may have taken it from the mempool since the commit: it went, and is kept.
+    if (!CommittedTransactionRefused(wallet, tx)) return std::nullopt;
+    wallet.AbandonTransaction(tx->GetHash());
+    return "The transaction was not accepted into the mempool (see the debug log for why)";
+}
 
 namespace {
 /**
@@ -534,7 +543,8 @@ std::variant<CTransactionRef, std::string> SendShieldedWith(CWallet& wallet, con
     mtx.vout.emplace_back(0, PlaceholderMarker(BundleSize(zo_unsigned_num_actions(unsigned_bundle))));
     if (const auto error{FinishBundle(wallet, mtx, mtx.vout.size() - 1, unsigned_bundle)}) return *error;
     const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
-    if (const auto error{Commit(wallet, tx, replaces)}) return *error;
+    // Whether the mempool took it is checked once the lock is released (Settle).
+    wallet.CommitTransaction(tx, replaces);
     return tx;
 }
 } // namespace
@@ -545,15 +555,18 @@ std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const s
     // may wait for that lock (getOrchardWitnesses does not wait, under it).
     AssertLockNotHeld(wallet.cs_wallet);
     wallet.chain().waitForOrchardIndex();
-    LOCK(wallet.cs_wallet);
-    return SendShieldedWith(wallet, recipients, fixed_fee, subtract_fee, /*spend_first=*/{}, /*replaces=*/std::nullopt);
+    std::variant<CTransactionRef, std::string> result;
+    {
+        LOCK(wallet.cs_wallet);
+        result = SendShieldedWith(wallet, recipients, fixed_fee, subtract_fee, /*spend_first=*/{}, /*replaces=*/std::nullopt);
+    }
+    return Settle(wallet, std::move(result));
 }
 
-std::variant<CTransactionRef, std::string> BumpShieldedFee(CWallet& wallet, const Txid& txid, std::optional<CAmount> new_fee)
+namespace {
+std::variant<CTransactionRef, std::string> BumpShieldedFeeWith(CWallet& wallet, const Txid& txid, std::optional<CAmount> new_fee) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
-    AssertLockNotHeld(wallet.cs_wallet);
-    wallet.chain().waitForOrchardIndex();
-    LOCK(wallet.cs_wallet);
+    AssertLockHeld(wallet.cs_wallet);
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
     const CWalletTx* wtx{wallet.GetWalletTx(txid)};
     if (!wtx) return std::string{"The wallet has no such transaction"};
@@ -607,14 +620,32 @@ std::variant<CTransactionRef, std::string> BumpShieldedFee(CWallet& wallet, cons
         fee = *new_fee;
     }
     if (!MoneyRange(fee) || fee > wallet.m_default_max_tx_fee) return strprintf("The fee of %s is more than the wallet pays (-maxtxfee)", FormatMoney(fee));
-    auto result{SendShieldedWith(wallet, recipients, fee, /*subtract_fee=*/false, notes, txid)};
-    if (const auto* bumped{std::get_if<CTransactionRef>(&result)}) wallet.MarkReplaced(txid, (*bumped)->GetHash());
+    return SendShieldedWith(wallet, recipients, fee, /*subtract_fee=*/false, notes, txid);
+}
+} // namespace
+
+std::variant<CTransactionRef, std::string> BumpShieldedFee(CWallet& wallet, const Txid& txid, std::optional<CAmount> new_fee)
+{
+    AssertLockNotHeld(wallet.cs_wallet);
+    wallet.chain().waitForOrchardIndex();
+    std::variant<CTransactionRef, std::string> result;
+    {
+        LOCK(wallet.cs_wallet);
+        result = BumpShieldedFeeWith(wallet, txid, new_fee);
+    }
+    result = Settle(wallet, std::move(result));
+    // Replaced once the new one went (to the mempool, or a block): one refused replaces nothing.
+    if (const auto* bumped{std::get_if<CTransactionRef>(&result)}) {
+        LOCK(wallet.cs_wallet);
+        wallet.MarkReplaced(txid, (*bumped)->GetHash());
+    }
     return result;
 }
 
-std::variant<CTransactionRef, std::string> ShieldCoins(CWallet& wallet, CAmount amount, const OrchardAddress& to, const OrchardMemo& memo)
+namespace {
+std::variant<CTransactionRef, std::string> ShieldCoinsWith(CWallet& wallet, CAmount amount, const OrchardAddress& to, const OrchardMemo& memo) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
-    LOCK(wallet.cs_wallet);
+    AssertLockHeld(wallet.cs_wallet);
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
     if (amount <= 0 || !MoneyRange(amount)) return std::string{"Invalid amount"};
     // A bundle that spends nothing: its anchor is the empty tree.
@@ -648,13 +679,13 @@ std::variant<CTransactionRef, std::string> ShieldCoins(CWallet& wallet, CAmount 
     // The transparent inputs sign last, the bundle included.
     if (!wallet.SignTransaction(mtx)) return std::string{"Cannot sign the transaction (is the wallet unlocked?)"};
     const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
-    if (const auto error{Commit(wallet, tx)}) return *error;
+    wallet.CommitTransaction(tx);
     return tx;
 }
 
-std::variant<CTransactionRef, std::string> ShieldCoin(CWallet& wallet, const COutPoint& coin, const OrchardAddress& to)
+std::variant<CTransactionRef, std::string> ShieldCoinWith(CWallet& wallet, const COutPoint& coin, const OrchardAddress& to) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
-    LOCK(wallet.cs_wallet);
+    AssertLockHeld(wallet.cs_wallet);
     if (wallet.IsLocked()) return std::string{"The wallet is locked"};
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet has no private keys"};
     const CWalletTx* wtx{wallet.GetWalletTx(coin.hash)};
@@ -690,8 +721,31 @@ std::variant<CTransactionRef, std::string> ShieldCoin(CWallet& wallet, const COu
     if (const auto error{FinishBundle(wallet, mtx, 0, unsigned_bundle)}) return *error;
     if (!wallet.SignTransaction(mtx)) return std::string{"Cannot sign the transaction (is the wallet unlocked?)"};
     const CTransactionRef tx{MakeTransactionRef(std::move(mtx))};
-    if (const auto error{Commit(wallet, tx)}) return *error;
+    wallet.CommitTransaction(tx);
     return tx;
+}
+} // namespace
+
+std::variant<CTransactionRef, std::string> ShieldCoins(CWallet& wallet, CAmount amount, const OrchardAddress& to, const OrchardMemo& memo)
+{
+    AssertLockNotHeld(wallet.cs_wallet);
+    std::variant<CTransactionRef, std::string> result;
+    {
+        LOCK(wallet.cs_wallet);
+        result = ShieldCoinsWith(wallet, amount, to, memo);
+    }
+    return Settle(wallet, std::move(result));
+}
+
+std::variant<CTransactionRef, std::string> ShieldCoin(CWallet& wallet, const COutPoint& coin, const OrchardAddress& to)
+{
+    AssertLockNotHeld(wallet.cs_wallet);
+    std::variant<CTransactionRef, std::string> result;
+    {
+        LOCK(wallet.cs_wallet);
+        result = ShieldCoinWith(wallet, coin, to);
+    }
+    return Settle(wallet, std::move(result));
 }
 
 } // namespace wallet

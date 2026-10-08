@@ -903,5 +903,61 @@ BOOST_AUTO_TEST_CASE(shielded_spends_capped)
     BOOST_CHECK(!MaxShieldedSpends({}, 40));
 }
 
+BOOST_FIXTURE_TEST_CASE(shielded_commit_a_block_took, ListCoinsTestingSetup)
+{
+    // zSide: a shielded payment checks the mempool took it once the wallet's lock is released. A block
+    // may have taken it from the mempool since the commit (the in-process miner, or a block that came
+    // in): the payment went, and is neither abandoned nor reported as a failure.
+    auto handler{m_node.chain->handleNotifications({wallet.get(), [](CWallet*) {}})};
+    wallet->SetBroadcastTransactions(true);
+    const CScript coinbase_script{GetScriptForRawPubKey(coinbaseKey.GetPubKey())};
+    const auto make{[&] {
+        CCoinControl coin_control;
+        auto res{CreateTransaction(*wallet, {CRecipient{PKHash{coinbaseKey.GetPubKey()}, COIN, /*fSubtractFeeFromAmount=*/false}}, /*change_pos=*/std::nullopt, coin_control)};
+        BOOST_REQUIRE(res);
+        return res->tx;
+    }};
+
+    const CTransactionRef mined{make()};
+    wallet->CommitTransaction(mined);
+    BOOST_CHECK(m_node.chain->isInMempool(mined->GetHash()));
+    // The block takes it before the check: no longer in the mempool, and the wallet may not have
+    // heard of the block yet (the check waits for it).
+    CreateAndProcessBlock({CMutableTransaction{*mined}}, coinbase_script);
+    BOOST_CHECK(!m_node.chain->isInMempool(mined->GetHash()));
+    BOOST_CHECK(!RefusedCommit(*wallet, mined));
+    {
+        LOCK(wallet->cs_wallet);
+        const CWalletTx* wtx{wallet->GetWalletTx(mined->GetHash())};
+        BOOST_REQUIRE(wtx);
+        BOOST_CHECK(!wtx->isAbandoned());
+        BOOST_CHECK_EQUAL(wallet->GetTxDepthInMainChain(*wtx), 1);
+    }
+
+    // Still in the mempool: kept, of course.
+    const CTransactionRef waiting{make()};
+    wallet->CommitTransaction(waiting);
+    BOOST_CHECK(!RefusedCommit(*wallet, waiting));
+    BOOST_CHECK(!WITH_LOCK(wallet->cs_wallet, return wallet->GetWalletTx(waiting->GetHash())->isAbandoned()));
+    CreateAndProcessBlock({CMutableTransaction{*waiting}}, coinbase_script);
+
+    // One the mempool never took (here: not handed to it) is abandoned, its coins free again, and the
+    // error says so.
+    wallet->SetBroadcastTransactions(false);
+    const CTransactionRef refused{make()};
+    wallet->CommitTransaction(refused);
+    BOOST_CHECK(!m_node.chain->isInMempool(refused->GetHash()));
+    const auto error{RefusedCommit(*wallet, refused)};
+    BOOST_REQUIRE(error);
+    BOOST_CHECK(error->find("not accepted into the mempool") != std::string::npos);
+    {
+        LOCK(wallet->cs_wallet);
+        const CWalletTx* wtx{wallet->GetWalletTx(refused->GetHash())};
+        BOOST_REQUIRE(wtx);
+        BOOST_CHECK(wtx->isAbandoned());
+        for (const CTxIn& in : refused->vin) BOOST_CHECK(!wallet->IsSpent(in.prevout));
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 } // namespace wallet

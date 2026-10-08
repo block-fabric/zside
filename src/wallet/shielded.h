@@ -165,12 +165,19 @@ std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const s
  * Not with the wallet's lock held, as SendShielded.
  */
 std::variant<CTransactionRef, std::string> BumpShieldedFee(CWallet& wallet, const Txid& txid, std::optional<CAmount> fee = std::nullopt);
-/** Move transparent coins of the wallet into its shielded account (or to another shielded address). */
+/**
+ * Whether the mempool refused a transaction the wallet just committed: then it is abandoned, and this
+ * is the error. One a block took from the mempool since the commit went, and is kept (no error):
+ * waits for the wallet to catch up with the chain to tell. Not with the wallet's lock held.
+ */
+std::optional<std::string> RefusedCommit(CWallet& wallet, const CTransactionRef& tx);
+/** Move transparent coins of the wallet into its shielded account (or to another shielded address). Not with the wallet's lock held. */
 std::variant<CTransactionRef, std::string> ShieldCoins(CWallet& wallet, CAmount amount, const OrchardAddress& to, const OrchardMemo& memo);
 
 /**
  * Move one transparent coin of the wallet, whole, into its shielded account: that coin as the only
  * input, the fee out of it, no change. Melting shields each coin so, linking no two coins.
+ * Not with the wallet's lock held.
  */
 std::variant<CTransactionRef, std::string> ShieldCoin(CWallet& wallet, const COutPoint& coin, const OrchardAddress& to);
 
