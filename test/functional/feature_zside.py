@@ -158,6 +158,8 @@ class ZSideTest(SidechainTest):
         self.log.info("A spend whose anchor a reorg takes away leaves the mempool, and blocks can still be made")
         side.invalidateblock(anchored)
         assert spend not in side.getrawmempool()
+        # The wallet gives it up (abandons it), rather than hold its notes as spent forever.
+        self.wait_until(lambda: all(n.get("spent_by") != spend for n in side.listshieldednotes(True)))
         # The next block is built (the template would fail on the stale spend). The other node keeps
         # the anchored block and those after it, its branch the longer.
         replacement = self.bmm(expect=False)
@@ -167,12 +169,14 @@ class ZSideTest(SidechainTest):
         side.reconsiderblock(anchored)
         self.bmm()
         self.sync_blocks()
-        # The spend is still the wallet's: sent again if its anchor is on the chain again, given up if not.
+        # The spend is still the wallet's: sent again if its anchor is on the chain again (mined, it is
+        # the wallet's again), left abandoned if not.
         try:
             side.sendrawtransaction(side.gettransaction(spend)["hex"])
             self.mine_txs()
+            assert_equal(side.gettransaction(spend)["confirmations"], 1)
         except JSONRPCException:
-            side.abandontransaction(spend)
+            assert_raises_rpc_error(-5, "not eligible for abandonment", side.abandontransaction, spend)
         self.check_in_sync()
 
     def run_bump_test(self):

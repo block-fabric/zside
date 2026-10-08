@@ -74,6 +74,7 @@
 #include <wallet/types.h>
 #include <wallet/walletdb.h>
 #include <wallet/walletutil.h>
+#include <zside/marker.h>
 
 #include <algorithm>
 #include <cassert>
@@ -1577,12 +1578,18 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
     // it is, it would keep its coins from the wallet; it is abandoned, which gives them back.
     // Looked up again: SyncTransaction above may have inserted into mapWallet (a rehash
     // invalidates its iterators).
+    // zSide: so is a shielded transaction the mempool drops for a conflict: one of its notes spent in a
+    // block, its anchor taken by a reorg, or signed in the sighash domain that ended at audit2_height
+    // (Chainstate::RemoveStaleDrivechainTxs). Left inactive, it would hold its notes as spent forever
+    // (ShieldedNotes); abandoned, they are the account's again (and if it is mined after all, it is
+    // the wallet's again).
     it = mapWallet.find(tx->GetHash());
-    if ((reason == MemPoolRemovalReason::CONFLICT || reason == MemPoolRemovalReason::REPLACED) && it != mapWallet.end() &&
-        (drivechain::GetBmmRequest(*tx) || std::any_of(tx->vout.begin(), tx->vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); }))) {
-        if (!it->second.isAbandoned() && GetTxDepthInMainChain(it->second) == 0 && !it->second.InMempool()) {
+    if (((reason == MemPoolRemovalReason::CONFLICT || reason == MemPoolRemovalReason::REPLACED) &&
+         (drivechain::GetBmmRequest(*tx) || std::any_of(tx->vout.begin(), tx->vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); }))) ||
+        (reason == MemPoolRemovalReason::CONFLICT && zside::HasShieldedMarker(*tx))) {
+        if (it != mapWallet.end() && !it->second.isAbandoned() && GetTxDepthInMainChain(it->second) == 0 && !it->second.InMempool()) {
             AbandonTransaction(tx->GetHash());
-            WalletLogPrintf("Abandoned drivechain transaction %s, which the mempool dropped and can never be mined\n", tx->GetHash().ToString());
+            WalletLogPrintf("Abandoned drivechain or shielded transaction %s, which the mempool dropped for good\n", tx->GetHash().ToString());
         }
     }
 
