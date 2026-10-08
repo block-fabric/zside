@@ -89,12 +89,24 @@ one bill at a time.
 - A payment spends at most as many notes as a transaction the network relays holds (about 30);
   past that the wallet says so: pay less, or join notes first by paying the account itself.
 - Melt & cast run on a thread of the wallets of their own (not the scheduler's, which runs the
-  block notifications).
+  block notifications), which stops between steps at shutdown or when the wallet is unloaded. The
+  same thread scans again, in the background, the blocks an account set up late (on unlocking) has
+  to: the commands that only read do not wait for it (`getshieldedbalance` says `rescanning_from`).
+- A payment is proved without the wallet's lock (seconds): its notes and coins are picked and held
+  back under the lock, and committed under it again if still unspent. Two payments made at once
+  spend different notes.
 - The wallet's shielded key is derived from the extended private key of its descriptors: nothing
-  more to back up, and it is only at hand when the wallet is unlocked. Its viewing key is kept in
-  the wallet, so that a locked wallet still sees what it receives. A rescan finds the notes again.
+  more to back up, and it is only at hand when the wallet is unlocked. Accounts set up from the
+  fourth audit on derive it with the chain's genesis block and slot (version 2), so one seed makes
+  unrelated keys on each chain; they also watch the key of the older derivation (version 1, the same
+  on every chain) of the same descriptor, so a wallet restored from an older one's descriptor finds
+  and spends its notes. An account set up before keeps its keys. The viewing keys are kept in the
+  wallet, so that a locked wallet still sees what it receives. A rescan finds the notes again, also
+  when a note's bundle went out in another transaction than the one the wallet saw first.
+- A wallet with `-walletbroadcast=0` keeps the payments it makes for the user to send.
 - The **Private** page of the wallet: the balances, the address with its QR code, paying
-  privately with a memo, shielding, melt & cast with the plan, the history with the memos.
+  privately with a memo, shielding, melt & cast with the plan, the history with the memos. It
+  never calls the node on the GUI thread.
 
 ## Commands
 
