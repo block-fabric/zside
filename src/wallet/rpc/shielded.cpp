@@ -19,7 +19,14 @@
 namespace wallet {
 namespace {
 
-std::shared_ptr<CWallet> ReadyWallet(const JSONRPCRequest& request, bool unlocked)
+/**
+ * The wallet of the request, its shielded account set up.
+ * @param[in] rescan  scan again first the blocks the wallet scanned without the account, if any: for
+ *                    what spends or plans with its notes. A method that only reads does not wait for
+ *                    that (it may take minutes): the wallets' background thread does it (StartWallets),
+ *                    and the method says what is known so far.
+ */
+std::shared_ptr<CWallet> ReadyWallet(const JSONRPCRequest& request, bool unlocked, bool rescan = true)
 {
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return nullptr;
@@ -32,7 +39,7 @@ std::shared_ptr<CWallet> ReadyWallet(const JSONRPCRequest& request, bool unlocke
         }
     }
     // Set up after the wallet scanned blocks without it, the account has them scanned again first.
-    ShieldedRescan(*pwallet);
+    if (rescan) ShieldedRescan(*pwallet);
     return pwallet;
 }
 
@@ -111,7 +118,7 @@ RPCMethod getshieldedaddress()
         RPCExamples{HelpExampleCli("getshieldedaddress", "") + HelpExampleCli("getshieldedaddress", "true")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
-    const auto pwallet{ReadyWallet(request, /*unlocked=*/false)};
+    const auto pwallet{ReadyWallet(request, /*unlocked=*/false, /*rescan=*/false)};
     if (!pwallet) return UniValue::VNULL;
     LOCK(pwallet->cs_wallet);
     // Diversified addresses: any index gives an address of the account; random ones cannot be linked.
@@ -134,11 +141,13 @@ RPCMethod getshieldedbalance()
             {RPCResult::Type::STR_AMOUNT, "available", "In notes in blocks: what can be spent"},
             {RPCResult::Type::STR_AMOUNT, "pending", "In notes waiting for a block"},
             {RPCResult::Type::NUM, "notes", "How many notes"},
+            {RPCResult::Type::NUM, "rescanning_from", /*optional=*/true, "The account was set up after the wallet scanned blocks without it: those from this height "
+                                                                         "are being scanned again, in the background, and what they paid it is not counted yet"},
         }},
         RPCExamples{HelpExampleCli("getshieldedbalance", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
-    const auto pwallet{ReadyWallet(request, /*unlocked=*/false)};
+    const auto pwallet{ReadyWallet(request, /*unlocked=*/false, /*rescan=*/false)};
     if (!pwallet) return UniValue::VNULL;
     LOCK(pwallet->cs_wallet);
     const ShieldedBalance balance{GetShieldedBalance(*pwallet)};
@@ -146,6 +155,7 @@ RPCMethod getshieldedbalance()
     result.pushKV("available", ValueFromAmount(balance.available));
     result.pushKV("pending", ValueFromAmount(balance.pending));
     result.pushKV("notes", balance.notes);
+    if (pwallet->m_shielded.rescan_from) result.pushKV("rescanning_from", *pwallet->m_shielded.rescan_from);
     return result;
 },
     };
@@ -172,7 +182,7 @@ RPCMethod listshieldednotes()
         RPCExamples{HelpExampleCli("listshieldednotes", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
-    const auto pwallet{ReadyWallet(request, /*unlocked=*/false)};
+    const auto pwallet{ReadyWallet(request, /*unlocked=*/false, /*rescan=*/false)};
     if (!pwallet) return UniValue::VNULL;
     const bool include_spent{!request.params[0].isNull() && request.params[0].get_bool()};
     LOCK(pwallet->cs_wallet);
@@ -410,7 +420,7 @@ RPCMethod listshieldedtransactions()
         RPCExamples{HelpExampleCli("listshieldedtransactions", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
-    const auto pwallet{ReadyWallet(request, /*unlocked=*/false)};
+    const auto pwallet{ReadyWallet(request, /*unlocked=*/false, /*rescan=*/false)};
     if (!pwallet) return UniValue::VNULL;
     const int count{request.params[0].isNull() ? 50 : request.params[0].getInt<int>()};
     LOCK(pwallet->cs_wallet);
@@ -544,7 +554,7 @@ RPCMethod listmeltcast()
         RPCExamples{HelpExampleCli("listmeltcast", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
-    const auto pwallet{ReadyWallet(request, /*unlocked=*/false)};
+    const auto pwallet{ReadyWallet(request, /*unlocked=*/false, /*rescan=*/false)};
     if (!pwallet) return UniValue::VNULL;
     LOCK(pwallet->cs_wallet);
     UniValue result(UniValue::VARR);

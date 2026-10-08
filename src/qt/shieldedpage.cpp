@@ -332,7 +332,7 @@ ShieldedPage::ShieldedPage(NodeRpc::WalletNameFn wallet_name, QWidget* parent)
         say(tr("The address is copied."));
     });
     connect(fresh, &QPushButton::clicked, this, [this] {
-        if (const auto a{call("getshieldedaddress", Args({true}))}) showAddress(Text(*a));
+        callThen("getshieldedaddress", Args({true}), [this](const UniValue& a) { showAddress(Text(a)); });
     });
     connect(m_send_to, &QLineEdit::textChanged, this, &ShieldedPage::updateSendHint);
     connect(send, &QPushButton::clicked, this, [this, send] {
@@ -356,11 +356,11 @@ ShieldedPage::ShieldedPage(NodeRpc::WalletNameFn wallet_name, QWidget* parent)
         });
     });
     connect(all, &QPushButton::clicked, this, [this] {
-        if (const auto b{call("getbalance", UniValue{UniValue::VARR}, true)}) {
+        callThen("getbalance", UniValue{UniValue::VARR}, [this](const UniValue& b) {
             // Leave a little for the fee.
-            const double left{b->get_real() - 0.001};
+            const double left{b.get_real() - 0.001};
             if (left > 0) m_shield_amount->setText(QString::number(left, 'f', 8));
-        }
+        }, /*quiet=*/true);
     });
     connect(shield, &QPushButton::clicked, this, [this, shield] {
         const QString amount{m_shield_amount->text()};
@@ -375,11 +375,11 @@ ShieldedPage::ShieldedPage(NodeRpc::WalletNameFn wallet_name, QWidget* parent)
         });
     });
     connect(unshield_all, &QPushButton::clicked, this, [this] {
-        if (const auto b{call("getshieldedbalance", UniValue{UniValue::VARR}, true)}) {
-            m_unshield_amount->setText(Text((*b)["available"]));
+        callThen("getshieldedbalance", UniValue{UniValue::VARR}, [this](const UniValue& b) {
+            m_unshield_amount->setText(Text(b["available"]));
             // The whole balance: the fee comes out of it. Typing another amount undoes it.
             m_unshield_everything = true;
-        }
+        }, /*quiet=*/true);
     });
     connect(m_unshield_amount, &QLineEdit::textEdited, this, [this] { m_unshield_everything = false; });
     connect(unshield, &QPushButton::clicked, this, [this, unshield] {
@@ -407,11 +407,11 @@ ShieldedPage::ShieldedPage(NodeRpc::WalletNameFn wallet_name, QWidget* parent)
     connect(melt, &QPushButton::clicked, this, [this] {
         if (!confirm(tr("Melt"), tr("Shield every transparent coin of this wallet, each one alone, over about the next 36 blocks? "
                                     "The coins are locked until they go. Keep the wallet running and unlocked meanwhile."))) return;
-        if (const auto r{call("meltcoins", UniValue{UniValue::VARR})}) {
-            say(tr("%n coin(s) will be melted over the next blocks.", "", static_cast<int>(r->size())));
+        callThen("meltcoins", UniValue{UniValue::VARR}, [this](const UniValue& r) {
+            say(tr("%n coin(s) will be melted over the next blocks.", "", static_cast<int>(r.size())));
             m_plan_listed.clear();
             refresh();
-        }
+        });
     });
     connect(m_cast_amount, &QLineEdit::textChanged, this, &ShieldedPage::updateCastBills);
     connect(cast, &QPushButton::clicked, this, [this] {
@@ -421,30 +421,30 @@ ShieldedPage::ShieldedPage(NodeRpc::WalletNameFn wallet_name, QWidget* parent)
                                     "(within a day or two)? Keep the wallet running and unlocked meanwhile.").arg(amount))) return;
         UniValue value;
         value.setNumStr(amount.toStdString());
-        if (const auto r{call("castcoins", Args({value}))}) {
-            say(tr("%n bill(s) will be cast, at their blocks.", "", static_cast<int>(r->size())));
+        callThen("castcoins", Args({value}), [this](const UniValue& r) {
+            say(tr("%n bill(s) will be cast, at their blocks.", "", static_cast<int>(r.size())));
             m_cast_amount->clear();
             m_plan_listed.clear();
             refresh();
-        }
+        });
     });
     connect(cancel, &QPushButton::clicked, this, [this] {
         const int row{m_plan->currentRow()};
         if (row < 0 || !m_plan->item(row, 0) || m_plan->item(row, 0)->data(Qt::UserRole).isNull()) return say(tr("Select a step that has not gone yet."), true);
         const QString id{m_plan->item(row, 0)->data(Qt::UserRole).toString()};
-        if (call("cancelmeltcast", Args({id.toStdString()}))) {
+        callThen("cancelmeltcast", Args({id.toStdString()}), [this](const UniValue&) {
             say(tr("The step is cancelled."));
             m_plan_listed.clear();
             refresh();
-        }
+        });
     });
     connect(cancel_all, &QPushButton::clicked, this, [this] {
         if (!confirm(tr("Cancel all"), tr("Cancel every step of the plan that has not gone yet? Coins waiting to melt are unlocked."))) return;
-        if (const auto r{call("cancelmeltcast", Args({std::string{"all"}}))}) {
-            say(tr("%n step(s) cancelled.", "", r->getInt<int>()));
+        callThen("cancelmeltcast", Args({std::string{"all"}}), [this](const UniValue& r) {
+            say(tr("%n step(s) cancelled.", "", r.getInt<int>()));
             m_plan_listed.clear();
             refresh();
-        }
+        });
     });
 
     auto* timer{new QTimer(this)};
@@ -463,22 +463,30 @@ void ShieldedPage::showEvent(QShowEvent* event)
     QWidget::showEvent(event);
     refresh();
     if (m_address->text().isEmpty()) {
-        if (const auto a{call("getshieldedaddress", UniValue{UniValue::VARR}, true)}) showAddress(Text(*a));
+        callThen("getshieldedaddress", UniValue{UniValue::VARR}, [this](const UniValue& a) {
+            if (m_address->text().isEmpty()) showAddress(Text(a));
+        }, /*quiet=*/true);
     }
 }
 
-std::optional<UniValue> ShieldedPage::call(const std::string& method, const UniValue& params, bool quiet)
+void ShieldedPage::callThen(const std::string& method, const UniValue& params, std::function<void(const UniValue&)> then, bool quiet, std::function<void()> finally)
 {
-    if (!m_client_model) return std::nullopt;
-    const auto wallet{m_wallet_name()};
+    // Off the GUI thread, always: the wallet may be busy (proving, scanning) and the node waiting
+    // on its queue; the page must not freeze meanwhile.
+    const auto wallet{m_client_model ? m_wallet_name() : std::nullopt};
     if (!wallet) {
-        if (!quiet) say(tr("Open or create a wallet first."), true);
-        return std::nullopt;
+        if (m_client_model && !quiet) say(tr("Open or create a wallet first."), true);
+        if (finally) finally();
+        return;
     }
-    QString error;
-    auto result{NodeRpc::Call(m_client_model, method, params, error, wallet)};
-    if (!result && !quiet) say(error, true);
-    return result;
+    NodeRpc::CallAsync(this, m_client_model, method, params, [this, quiet, then = std::move(then), finally = std::move(finally)](std::optional<UniValue> result, const QString& error) {
+        if (result) {
+            then(*result);
+        } else if (!quiet) {
+            say(error, true);
+        }
+        if (finally) finally();
+    }, wallet);
 }
 
 void ShieldedPage::callAsync(const std::string& method, const UniValue& params, QPushButton* button, const QString& working,
@@ -560,143 +568,166 @@ void ShieldedPage::updateCastBills()
 void ShieldedPage::refresh()
 {
     if (!m_client_model || m_busy || m_calls_running > 0) return;
-    if (const auto b{call("getshieldedbalance", UniValue{UniValue::VARR}, true)}) {
-        m_available->setText(tr("%1 CHN").arg(Text((*b)["available"])));
-        const double pending{(*b)["pending"].get_real()};
-        m_pending->setText(pending > 0 ? tr("%1 CHN waiting for a block").arg(Text((*b)["pending"])) : tr("in %1 notes").arg(Text((*b)["notes"])));
+    // One round at a time; one asked for meanwhile follows it.
+    if (m_refreshing > 0) {
+        m_refresh_again = true;
+        return;
     }
-    if (const auto t{call("getbalance", UniValue{UniValue::VARR}, true)}) {
-        m_transparent->setText(tr("%1 CHN").arg(Text(*t)));
-    }
-    if (const auto p{call("getshieldedinfo", UniValue{UniValue::VARR}, true)}) {
-        m_pool->setText(tr("%1 CHN in %2 notes").arg(Text((*p)["pool"]), Text((*p)["notes"])));
-    }
+    if (!m_wallet_name()) return;
+    m_refresh_again = false;
+    // The calls of a round, each answered on the GUI thread; the round ends with the last.
+    const auto done{[this] {
+        if (--m_refreshing == 0 && m_refresh_again) refresh();
+    }};
+    const auto ask{[&](const std::string& method, const UniValue& params, std::function<void(const UniValue&)> then) {
+        ++m_refreshing;
+        callThen(method, params, std::move(then), /*quiet=*/true, done);
+    }};
+    ask("getshieldedbalance", UniValue{UniValue::VARR}, [this](const UniValue& b) {
+        m_available->setText(tr("%1 CHN").arg(Text(b["available"])));
+        const double pending{b["pending"].get_real()};
+        QString more{pending > 0 ? tr("%1 CHN waiting for a block").arg(Text(b["pending"])) : tr("in %1 notes").arg(Text(b["notes"]))};
+        if (!b["rescanning_from"].isNull()) more += tr(" — scanning the blocks from %1 again for it").arg(Text(b["rescanning_from"]));
+        m_pending->setText(more);
+    });
+    ask("getbalance", UniValue{UniValue::VARR}, [this](const UniValue& t) {
+        m_transparent->setText(tr("%1 CHN").arg(Text(t)));
+    });
+    ask("getshieldedinfo", UniValue{UniValue::VARR}, [this](const UniValue& p) {
+        m_pool->setText(tr("%1 CHN in %2 notes").arg(Text(p["pool"]), Text(p["notes"])));
+    });
+    ask("listshieldedtransactions", Args({200}), [this](const UniValue& h) { showHistory(h); });
+    ask("listmeltcast", UniValue{UniValue::VARR}, [this](const UniValue& p) { showPlan(p); });
+    if (m_notes->isVisible()) ask("listshieldednotes", Args({false}), [this](const UniValue& n) { showNotes(n); });
+}
 
-    if (const auto history{call("listshieldedtransactions", Args({200}), true)}) {
-        const std::string listed{history->write()};
-        if (listed != m_history_listed) {
-            m_history_listed = listed;
-            m_history->setRowCount(0);
-            for (const UniValue& h : history->getValues()) {
-                const double received{h["received"].get_real()}, spent{h["spent"].get_real()};
-                const double shielded{h["shielded"].get_real()}, unshielded{h["unshielded"].get_real()};
-                QString what;
-                const char* colour{nullptr};
-                double amount{0};
-                QStringList memos;
-                for (const UniValue& m : h["memos"].getValues()) memos << Text(m);
-                if (shielded > 0) {
-                    what = tr("Shielded");
-                    amount = shielded;
-                    colour = PURPLE;
-                } else if (spent > 0) {
-                    // Paid out: to others (and unshielded), the rest came back as change.
-                    QStringList to;
-                    for (const UniValue& p : h["payments"].getValues()) {
-                        if (p["to_self"].isTrue()) continue;
-                        to << Text(p["address"]).left(14) + QStringLiteral("…");
-                        if (!Text(p["memo"]).isEmpty()) memos << Text(p["memo"]);
-                    }
-                    what = unshielded > 0 && to.isEmpty() ? tr("Unshielded") : tr("Paid %1").arg(to.join(QStringLiteral(", ")));
-                    amount = -(spent - received);
-                    colour = RED;
-                } else {
-                    what = tr("Received");
-                    amount = received;
-                    colour = GREEN;
+void ShieldedPage::showHistory(const UniValue& history)
+{
+    const std::string listed{history.write()};
+    if (listed != m_history_listed) {
+        m_history_listed = listed;
+        m_history->setRowCount(0);
+        for (const UniValue& h : history.getValues()) {
+            const double received{h["received"].get_real()}, spent{h["spent"].get_real()};
+            const double shielded{h["shielded"].get_real()}, unshielded{h["unshielded"].get_real()};
+            QString what;
+            const char* colour{nullptr};
+            double amount{0};
+            QStringList memos;
+            for (const UniValue& m : h["memos"].getValues()) memos << Text(m);
+            if (shielded > 0) {
+                what = tr("Shielded");
+                amount = shielded;
+                colour = PURPLE;
+            } else if (spent > 0) {
+                // Paid out: to others (and unshielded), the rest came back as change.
+                QStringList to;
+                for (const UniValue& p : h["payments"].getValues()) {
+                    if (p["to_self"].isTrue()) continue;
+                    to << Text(p["address"]).left(14) + QStringLiteral("…");
+                    if (!Text(p["memo"]).isEmpty()) memos << Text(p["memo"]);
                 }
-                const int row{m_history->rowCount()};
-                m_history->insertRow(row);
-                m_history->setItem(row, 0, Item(QDateTime::fromSecsSinceEpoch(h["time"].getInt<int64_t>()).toString(QStringLiteral("yyyy-MM-dd hh:mm"))));
-                m_history->setItem(row, 1, Item(what));
-                auto* amount_item{Item(QString::number(amount, 'f', 8))};
-                amount_item->setForeground(QColor{colour});
-                m_history->setItem(row, 2, amount_item);
-                m_history->setItem(row, 3, Item(memos.join(QStringLiteral(" · "))));
-                const int confirmations{h["confirmations"].getInt<int>()};
-                auto* conf{Item(confirmations == 0 ? tr("waiting") : QString::number(confirmations))};
-                if (confirmations == 0) conf->setForeground(QColor{ORANGE});
-                m_history->setItem(row, 4, conf);
-                m_history->item(row, 0)->setToolTip(Text(h["txid"]));
+                what = unshielded > 0 && to.isEmpty() ? tr("Unshielded") : tr("Paid %1").arg(to.join(QStringLiteral(", ")));
+                amount = -(spent - received);
+                colour = RED;
+            } else {
+                what = tr("Received");
+                amount = received;
+                colour = GREEN;
             }
-            if (m_history->rowCount() == 0) {
-                m_history->insertRow(0);
-                m_history->setItem(0, 1, Item(tr("Nothing yet: shield some coins to start.")));
-            }
+            const int row{m_history->rowCount()};
+            m_history->insertRow(row);
+            m_history->setItem(row, 0, Item(QDateTime::fromSecsSinceEpoch(h["time"].getInt<int64_t>()).toString(QStringLiteral("yyyy-MM-dd hh:mm"))));
+            m_history->setItem(row, 1, Item(what));
+            auto* amount_item{Item(QString::number(amount, 'f', 8))};
+            amount_item->setForeground(QColor{colour});
+            m_history->setItem(row, 2, amount_item);
+            m_history->setItem(row, 3, Item(memos.join(QStringLiteral(" · "))));
+            const int confirmations{h["confirmations"].getInt<int>()};
+            auto* conf{Item(confirmations == 0 ? tr("waiting") : QString::number(confirmations))};
+            if (confirmations == 0) conf->setForeground(QColor{ORANGE});
+            m_history->setItem(row, 4, conf);
+            m_history->item(row, 0)->setToolTip(Text(h["txid"]));
+        }
+        if (m_history->rowCount() == 0) {
+            m_history->insertRow(0);
+            m_history->setItem(0, 1, Item(tr("Nothing yet: shield some coins to start.")));
         }
     }
-    if (const auto plan{call("listmeltcast", UniValue{UniValue::VARR}, true)}) {
-        const std::string listed{plan->write()};
-        // Not while a step is selected: a rebuild would lose it.
-        if (listed != m_plan_listed && !(m_plan->hasFocus() && m_plan->currentRow() >= 0)) {
-            m_plan_listed = listed;
-            const int tip{m_client_model ? m_client_model->getNumBlocks() : 0};
-            m_plan->setRowCount(0);
-            // What is still to go first, then what went, the latest first.
-            std::vector<const UniValue*> steps;
-            for (const UniValue& s : plan->getValues()) steps.push_back(&s);
-            std::stable_sort(steps.begin(), steps.end(), [](const UniValue* a, const UniValue* b) {
-                const bool sa{Text((*a)["status"]) == QLatin1String("sent")}, sb{Text((*b)["status"]) == QLatin1String("sent")};
-                if (sa != sb) return !sa;
-                return sa ? (*a)["id"].getInt<int64_t>() > (*b)["id"].getInt<int64_t>() : (*a)["height"].getInt<int>() < (*b)["height"].getInt<int>();
-            });
-            for (const UniValue* s : steps) {
-                const UniValue& step{*s};
-                const bool is_melt{Text(step["kind"]) == QLatin1String("melt")};
-                const QString status{Text(step["status"])};
-                const int row{m_plan->rowCount()};
-                m_plan->insertRow(row);
-                auto* kind{Item(is_melt ? tr("Melt") : tr("Cast"))};
-                kind->setForeground(QColor{is_melt ? PURPLE : GREEN});
-                if (status != QLatin1String("sent")) kind->setData(Qt::UserRole, Text(step["id"]));
-                m_plan->setItem(row, 0, kind);
-                m_plan->setItem(row, 1, Item(Text(step["amount"])));
-                QString when;
-                QString state;
-                const char* colour{nullptr};
-                if (status == QLatin1String("sent")) {
-                    const int confirmations{step["confirmations"].getInt<int>()};
-                    state = confirmations > 0 ? tr("done") : tr("sent");
-                    when = confirmations > 0 ? tr("%n confirmation(s)", "", confirmations) : tr("waiting for a block");
-                    colour = confirmations > 0 ? GREEN : ORANGE;
-                    m_plan->setItem(row, 4, Item(Text(step["txid"])));
-                } else {
-                    const int height{step["height"].getInt<int>()};
-                    state = status == QLatin1String("waiting") ? tr("waiting") : tr("planned");
-                    when = height <= tip ? tr("now") : tr("at block %1, in %n block(s)", "", height - tip).arg(height);
-                    if (status == QLatin1String("waiting")) {
-                        colour = ORANGE;
-                        when += QStringLiteral(" — ") + Text(step["error"]);
-                    }
+}
+
+void ShieldedPage::showPlan(const UniValue& plan)
+{
+    const std::string listed{plan.write()};
+    // Not while a step is selected: a rebuild would lose it.
+    if (listed != m_plan_listed && !(m_plan->hasFocus() && m_plan->currentRow() >= 0)) {
+        m_plan_listed = listed;
+        const int tip{m_client_model ? m_client_model->getNumBlocks() : 0};
+        m_plan->setRowCount(0);
+        // What is still to go first, then what went, the latest first.
+        std::vector<const UniValue*> steps;
+        for (const UniValue& s : plan.getValues()) steps.push_back(&s);
+        std::stable_sort(steps.begin(), steps.end(), [](const UniValue* a, const UniValue* b) {
+            const bool sa{Text((*a)["status"]) == QLatin1String("sent")}, sb{Text((*b)["status"]) == QLatin1String("sent")};
+            if (sa != sb) return !sa;
+            return sa ? (*a)["id"].getInt<int64_t>() > (*b)["id"].getInt<int64_t>() : (*a)["height"].getInt<int>() < (*b)["height"].getInt<int>();
+        });
+        for (const UniValue* s : steps) {
+            const UniValue& step{*s};
+            const bool is_melt{Text(step["kind"]) == QLatin1String("melt")};
+            const QString status{Text(step["status"])};
+            const int row{m_plan->rowCount()};
+            m_plan->insertRow(row);
+            auto* kind{Item(is_melt ? tr("Melt") : tr("Cast"))};
+            kind->setForeground(QColor{is_melt ? PURPLE : GREEN});
+            if (status != QLatin1String("sent")) kind->setData(Qt::UserRole, Text(step["id"]));
+            m_plan->setItem(row, 0, kind);
+            m_plan->setItem(row, 1, Item(Text(step["amount"])));
+            QString when;
+            QString state;
+            const char* colour{nullptr};
+            if (status == QLatin1String("sent")) {
+                const int confirmations{step["confirmations"].getInt<int>()};
+                state = confirmations > 0 ? tr("done") : tr("sent");
+                when = confirmations > 0 ? tr("%n confirmation(s)", "", confirmations) : tr("waiting for a block");
+                colour = confirmations > 0 ? GREEN : ORANGE;
+                m_plan->setItem(row, 4, Item(Text(step["txid"])));
+            } else {
+                const int height{step["height"].getInt<int>()};
+                state = status == QLatin1String("waiting") ? tr("waiting") : tr("planned");
+                when = height <= tip ? tr("now") : tr("at block %1, in %n block(s)", "", height - tip).arg(height);
+                if (status == QLatin1String("waiting")) {
+                    colour = ORANGE;
+                    when += QStringLiteral(" — ") + Text(step["error"]);
                 }
-                auto* state_item{Item(state)};
-                if (colour) state_item->setForeground(QColor{colour});
-                m_plan->setItem(row, 2, state_item);
-                m_plan->setItem(row, 3, Item(when));
-                if (is_melt) m_plan->item(row, 1)->setToolTip(tr("The coin %1").arg(Text(step["coin"])));
             }
-            if (m_plan->rowCount() == 0) {
-                m_plan->insertRow(0);
-                m_plan->setItem(0, 3, Item(tr("Nothing planned.")));
-            }
+            auto* state_item{Item(state)};
+            if (colour) state_item->setForeground(QColor{colour});
+            m_plan->setItem(row, 2, state_item);
+            m_plan->setItem(row, 3, Item(when));
+            if (is_melt) m_plan->item(row, 1)->setToolTip(tr("The coin %1").arg(Text(step["coin"])));
+        }
+        if (m_plan->rowCount() == 0) {
+            m_plan->insertRow(0);
+            m_plan->setItem(0, 3, Item(tr("Nothing planned.")));
         }
     }
-    if (m_notes->isVisible()) {
-        if (const auto notes{call("listshieldednotes", Args({false}), true)}) {
-            const std::string listed{notes->write()};
-            if (listed != m_notes_listed) {
-                m_notes_listed = listed;
-                m_notes->setRowCount(0);
-                for (const UniValue& n : notes->getValues()) {
-                    const int row{m_notes->rowCount()};
-                    m_notes->insertRow(row);
-                    m_notes->setItem(row, 0, Item(Text(n["amount"])));
-                    m_notes->setItem(row, 1, Item(Text(n["memo"])));
-                    m_notes->setItem(row, 2, Item(n["change"].isTrue() ? tr("change") : tr("received")));
-                    m_notes->setItem(row, 3, Item(Text(n["confirmations"])));
-                    m_notes->setItem(row, 4, Item(Text(n["txid"])));
-                }
-            }
+}
+
+void ShieldedPage::showNotes(const UniValue& notes)
+{
+    const std::string listed{notes.write()};
+    if (listed != m_notes_listed) {
+        m_notes_listed = listed;
+        m_notes->setRowCount(0);
+        for (const UniValue& n : notes.getValues()) {
+            const int row{m_notes->rowCount()};
+            m_notes->insertRow(row);
+            m_notes->setItem(row, 0, Item(Text(n["amount"])));
+            m_notes->setItem(row, 1, Item(Text(n["memo"])));
+            m_notes->setItem(row, 2, Item(n["change"].isTrue() ? tr("change") : tr("received")));
+            m_notes->setItem(row, 3, Item(Text(n["confirmations"])));
+            m_notes->setItem(row, 4, Item(Text(n["txid"])));
         }
     }
 }

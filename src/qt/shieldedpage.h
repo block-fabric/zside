@@ -41,13 +41,22 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
-    std::optional<UniValue> call(const std::string& method, const UniValue& params, bool quiet = false);
+    /**
+     * Run a method off the GUI thread (NodeRpc::CallAsync): `then` with its result on the GUI thread,
+     * or the error said (unless `quiet`); `finally` after either.
+     */
+    void callThen(const std::string& method, const UniValue& params, std::function<void(const UniValue&)> then, bool quiet = false,
+                  std::function<void()> finally = {});
     /** Run a method that takes long (proving) off the GUI thread, `button` disabled meanwhile; `success` on the GUI thread. */
     void callAsync(const std::string& method, const UniValue& params, QPushButton* button, const QString& working,
                    std::function<void(const UniValue&)> success);
     void say(const QString& text, bool error = false);
     bool confirm(const QString& title, const QString& text);
+    /** Ask for the balances and the lists again, off the GUI thread; they update as the answers come. */
     void refresh();
+    void showHistory(const UniValue& history);
+    void showPlan(const UniValue& plan);
+    void showNotes(const UniValue& notes);
     void showAddress(const QString& address);
     void updateSendHint();
     void updateCastBills();
@@ -56,6 +65,9 @@ private:
     ClientModel* m_client_model{nullptr};
     bool m_busy{false};
     int m_calls_running{0};
+    //! The calls of a refresh not answered yet; whether another refresh was asked for meanwhile.
+    int m_refreshing{0};
+    bool m_refresh_again{false};
 
     QLabel* m_available{nullptr};
     QLabel* m_pending{nullptr};

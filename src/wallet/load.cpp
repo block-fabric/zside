@@ -174,16 +174,20 @@ void StartWallets(WalletContext& context)
     }
 
     context.scheduler->scheduleEvery([&context] { MaybeResendWalletTxs(context); }, 1min);
-    // zSide: what the melt/cast plans have due, as the blocks come. On a thread of its own, as
-    // upstream does long wallet work, not the scheduler's: a payment waits for -orchardindex to take
-    // the queued block notifications, which the scheduler's thread runs (it would wait for itself),
-    // and proving takes seconds, which would hold back every notification.
+    // zSide: what the melt/cast plans have due, as the blocks come; and the blocks a shielded account
+    // set up late (on unlocking, say) is to scan again (ShieldedRescan), which the RPCs that only read
+    // leave to it. On a thread of its own, as upstream does long wallet work, not the scheduler's: a
+    // payment waits for -orchardindex to take the queued block notifications, which the scheduler's
+    // thread runs (it would wait for itself), and proving takes seconds, which would hold back every
+    // notification.
     if (!context.meltcast_thread.joinable()) {
         context.meltcast_interrupt.reset();
         context.meltcast_thread = std::thread(&util::TraceThread, "meltcast", [&context] {
             while (context.meltcast_interrupt.sleep_for(10s)) {
                 for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) {
                     if (context.meltcast_interrupt) break;
+                    // (A scan stops at shutdown by itself; it starts again later where it has to.)
+                    ShieldedRescan(*pwallet);
                     // Stopped between steps at shutdown, and once the wallet is unloaded (which waits
                     // for this reference to go).
                     RunMeltCast(*pwallet, [&context, &pwallet] {
