@@ -75,12 +75,21 @@ one bill at a time.
 - **The pool never holds less than nothing**: what bundles take out never exceeds what went in.
   Should the proofs ever have a flaw, no more than the pool holds could be taken.
 - No bundle in a coinbase. A bundle has at most 256 actions.
+- The tree holds fewer than 2^32 notes (from `audit2_height`; a full tree's root would be the
+  empty tree's).
 
 ## The node and the wallet
 
 - The node keeps the right edge of the note commitment tree, the roots that are anchors, the
   nullifiers and the pool's value in its sidechain state. **`-orchardindex`** (on by default)
   keeps the whole tree, from which a wallet gets the path of its notes; wallets need it to spend.
+- A spend in the mempool whose anchor a reorg took away, or signed for the other side of
+  `audit2_height`, leaves it once the reorg is done (not on the way, against a state in between);
+  the wallet then abandons it, and its notes are the account's again.
+- A payment spends at most as many notes as a transaction the network relays holds (about 30);
+  past that the wallet says so: pay less, or join notes first by paying the account itself.
+- Melt & cast run on a thread of the wallets of their own (not the scheduler's, which runs the
+  block notifications).
 - The wallet's shielded key is derived from the extended private key of its descriptors: nothing
   more to back up, and it is only at hand when the wallet is unlocked. Its viewing key is kept in
   the wallet, so that a locked wallet still sees what it receives. A rescan finds the notes again.
