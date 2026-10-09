@@ -5,22 +5,23 @@
 #include <sidechain/mainchain.h>
 
 #include <logging.h>
+#include <tinyformat.h>
+#include <util/fs.h>
 
 #include <algorithm>
 #include <iterator>
 #include <set>
+#include <stdexcept>
 
 namespace sidechain {
 namespace {
 constexpr uint8_t DB_BLOCK{'b'};
-//! Version of the record: 2 since blocks keep the bundles they proposed, 3 since they keep the
-//! bundles pending after them with their scores.
+//! Version of the record: 3 since blocks keep the bundles they proposed and those pending after them
+//! with their scores. An older record cannot be read.
 constexpr uint8_t DB_VERSION{'v'};
 constexpr uint32_t RECORD_VERSION{3};
 //! The sidechain found in the slot (SlotIdentity).
 constexpr uint8_t DB_SLOT_IDENTITY{'i'};
-//! Set while blocks connected before the backfill are to be checked again.
-constexpr uint8_t DB_RECHECK{'r'};
 //! Why blocks of this chain failed (Mainchain::Failure), by hash.
 constexpr uint8_t DB_FAILURE{'F'};
 
@@ -48,6 +49,14 @@ Mainchain::Mainchain(const std::optional<DBParams>& db_params)
     if (!db_params) return;
     m_db = std::make_unique<CDBWrapper>(*db_params);
     const std::unique_ptr<CDBIterator> it{m_db->NewIterator()};
+    if (uint32_t version{0}; !m_db->Read(DB_VERSION, version) || version < RECORD_VERSION) {
+        it->Seek(BlockKey{0});
+        if (BlockKey key; it->Valid() && it->GetKey(key)) {
+            throw std::runtime_error(strprintf("The record of the mainchain in %s was written by an older release, which kept less of each block. "
+                                               "Start this release with a new data directory.", fs::PathToString(db_params->path)));
+        }
+        m_db->Write(DB_VERSION, RECORD_VERSION);
+    }
     for (it->Seek(BlockKey{0}); it->Valid(); it->Next()) {
         BlockKey key;
         MainBlock block;
@@ -59,7 +68,6 @@ Mainchain::Mainchain(const std::optional<DBParams>& db_params)
         m_blocks.push_back(std::move(block));
     }
     if (SlotIdentity identity; m_db->Read(DB_SLOT_IDENTITY, identity)) m_slot_identity = identity;
-    m_recheck = m_db->Exists(DB_RECHECK);
     {
         const std::unique_ptr<CDBIterator> failures{m_db->NewIterator()};
         for (failures->Seek(std::make_pair(DB_FAILURE, uint256{})); failures->Valid(); failures->Next()) {
@@ -69,15 +77,7 @@ Mainchain::Mainchain(const std::optional<DBParams>& db_params)
             m_failures.emplace(key.second, static_cast<Failure>(failure));
         }
     }
-    uint32_t version{0};
-    if (!m_db->Read(DB_VERSION, version) || version < RECORD_VERSION) {
-        if (m_blocks.empty()) {
-            m_db->Write(DB_VERSION, RECORD_VERSION);
-        } else {
-            m_needs_backfill = true;
-        }
-    }
-    LogInfo("Loaded the record of %d mainchain blocks%s", m_blocks.size(), m_needs_backfill ? ", whose proposed bundles are to be filled in" : "");
+    LogInfo("Loaded the record of %d mainchain blocks", m_blocks.size());
 }
 
 int Mainchain::Height() const
@@ -178,32 +178,6 @@ bool Mainchain::PendingAfter(const uint256& hash, int height) const
     return !closed || *proposed >= *closed;
 }
 
-void Mainchain::UpdatePending() const
-{
-    AssertLockHeld(m_mutex);
-    // Each block changes the count by the bundles whose proposal or close it holds: each one pending
-    // after it and not before, or the other way round.
-    for (size_t h{m_pending.size()}; h < m_blocks.size(); ++h) {
-        int64_t count{h == 0 ? 0 : int64_t{m_pending[h - 1]}};
-        const int height{static_cast<int>(h)};
-        std::set<uint256> seen;
-        for (const MainBundleEvent& event : m_blocks[h].bundles) seen.insert(event.hash);
-        for (const uint256& hash : m_blocks[h].proposed) seen.insert(hash);
-        for (const uint256& hash : seen) {
-            count += int{PendingAfter(hash, height)} - int{PendingAfter(hash, height - 1)};
-        }
-        m_pending.push_back(static_cast<uint32_t>(std::max<int64_t>(count, 0)));
-    }
-}
-
-bool Mainchain::BundlePending(int main_height) const
-{
-    LOCK(m_mutex);
-    if (main_height < 0 || m_blocks.empty()) return false;
-    UpdatePending();
-    return m_pending[std::min<size_t>(main_height, m_blocks.size() - 1)] > 0;
-}
-
 bool Mainchain::SupportedPending(int main_height, uint32_t min_score, const uint256& ours) const
 {
     LOCK(m_mutex);
@@ -246,53 +220,6 @@ std::optional<uint256> Mainchain::BmmAt(int height) const
     LOCK(m_mutex);
     if (height < 0 || height >= static_cast<int>(m_blocks.size())) return std::nullopt;
     return m_blocks[height].bmm;
-}
-
-bool Mainchain::NeedsBackfill() const
-{
-    LOCK(m_mutex);
-    return m_needs_backfill;
-}
-
-bool Mainchain::Backfill(int height, const uint256& hash, const std::vector<uint256>& proposed, const std::vector<MainPendingBundle>& pending)
-{
-    LOCK(m_mutex);
-    if (height < 0 || height >= static_cast<int>(m_blocks.size()) || m_blocks[height].hash != hash) return false;
-    MainBlock& block{m_blocks[height]};
-    IndexEvents(block, height, /*add=*/false);
-    block.proposed = proposed;
-    block.pending = pending;
-    IndexEvents(block, height, /*add=*/true);
-    // Whether a bundle is pending after a block depends on the events up to it, not above it.
-    InvalidatePending(height);
-    if (m_db) m_db->Write(BlockKey{static_cast<uint32_t>(height)}, block);
-    return true;
-}
-
-void Mainchain::BackfillDone()
-{
-    LOCK(m_mutex);
-    m_needs_backfill = false;
-    m_recheck = true;
-    if (m_db) {
-        CDBBatch batch{*m_db};
-        batch.Write(DB_VERSION, RECORD_VERSION);
-        batch.Write(DB_RECHECK, uint8_t{1});
-        m_db->WriteBatch(batch, /*fSync=*/true);
-    }
-}
-
-bool Mainchain::RecheckPending() const
-{
-    LOCK(m_mutex);
-    return m_recheck;
-}
-
-void Mainchain::RecheckDone()
-{
-    LOCK(m_mutex);
-    m_recheck = false;
-    if (m_db) m_db->Erase(DB_RECHECK, /*fSync=*/true);
 }
 
 void Mainchain::NoteFailure(const uint256& block_hash, Failure failure)
@@ -362,7 +289,6 @@ std::vector<MainBlock> Mainchain::Truncate(int height)
         if (it != m_bmm.end() && it->second == static_cast<int>(i)) m_bmm.erase(it);
     }
     m_blocks.resize(keep);
-    InvalidatePending(static_cast<int>(keep));
     return removed;
 }
 

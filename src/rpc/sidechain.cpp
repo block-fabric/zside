@@ -369,8 +369,7 @@ RPCMethod getwithdrawalbundle()
         tx = side.BundleTx();
         withdrawals = pending->withdrawals;
         result.pushKV("height", pending->height);
-    } else if ((tx = side.NextBundle(chainman.ActiveHeight() + 1, chainman.ActiveChain().Tip()->GetBlockHash(), chainman.GetConsensus().sidechain, &withdrawals,
-                                     side.MainPendingNext(*Assert(chainman.m_mainchain), chainman.ActiveHeight() + 1, chainman.GetConsensus().sidechain)))) {
+    } else if ((tx = side.NextBundle(chainman.ActiveHeight() + 1, chainman.ActiveChain().Tip()->GetBlockHash(), chainman.GetConsensus().sidechain, &withdrawals))) {
         result.pushKV("status", "next");
     } else {
         result.pushKV("status", "none");

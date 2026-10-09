@@ -102,12 +102,6 @@ using node::SnapshotMetadata;
 static constexpr auto DATABASE_WRITE_INTERVAL_MIN{50min};
 //! Changes of the sidechain state held in memory before they are written out with the coins.
 static constexpr size_t SIDE_CACHE_MAX_BYTES{64 << 20};
-/** Whether a block at `height` acts on the bundles pending on the mainchain, which a record of the
- * mainchain still being filled in (Mainchain::NeedsBackfill) does not know. */
-static bool WaitsForBackfill(const Consensus::SidechainParams& params, int height)
-{
-    return height >= std::min(params.single_bundle_height, params.audit2_height);
-}
 static constexpr auto DATABASE_WRITE_INTERVAL_MAX{70min};
 /** Maximum age of our tip for us to be considered current for fee estimation */
 static constexpr std::chrono::hours MAX_FEE_ESTIMATION_TIP_AGE{3};
@@ -813,7 +807,7 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
                 if (withdrawal->amount < side_params.min_withdrawal) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bad-sc-withdrawal-amount");
             } else if (const auto refund{sidechain::ParseRefundScript(out.scriptPubKey)}) {
                 std::string reject_reason;
-                const bool main_pending{side.MainPendingNext(*Assert(m_active_chainstate.m_chainman.m_mainchain), m_active_chainstate.m_chain.Height() + 1, side_params)};
+                const bool main_pending{side.MainPendingNext(*Assert(m_active_chainstate.m_chainman.m_mainchain), side_params)};
                 if (!side.CheckRefund(*refund, reject_reason, main_pending)) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
                 if (const auto other{m_pool.m_refunds.find(refund->withdrawal)}; other != m_pool.m_refunds.end() && !ws.m_conflicts.contains(other->second)) {
                     return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "sc-refund-in-mempool");
@@ -2835,7 +2829,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         // * p2sh (when P2SH enabled in flags and excludes coinbase)
         // * witness (when witness enabled in flags and excludes coinbase)
         nSigOpsCost += GetTransactionSigOpCost(tx, view, flags);
-        if (nSigOpsCost > params.GetConsensus().MaxBlockSigOpsCost(pindex->nHeight)) {
+        if (nSigOpsCost > params.GetConsensus().MaxBlockSigOpsCost()) {
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops", "too many sigops");
             break;
         }
@@ -2935,16 +2929,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (state.IsValid()) {
         std::string reject_reason;
         const auto side{m_chainman.SideContext(minted, block_store)};
-        // A record of the mainchain still missing the bundles its blocks proposed, or those pending
-        // after them (Mainchain::NeedsBackfill), cannot tell whether one was pending: the block waits for
-        // it, as for a commitment not on record yet. Not when checking blocks connected before (VerifyDB).
-        // Before anything changes the sidechain database, which nothing would give back here.
-        if (side && !verifying && WaitsForBackfill(side->params, pindex->nHeight) && m_chainman.m_mainchain->NeedsBackfill()) {
-            if (!fJustCheck) m_chainman.m_mainchain->NoteFailure(block_hash, sidechain::Mainchain::Failure::RECORD);
-            state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "bad-sc-main-backfill", "the record of the mainchain is still being filled in");
-            LogInfo("Block validation error: %s", state.ToString());
-            return false;
-        }
         const uint256 scdb_hash{scdb->GetBlockHash()};
         // A sidechain database that has not seen a block yet is empty and fits any block.
         if (scdb->GetBlockHash().IsNull()) scdb->SetBlockHash(hashPrevBlock);
@@ -4476,7 +4460,7 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
         nSigOps += GetLegacySigOpCount(*tx);
     }
     // Without the height here: the limit of any height. ConnectBlock applies the one of the block's.
-    if (nSigOps * WITNESS_SCALE_FACTOR > consensusParams.MaxBlockSigOpsCostEver())
+    if (nSigOps * WITNESS_SCALE_FACTOR > consensusParams.MaxBlockSigOpsCost())
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops", "out-of-bounds SigOpCount");
 
     if (fCheckPOW && fCheckMerkleRoot)
@@ -5234,7 +5218,7 @@ void Chainstate::RemoveStaleDrivechainTxs(bool after_reorg)
     if (m_chainman.GetConsensus().sidechain.enabled) {
         // Nor while a bundle of this sidechain is pending on the mainchain.
         const sidechain::State side{SideState()};
-        const bool main_pending{side.MainPendingNext(*Assert(m_chainman.m_mainchain), tip->nHeight + 1, m_chainman.GetConsensus().sidechain)};
+        const bool main_pending{side.MainPendingNext(*Assert(m_chainman.m_mainchain), m_chainman.GetConsensus().sidechain)};
         for (const auto& [withdrawal, txid] : m_mempool->m_refunds) {
             if (side.GetWithdrawal(withdrawal) && !side.InBundle(withdrawal) && !main_pending) continue;
             if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
@@ -5474,7 +5458,7 @@ bool Chainstate::PrepareDrivechainDB(const CBlockIndex* rebuild_from, bilingual_
         LogInfo("The sidechain database is in an older format; it is rebuilt from the blocks");
         break;
     case drivechain::Database::Format::OTHER_PARAMS:
-        // Derived under other drivechain parameters (an activation height that moved, say): the
+        // Derived under other drivechain parameters (a period that changed, say): the
         // snapshot, the undo data, the events and the deposit index may all differ under these.
         LogInfo("The sidechain database was derived under other drivechain parameters; it is rebuilt from the blocks");
         // So may the validity of blocks: those found invalid under the old rules are judged again.
@@ -5661,12 +5645,6 @@ util::Result<void> Chainstate::RollForwardSidechainDB(drivechain::SidechainDB& s
         CAmount minted{0};
         std::optional<sidechain::StoreOverlay> block_store;
         const std::optional<drivechain::SideContext> side{side_store ? m_chainman.SideContext(minted, block_store.emplace(*side_store, /*journal=*/true)) : std::nullopt};
-        // What depends on the record of the mainchain stops here (see ConnectBlock): the block waits
-        // for a record that is still being filled in, or fails against the record as it is.
-        if (stopped_at && side && WaitsForBackfill(side->params, height) && Assert(m_chainman.m_mainchain)->NeedsBackfill()) {
-            *stopped_at = next;
-            return {};
-        }
         if (!scdb.ConnectBlock(block, height, params, undo, &deposits, reject_reason, side ? &*side : nullptr)) {
             LogError("%s: block %s breaks the drivechain rules (%s)", __func__, next->GetBlockHash().ToString(), reject_reason);
             // Back to the block before it (the undo data is complete at any point of failure); the

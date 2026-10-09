@@ -85,17 +85,7 @@ struct MainBlock {
         bool has_bmm;
         s >> hash >> prev_hash >> time >> has_bmm;
         if (has_bmm) s >> bmm.emplace();
-        s >> deposits >> bundles;
-        // Records written before proposals, then the pending bundles, were kept end here: Mainchain
-        // fills them in (NeedsBackfill).
-        proposed.clear();
-        pending.clear();
-        if constexpr (requires { s.empty(); }) {
-            if (!s.empty()) s >> proposed;
-            if (!s.empty()) s >> pending;
-        } else {
-            s >> proposed >> pending;
-        }
+        s >> deposits >> bundles >> proposed >> pending;
     }
     friend bool operator==(const MainBlock&, const MainBlock&) = default;
 };
@@ -152,14 +142,6 @@ public:
      */
     bool ProposedSince(const uint256& hash, int committed, int to) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
-     * Whether a withdrawal bundle of this sidechain was pending on the mainchain after the block at
-     * `main_height`, as the proposals and closes on record say: proposed at or below it, and not
-     * closed since. Each proposal and each close counts: a bundle closed, forgotten by the mainchain
-     * and proposed again is pending again. Within a block, closes come before proposals. Such a
-     * bundle may hold any withdrawal, those of other branches of this chain too.
-     */
-    bool BundlePending(int main_height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /**
      * Whether a bundle other than `ours` was pending on the mainchain after the block at
      * `main_height` (the last one on record if above it) with a work score of `min_score` or more,
      * as the mainchain said (MainBlock::pending).
@@ -174,25 +156,6 @@ public:
     bool RisingLeader(int main_height, int window, uint32_t min_rise, const uint256& ours) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** The sidechain block that the mainchain block at `height` committed to, if any. */
     std::optional<uint256> BmmAt(int height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-
-    /**
-     * Whether the record was written before it kept the proposals of bundles: then the Follower
-     * fills them in for the blocks on record (Backfill), before anything acts on them.
-     */
-    bool NeedsBackfill() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /**
-     * Set the proposals and pending bundles of the block on record at `height`, if it is the block `hash`.
-     * @return false if the record has another block there.
-     */
-    bool Backfill(int height, const uint256& hash, const std::vector<uint256>& proposed, const std::vector<MainPendingBundle>& pending = {}) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /** The record is complete again: mark it so, with the blocks checked without it to be checked again (RecheckPending). */
-    void BackfillDone() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /**
-     * Whether the blocks of the active chain, connected while the record missed the proposals, are still
-     * to be checked again against the complete record; the Follower does so, then clears it.
-     */
-    bool RecheckPending() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    void RecheckDone() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
      * Why a block of this chain is marked failed, as far as the Follower is concerned: whether it may
@@ -254,15 +217,6 @@ private:
     void IndexEvents(const MainBlock& block, int height, bool add) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     /** Whether the bundle `hash` was pending after the block at `height`, by its proposals and closes. */
     bool PendingAfter(const uint256& hash, int height) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    /**
-     * Number of bundles pending after each block on record (BundlePending), up to its size; the rest
-     * is worked out again when asked for.
-     */
-    mutable std::vector<uint32_t> m_pending GUARDED_BY(m_mutex);
-    void UpdatePending() const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    void InvalidatePending(int height) EXCLUSIVE_LOCKS_REQUIRED(m_mutex) { if (static_cast<int>(m_pending.size()) > height) m_pending.resize(std::max(height, 0)); }
-    bool m_needs_backfill GUARDED_BY(m_mutex){false};
-    bool m_recheck GUARDED_BY(m_mutex){false};
     std::map<uint256, Failure> m_failures GUARDED_BY(m_mutex);
     std::optional<SlotIdentity> m_slot_identity GUARDED_BY(m_mutex);
     std::optional<int> m_assumed_height GUARDED_BY(m_mutex);

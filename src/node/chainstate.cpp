@@ -138,12 +138,6 @@ static ChainstateLoadResult CompleteChainstateInitialization(
             if (auto reset{chainstate->ResetDrivechainState()}; !reset) {
                 return {ChainstateLoadStatus::FAILURE, util::ErrorString(reset)};
             }
-            // Every block is checked again against the record as it is: a recheck left from a record
-            // filled in after blocks were connected (Mainchain::RecheckPending) has nothing left to do.
-            if (sidechain::Mainchain* record{chainman.m_mainchain.get()}; record && !record->NeedsBackfill() && record->RecheckPending()) {
-                LogInfo("The chainstate is built anew against the complete record of the mainchain: no blocks left to check again");
-                record->RecheckDone();
-            }
         }
     }
 

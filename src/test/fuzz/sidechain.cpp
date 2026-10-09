@@ -72,8 +72,6 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
     params.min_withdrawal = fdp.ConsumeIntegralInRange<int64_t>(0, COIN);
     params.max_bundle_withdrawals = fdp.ConsumeIntegralInRange<uint32_t>(1, 4);
     params.bundle_retry_delay = fdp.ConsumeIntegralInRange<int>(0, 5);
-    params.single_bundle_height = fdp.ConsumeIntegralInRange<int>(0, 30);
-    params.audit2_height = fdp.ConsumeIntegralInRange<int>(0, 40);
     params.pending_min_score = fdp.ConsumeIntegralInRange<uint32_t>(0, 4);
     params.unproposed_expiry_blocks = fdp.ConsumeIntegralInRange<int>(1, 8);
 
@@ -131,11 +129,10 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
         std::vector<CTxOut> payouts, tx_payouts;
         std::string reason;
         if (!state.ApplyMainEvents(mainchain.Height(), mainchain, height, params, payouts, reason)) continue;
-        const bool main_pending{state.MainPending(mainchain, height, params)};
-        // Before audit2_height, a pending bundle holds a new one back; from it, the mainchain's single
-        // payout sees to it. From it, a pending bundle is one with support, and not this chain's own.
-        if (main_pending && height < params.audit2_height) assert(!state.NextBundle(height, uint256{static_cast<uint8_t>(height)}, params, nullptr, main_pending));
-        if (height >= params.audit2_height) {
+        const bool main_pending{state.MainPending(mainchain, params)};
+        {
+            // A pending bundle is one with support, and not this chain's own; it does not hold a new
+            // bundle back (the mainchain's single payout sees to it).
             const auto ours{state.Bundle()};
             const auto last{*mainchain.GetBlock(state.MainHeight())};
             const bool supported{std::any_of(last.pending.begin(), last.pending.end(), [&](const sidechain::MainPendingBundle& b) {
@@ -146,9 +143,11 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
             if (ours && state.BundleMainHeight() >= 0 && state.MainHeight() - state.BundleMainHeight() >= params.unproposed_expiry_blocks) {
                 assert(mainchain.ProposedBetween(ours->hash, state.BundleMainHeight(), state.MainHeight()));
             }
+            // A bundle pending is always on record with the mainchain block that committed to it.
+            if (ours) assert(state.BundleMainHeight() >= 0);
         }
-        if (const auto bundle{state.NextBundle(height, uint256{static_cast<uint8_t>(height)}, params, nullptr, main_pending)}; bundle && fdp.ConsumeBool()) {
-            assert(state.StartBundle(bundle->GetHash().ToUint256(), height, uint256{static_cast<uint8_t>(height)}, params, reason, main_pending));
+        if (const auto bundle{state.NextBundle(height, uint256{static_cast<uint8_t>(height)}, params)}; bundle && fdp.ConsumeBool()) {
+            assert(state.StartBundle(bundle->GetHash().ToUint256(), height, uint256{static_cast<uint8_t>(height)}, params, reason));
         }
         // Withdrawals and refunds.
         CMutableTransaction tx;
@@ -179,17 +178,14 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
             if (state.GetWithdrawal(COutPoint{tx.GetHash(), n})) made.emplace_back(tx.GetHash(), n);
         }
         {
-            // Never more than a block can pay, either way; shared, a queue with payouts owed gets at
-            // least its half, or all it has.
-            const bool shared{fdp.ConsumeBool()};
+            // Never more than a block can pay; a queue with payouts owed gets at least its half, or
+            // all it has.
             const size_t queued{state.Queue().size() + payouts.size()}, queued_tx{state.TxQueue().size() + tx_payouts.size()};
-            const auto paid{state.TakePayouts(payouts, tx_payouts, shared)};
+            const auto paid{state.TakePayouts(payouts, tx_payouts)};
             assert(paid.size() == std::min(queued + queued_tx, sidechain::MAX_PAYOUTS_PER_BLOCK));
-            if (shared) {
-                const size_t half{sidechain::MAX_PAYOUTS_PER_BLOCK / 2};
-                assert(queued - state.Queue().size() >= std::min(queued, half));
-                assert(queued_tx - state.TxQueue().size() >= std::min(queued_tx, half));
-            }
+            const size_t half{sidechain::MAX_PAYOUTS_PER_BLOCK / 2};
+            assert(queued - state.Queue().size() >= std::min(queued, half));
+            assert(queued_tx - state.TxQueue().size() >= std::min(queued_tx, half));
         }
         const sidechain::StoreUndo undo{block.TakeUndo()};
         block.MergeInto(cache);

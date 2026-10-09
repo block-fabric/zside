@@ -123,7 +123,6 @@ RPCMethod getdrivechaininfo()
             {RPCResult::Type::NUM, "withdrawalminscore", "Work score a withdrawal bundle needs to be paid out"},
             {RPCResult::Type::NUM, "maxpendingbundles", "Maximum number of pending withdrawal bundles per sidechain"},
             {RPCResult::Type::NUM, "upvoteexpiryblocks", "Blocks in a row without an upvote after which a pending bundle fails (counted from its proposal or its last upvote)"},
-            {RPCResult::Type::NUM, "upvoteexpiryheight", "Height from which that rule, and the forgetting of failed bundles a withdrawal period on, apply"},
             {RPCResult::Type::NUM, "height", "Height of the block the sidechain database belongs to"},
             {RPCResult::Type::NUM, "activesidechains", "Number of active sidechains"},
             {RPCResult::Type::NUM, "proposals", "Number of sidechain proposals collecting acks"},
@@ -158,7 +157,6 @@ RPCMethod getdrivechaininfo()
     obj.pushKV("withdrawalminscore", params.withdrawal_min_score);
     obj.pushKV("maxpendingbundles", params.max_pending_bundles);
     obj.pushKV("upvoteexpiryblocks", params.upvote_expiry_blocks);
-    obj.pushKV("upvoteexpiryheight", params.audit2_height);
     obj.pushKV("height", height);
     obj.pushKV("activesidechains", scdb.GetSlots().size());
     obj.pushKV("proposals", scdb.GetProposals().size());

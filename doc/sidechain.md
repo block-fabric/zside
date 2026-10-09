@@ -64,16 +64,14 @@ A sidechain has no miners and no coins of its own.
   that never had that bundle takes the withdrawals it paid as paid: for every
   payout, the oldest withdrawal paying the same output with the same amount.
   Without this, the branch would pay them again. The mainchain pays one bundle
-  per slot and fails the others pending (its `single_payout_height`), so from
-  `audit2_height` a bundle of another branch pending on the mainchain does not
-  hold back a new bundle of this one: only one of them is paid. A node whose
-  record shows a mainchain block, followed under those rules, that paid a
-  bundle and left another pending logs a warning: the mainchain's
-  `single_payout_height` must be at or below the block `audit2_height`
-  follows.
+  per slot and fails the others pending, so a bundle of another branch pending
+  on the mainchain does not hold back a new bundle of this one: only one of
+  them is paid. A node whose record shows a mainchain block that paid a bundle
+  and left another pending logs a warning: that mainchain does not pay one
+  bundle per slot.
 - **Refunds and pending bundles.** A bundle of another branch pending on the
-  mainchain may hold a withdrawal that this branch would refund. From
-  `audit2_height`, refunds wait while such a bundle has a work score of
+  mainchain may hold a withdrawal that this branch would refund. Refunds wait
+  while such a bundle has a work score of
   `pending_min_score` or more (`getsidechainevents` reports the bundles pending
   after each block with their scores); below it, anyone could freeze refunds by
   proposing a bundle. Mainchain miners in follow mode (`LEADING_BY_50`)
@@ -88,13 +86,10 @@ A sidechain has no miners and no coins of its own.
   refunded while a bundle that holds it has neither can still be paid twice if a majority of mainchain miners votes
   that bundle through over the downvotes of those who vouch for this chain's
   own: that is the drivechain security model.
-- **Bundles nobody proposes.** From `audit2_height`, a bundle the mainchain has
-  not proposed `unproposed_expiry_blocks` mainchain blocks after the block that
+- **Bundles nobody proposes.** A bundle the mainchain has not proposed `unproposed_expiry_blocks` mainchain blocks after the block that
   committed to it fails, and its withdrawals go in a later one or can be taken
   back. A proposal made before that block, by someone who worked the hash
-  out ahead, counts if the bundle is still pending then. A bundle committed
-  to before `audit2_height` counts as committed in the mainchain block after
-  the last one the first block at `audit2_height` follows.
+  out ahead, counts if the bundle is still pending then.
 - **Committed twice.** A mainchain miner can commit to a sidechain block again
   later. The block keeps its first commitment; losing the second, in a reorg
   of the mainchain, changes nothing for it.
@@ -200,8 +195,8 @@ chains-cli -regtest listwithdrawalbundles 3
    block that activated it (`activationheight` in the mainchain's
    `getsidechain`): a main network release without it refuses to start,
    whatever the slot (slot 0 too), a testnet or signet one warns; regtest
-   does not ask for it, nor do the template's own networks. Set `audit2_height` (at or above the
-   mainchain's `single_payout_height`), `pending_min_score` (a tenth of the
+   does not ask for it, nor do the template's own networks. Set
+   `pending_min_score` (a tenth of the
    mainchain's `withdrawal_min_score`: 6480 on main and signet, 30 on testnet)
    and `unproposed_expiry_blocks` (1440 on main and signet, 60 on testnet).
 4. Bring the tests along:

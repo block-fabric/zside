@@ -238,7 +238,6 @@ public:
                        .message_start = {0x7a, 0x73, 0x64, 0x01}, .default_port = 9455, .bech32_hrp = "zs"});
         // Set when the slot activates on the mainchain: the height of the block that activated it.
         consensus.sidechain.main_activation_height = 0;
-        consensus.sidechain.audit2_height = 0;
         // A tenth of the mainchain's withdrawal_min_score (64800); proposals within a day.
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
@@ -343,11 +342,8 @@ public:
                        .message_start = {0x7a, 0x73, 0x64, 0x02}, .default_port = 19455, .bech32_hrp = "tzs"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
-        // The test network ran without it until then; see SidechainParams.
-        consensus.sidechain.single_bundle_height = 2300;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
-        consensus.sidechain.main_activation_height = 0; // set after the slot activates on the restarted test network
-        consensus.sidechain.audit2_height = 1788; // audits 2-4 on the test network, a few blocks after the deploy
+        consensus.sidechain.main_activation_height = 0;
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
@@ -460,7 +456,6 @@ public:
         MakeSidechain({.slot = 6, .genesis_message = "zSide signet", .genesis_time = 1791302400,
                        .message_start = {0x7a, 0x73, 0x64, 0x03}, .default_port = 39455, .bech32_hrp = "tzs"});
         consensus.sidechain.main_activation_height = 0;
-        consensus.sidechain.audit2_height = 0;
         // The Chains signet has the rules of its main network.
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
@@ -505,14 +500,8 @@ public:
                 dc.withdrawal_min_score = value;
             } else if (name == "max_pending_bundles") {
                 dc.max_pending_bundles = value;
-            } else if (name == "single_payout_height") {
-                dc.single_payout_height = value;
-            } else if (name == "idle_expiry_height") {
-                dc.idle_expiry_height = value;
             } else if (name == "idle_expiry_blocks") {
                 dc.idle_expiry_blocks = value;
-            } else if (name == "audit2_height") {
-                dc.audit2_height = value;
             } else if (name == "upvote_expiry_blocks") {
                 dc.upvote_expiry_blocks = value;
             } else if (name == "unvoted_forget_blocks") {
@@ -557,8 +546,7 @@ public:
             consensus.sidechain.enabled = true;
             consensus.sidechain.slot = *opts.sidechain_slot;
             consensus.sidechain.bundle_retry_delay = 5;
-            consensus.sidechain.audit2_height = 0;
-            // A tenth of the regtest mainchain's withdrawal_min_score (30).
+                // A tenth of the regtest mainchain's withdrawal_min_score (30).
             consensus.sidechain.pending_min_score = 3;
             consensus.sidechain.unproposed_expiry_blocks = 20;
             // A sidechain has no sidechains of its own.

@@ -69,7 +69,7 @@ public:
         CURRENT,
         //! Laid out another way (by an older version of this software), or not marked at all.
         OTHER_VERSION,
-        //! Derived under other drivechain parameters (another activation height, say).
+        //! Derived under other drivechain parameters (another withdrawal period, say).
         OTHER_PARAMS,
     };
     Format CheckFormat() const;

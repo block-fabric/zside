@@ -66,7 +66,7 @@ inline constexpr int REFUND_GRACE_BLOCKS{6};
 /**
  * A bundle of another branch that leads the slot on the mainchain holds refunds back whatever its
  * score while it rose by PENDING_TREND_MIN_RISE or more over the last PENDING_TREND_BLOCKS mainchain
- * blocks (from SidechainParams::audit2_height; see pending_min_score): net upvotes in a quarter of the
+ * blocks (see SidechainParams::pending_min_score): net upvotes in a quarter of the
  * blocks, half the pace at which a bundle reaches the mainchain's withdrawal_min_score in its
  * withdrawal_period. Slower, it is on its way to failing; keeping it at that pace against the
  * downvotes of the miners who vouch for this chain takes a good share of the hashrate, block after block.
@@ -164,36 +164,34 @@ public:
     [[nodiscard]] bool ApplyMainEvents(int main_height, const Mainchain& mainchain, int height, const Consensus::SidechainParams& params,
                                        std::vector<CTxOut>& payouts, std::string& reject_reason);
     /**
-     * The bundle a block at `height`, on top of the block `prev`, may commit to: empty if no bundle can be made now.
-     * @param[in] main_pending  whether a bundle of this sidechain is pending on the mainchain (MainPending)
+     * The bundle a block at `height`, on top of the block `prev`, may commit to: empty if no bundle can
+     * be made now. A bundle of another branch pending on the mainchain does not hold it back.
      */
-    std::optional<CMutableTransaction> NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals = nullptr, bool main_pending = false) const;
+    std::optional<CMutableTransaction> NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals = nullptr) const;
     /** Make the bundle with the hash `hash` the pending one. */
-    [[nodiscard]] bool StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, std::string& reject_reason, bool main_pending = false);
+    [[nodiscard]] bool StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, std::string& reject_reason);
     /**
-     * Whether a block at `height`, with this state, has to wait for a bundle of this sidechain that is
-     * pending on the mainchain (SidechainParams::single_bundle_height): as the mainchain was after
-     * the last block this state acted on.
+     * Whether a bundle of this sidechain other than its own, pending on the mainchain with support
+     * (see SidechainParams::pending_min_score), holds refunds back for a block with this state: as
+     * the mainchain was after the last block this state acted on.
      */
-    bool MainPending(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const;
+    bool MainPending(const Mainchain& mainchain, const Consensus::SidechainParams& params) const;
     /**
      * The same as the next block will see it: it follows the mainchain up to the last block on record
      * first. For the mempool, which must not take what that block would refuse.
      */
-    bool MainPendingNext(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const;
+    bool MainPendingNext(const Mainchain& mainchain, const Consensus::SidechainParams& params) const;
     /**
      * The payouts a block pays: at most MAX_PAYOUTS_PER_BLOCK, of what was owed
      * before it and of what it gave rise to, oldest first in each queue. What
      * the mainchain gave rise to (`owed`: deposits) has a queue of its own, apart
      * from what transactions did (`owed_tx`: refunds, and what a sidechain's own
      * rules pay out), so that transactions, however many, cannot hold deposits
-     * back. The rest is queued for the next blocks.
-     *
-     * @param[in] shared  from SidechainParams::audit2_height: each queue has half of the block, and
-     *                    what one does not use goes to the other, so that neither holds the other
-     *                    back. Before, the queue of deposits went first, up to the whole block.
+     * back. Each queue has half of the block, and what one does not use goes to
+     * the other, so that neither holds the other back. The rest is queued for
+     * the next blocks.
      */
-    std::vector<CTxOut> TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, bool shared);
+    std::vector<CTxOut> TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx);
     /** Payouts owed and not paid yet, oldest first: from the mainchain, and from transactions. */
     std::vector<CTxOut> Queue() const;
     std::vector<CTxOut> TxQueue() const;
@@ -219,7 +217,7 @@ public:
     std::optional<CMutableTransaction> BundleTx() const;
     bool InBundle(const COutPoint& withdrawal) const;
     int32_t LastFailureHeight() const;
-    /** Height of the mainchain block that committed to the pending bundle; -1 if unknown (before audit2_height) or none. */
+    /** Height of the mainchain block that committed to the pending bundle; -1 if none. */
     int32_t BundleMainHeight() const;
 
     /** The shielded pool, read only. */

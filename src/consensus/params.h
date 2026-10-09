@@ -100,40 +100,15 @@ struct SidechainParams {
     /** Number of blocks to wait after a withdrawal bundle failed before the next one can be made. */
     int bundle_retry_delay{144};
     /**
-     * From this height, no withdrawal is refunded, and no bundle started, while a bundle of this
-     * sidechain is pending on the mainchain. It may hold any withdrawal: one committed on another
-     * branch of this chain, after a reorg, holds withdrawals this branch thinks are free; paid,
-     * it would pay them a second time.
-     */
-    int single_bundle_height{0};
-    /**
      * Height of the mainchain block that activated this sidechain in its slot (activationheight in
      * the mainchain's getsidechain). What the mainchain did up to that block, deposits included, was
-     * for whatever held the slot before: from audit2_height on it is not applied. The follower also
-     * stops if the mainchain says another activation. 0 if unknown (nothing is left out).
+     * for whatever held the slot before: it is not applied. The follower also stops if the mainchain
+     * says another activation. 0 if unknown (nothing is left out).
      */
     int main_activation_height{0};
     /**
-     * From this height, the rules of the second audit (2026-10-07): the mainchain's events up to
-     * main_activation_height are left out, and each payout queue gets its share of a block.
-     *
-     * And those of the third (2026-10-08), which takes for granted that the mainchain pays one bundle
-     * per slot and fails the others (its drivechain.single_payout_height, which must be at or below the
-     * mainchain block this height follows):
-     *  - a bundle of another branch of this chain pending on the mainchain no longer holds back a new
-     *    bundle: paying one fails the other, and the withdrawals the other pays are matched here
-     *    (State::ApplyMainEvents);
-     *  - it holds back refunds only with a score of pending_min_score or more on the mainchain, or
-     *    while it leads the slot with a rising score, so that a bundle proposed by anyone (a bare M3)
-     *    does not freeze them;
-     *  - a bundle this chain committed to that the mainchain has not proposed unproposed_expiry_blocks
-     *    mainchain blocks after the commitment fails here.
-     */
-    int audit2_height{0};
-    /**
      * Least mainchain work score with which a bundle pending on the mainchain, other than the one of
-     * this chain, holds back refunds (from audit2_height). A tenth of the mainchain's
-     * withdrawal_min_score: a bundle that miners downvote stays near 0, and one that nobody downvotes
+     * this chain, holds back refunds. A tenth of the mainchain's withdrawal_min_score: a bundle that miners downvote stays near 0, and one that nobody downvotes
      * needs about a tenth of the hashrate upvoting it to get there before it expires. Below it, a
      * bundle is far from being paid: paying it would take a majority of the hashrate upvoting it over
      * the downvotes of the miners who vouch for this chain's bundle.
@@ -148,7 +123,7 @@ struct SidechainParams {
      * not either. Keeping one rising so takes net upvotes in a quarter of the blocks, all along.
      */
     uint32_t pending_min_score{6480};
-    /** Mainchain blocks after its commitment in which the mainchain has to propose a bundle (from audit2_height). */
+    /** Mainchain blocks after its commitment in which the mainchain has to propose a bundle. */
     int unproposed_expiry_blocks{1440};
 };
 
@@ -172,30 +147,22 @@ struct DrivechainParams {
     /** Maximum number of pending withdrawal bundles per sidechain. */
     uint32_t max_pending_bundles{64};
     /**
-     * From this height, paying a bundle of a sidechain fails its other pending bundles. A sidechain
-     * means one bundle to be paid; others pending for its slot are copies left by a reorg of the
-     * sidechain, holding the same withdrawals, which would otherwise be paid a second time.
+     * A bundle that has been pending idle_expiry_blocks or more and has a score of 0 fails. Miners
+     * downvote the bundles their sidechain node does not vouch for -- a bundle a reorg of the
+     * sidechain left behind, or one proposed to get in the way -- which so go in that many blocks,
+     * rather than the whole withdrawal period.
      */
-    int single_payout_height{0};
-    /**
-     * From idle_expiry_height, a bundle that has been pending idle_expiry_blocks or more and has a
-     * score of 0 fails. Miners downvote the bundles their sidechain node does not vouch for -- a
-     * bundle a reorg of the sidechain left behind, or one proposed to get in the way -- which so go
-     * in that many blocks, rather than the whole withdrawal period.
-     */
-    int idle_expiry_height{0};
     int idle_expiry_blocks{1008};
     /**
-     * From this height, the rules of the second audit:
-     *  - a bundle that upvote_expiry_blocks blocks in a row did not upvote, counting from the block
-     *    that proposed it or from its last upvote, fails. Whoever proposes a bundle nobody vouches
-     *    for (to stall the withdrawals and refunds of a sidechain, whose software waits on what is
-     *    pending) has to keep upvoting it to keep it, rather than wait for the idle expiry;
-     *  - a failed bundle is forgotten withdrawal_period blocks after it failed, so that proposals
-     *    nobody votes for do not add to the state forever (see SidechainDB::ForgetFailedBundles);
-     *    one that no block ever upvoted, unvoted_forget_blocks blocks after it failed.
+     * A bundle that upvote_expiry_blocks blocks in a row did not upvote, counting from the block
+     * that proposed it or from its last upvote, fails. Whoever proposes a bundle nobody vouches for
+     * (to stall the withdrawals and refunds of a sidechain, whose software waits on what is pending)
+     * has to keep upvoting it to keep it, rather than wait for the idle expiry.
+     *
+     * A failed bundle is forgotten withdrawal_period blocks after it failed, so that proposals
+     * nobody votes for do not add to the state forever (see SidechainDB::ForgetFailedBundles); one
+     * that no block ever upvoted, unvoted_forget_blocks blocks after it failed.
      */
-    int audit2_height{0};
     int upvote_expiry_blocks{144};
     int unvoted_forget_blocks{1008};
 };
@@ -267,14 +234,11 @@ struct Params {
     /** Number of blocks before the outputs of a coinbase can be spent. */
     int coinbase_maturity{COINBASE_MATURITY};
     /**
-     * Most signature operations (in cost units) in a block from sigops_height on; before, Bitcoin's
-     * MAX_BLOCK_SIGOPS_COST. A chain with larger blocks raises it with them.
+     * Most signature operations (in cost units) in a block. A chain with larger blocks raises it
+     * with them.
      */
     int64_t max_block_sigops_cost{MAX_BLOCK_SIGOPS_COST};
-    int sigops_height{0};
-    int64_t MaxBlockSigOpsCost(int height) const { return height >= sigops_height ? max_block_sigops_cost : MAX_BLOCK_SIGOPS_COST; }
-    /** The most any block can have, whatever its height: for checks that do not know the height. */
-    int64_t MaxBlockSigOpsCostEver() const { return std::max<int64_t>(MAX_BLOCK_SIGOPS_COST, max_block_sigops_cost); }
+    int64_t MaxBlockSigOpsCost() const { return max_block_sigops_cost; }
     /** Upper bound for the serialized size of a block; a sanity limit, not a consensus rule. */
     uint32_t MaxBlockSerializedSize() const { return std::max<uint32_t>(MAX_BLOCK_SERIALIZED_SIZE, max_block_weight); }
     std::chrono::seconds PowTargetSpacing() const

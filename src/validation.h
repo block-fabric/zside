@@ -867,9 +867,8 @@ public:
      * out as it goes).
      *
      * @param[out] stopped_at  if given: a block that fails against the record of the mainchain (which
-     *                         may change), or that waits for it to be filled in, stops it there; the
-     *                         database is left at the block before, and this set to the block. Without
-     *                         it, that is an error.
+     *                         may change) stops it there; the database is left at the block before,
+     *                         and this set to the block. Without it, that is an error.
      * @param[out] invalid     if given: a block that breaks the rules whatever the record says stops
      *                         it there too, the database left at the block before; this is set to
      *                         the block, and an error returned.

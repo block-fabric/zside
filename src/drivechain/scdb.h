@@ -26,7 +26,7 @@ namespace drivechain {
 
 /**
  * A hash of the drivechain parameters that decide what the sidechain database becomes for a chain
- * of blocks: all of them. Whatever was derived under other parameters (another activation height,
+ * of blocks: all of them. Whatever was derived under other parameters (another withdrawal period,
  * say) is derived anew.
  */
 uint256 ParamsFingerprint(const Consensus::DrivechainParams& params);
@@ -231,8 +231,8 @@ public:
      * @param[in,out] escrow_outputs   as returned by GetEscrowOutputs(), kept up to date across calls
      * @param[out]    deposit          the escrow change, if the transaction made one; may be null.
      *                                 The caller fills in the transaction and block fields.
-     * @param[in]     height           of the block the transaction is in; the mempool and the miner leave
-     *                                 it out, and so check by the newest rules
+     * @param[in]     height           of the block the transaction is in, recorded as the height at which
+     *                                 the bundles it closes were closed; the mempool and the miner leave it out
      * @return false if the transaction is invalid; see ConnectBlock.
      */
     [[nodiscard]] bool ConnectTx(const CTransaction& tx, const Consensus::DrivechainParams& params, EscrowOutputs& escrow_outputs,
@@ -326,8 +326,7 @@ private:
     FailedSet& FailedByHeight(const ClosedBundle& closed) { return closed.upvoted ? m_failed_by_height : m_unvoted_failed_by_height; }
     void RemoveProposal(size_t index, BlockUndo& undo);
     /**
-     * Forget the bundles that failed withdrawal_period blocks or more before `height` (from
-     * audit2_height). A failed bundle is remembered so that it is not proposed again, which a
+     * Forget the bundles that failed withdrawal_period blocks or more before `height`. A failed bundle is remembered so that it is not proposed again, which a
      * sidechain that refunded its withdrawals would not expect; by then it has had a whole
      * withdrawal period to act on the failure, the bundle is older than any bundle can be while
      * pending, and paying it out again would take the same majority of the hashrate, upvoting for as

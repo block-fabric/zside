@@ -48,8 +48,8 @@ Beyond the mainchain tests:
 | `bundle_nonce` | A bundle names the block before the one that commits to it: its hash cannot be known ahead. |
 | `paid_on_another_branch` | A bundle committed on another branch, then paid by the mainchain, removes the withdrawals it paid. |
 | `paid_on_another_branch_oldest_first` | Of identical withdrawals, a payout from another branch removes the oldest. |
-| `no_refund_while_a_bundle_is_pending_on_the_mainchain` | The double payout: no refund, and no new bundle, while one of this sidechain's bundles is pending on the mainchain. |
-| `record_of_old_format_is_filled_in` | A mainchain record written before blocks kept their proposed bundles reads, and is filled in. |
+| `pending_bundle_holds_refunds_back_only_with_support` | The double payout: no refund while a bundle of another branch is pending on the mainchain with support; a new bundle can start. |
+| `record_format` | A mainchain record keeps the bundles each block proposed and those pending after it; one an older release wrote is refused. |
 | `duplicate_commitment_survives_reorg` | A block committed to twice keeps its first commitment when the mainchain drops the second. |
 
 ## Functional tests
@@ -67,7 +67,8 @@ Beyond the mainchain tests:
   node keeps running and says so;
 - **the double payout**: a reorg of the sidechain leaves a bundle pending on
   the mainchain that the sidechain no longer has. The sidechain refuses
-  refunds and new bundles while it is pending, and its node stops vouching
+  refunds while it is pending with support, commits to a bundle of its own
+  with the same withdrawal, and its node stops vouching
   for it. The miners vote it down, it fails, and the next bundle pays each
   withdrawal once.
 

@@ -12,7 +12,7 @@ may still be paid, so a pending bundle holds up the refunds of the withdrawals i
 next bundle of the sidechain. A bundle nobody vouches for therefore stalls the withdrawals of a
 sidechain for as long as it stays pending.
 
-How long a bundle stays pending, from `audit2_height` on (0 on mainnet, signet and regtest):
+How long a bundle stays pending:
 
 * it fails once `upvote_expiry_blocks` blocks in a row did not upvote it, counted from the block that
   proposed it or from its last upvote (144 blocks, about two and a half hours, on mainnet; 30 on the
@@ -68,8 +68,8 @@ replaying every proposal and closure since its slot activated.
   data of an older version wipes it and rebuilds it from the blocks when it starts (a pruned node,
   which no longer has them, has to be started with `-reindex`). The snapshot and the format marker
   also carry a fingerprint of all the drivechain parameters of the network (`ParamsFingerprint`):
-  activation heights, periods, expiries, limits. A node whose parameters changed (a new release that
-  moves an activation height, say) finds a fingerprint that does not match, and wipes and rebuilds
+  periods, expiries, limits. A node whose parameters changed (a new release that changes a period,
+  say) finds a fingerprint that does not match, and wipes and rebuilds
   the drivechain data from genesis the same way, rather than keep a state derived under the old rules.
 * Per block, what it did that sidechain software follows (the bundles it closed, paid or failed,
   those it proposed, those pending after it with their scores, and its escrow changes): for good,
@@ -82,7 +82,7 @@ replaying every proposal and closure since its slot activated.
   database from the blocks (slow, and impossible on a pruned node, which cannot reorg that deep in
   any case); `verifychain` goes as deep as the undo data.
 * Bundles that were paid out, for good: they can never be proposed again. Bundles that failed, for a
-  withdrawal period after they failed (from `audit2_height`); after that the same hash can be proposed
+  withdrawal period after they failed; after that the same hash can be proposed
   again, as a new bundle that needs all its votes again. By then the sidechain has had a whole
   withdrawal period to refund its withdrawals, and paying it out again would take the same majority
   of the hashrate, upvoting for as long, as paying out any bundle nobody vouches for.
