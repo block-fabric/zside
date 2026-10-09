@@ -3412,10 +3412,8 @@ std::optional<node::PackageToValidate> PeerManagerImpl::ProcessInvalidTx(NodeId 
     PeerRef peer{GetPeerRef(nodeid)};
 
     // zSide: a shielded bundle whose proof does not verify is invalid whatever the state -- and its
-    // check is the costly one: the peer that sends one goes. Not one that signed it in the other
-    // sighash domain near audit2_height, where its tip and this node's may be either side of it.
-    if (peer && first_time_failure && state.GetRejectReason() == "bad-zs-proof" &&
-        zside::PunishableProofFailure(*ptx, m_chainman.GetConsensus(), WITH_LOCK(::cs_main, return m_chainman.ActiveHeight()) + 1)) {
+    // check is the costly one: the peer that sends one goes.
+    if (peer && first_time_failure && state.GetRejectReason() == "bad-zs-proof") {
         Misbehaving(*peer, "shielded transaction with an invalid proof");
     }
 

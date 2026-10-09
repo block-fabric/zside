@@ -44,6 +44,11 @@ uint256 Leaf(uint64_t n)
     return leaf;
 }
 
+/** The sighash domain the bundles of these tests are signed for, unless one says otherwise. */
+const SighashDomain TEST_DOMAIN{.genesis = uint256::ONE, .slot = 6};
+/** Another chain's. */
+const SighashDomain OTHER_DOMAIN{.genesis = uint256::ZERO, .slot = 6};
+
 /** The root of a tree, the naive way: every level in full, empty roots past the leaves. */
 uint256 NaiveRoot(const std::vector<uint256>& leaves)
 {
@@ -62,7 +67,7 @@ uint256 NaiveRoot(const std::vector<uint256>& leaves)
  * A transaction that puts `value` into the pool, its bundle (of two actions, one output) proved and
  * signed for `domain`; one transparent input (which no check here looks at).
  */
-CMutableTransaction ShieldingTx(CAmount value, const std::optional<SighashDomain>& domain, uint8_t seed_byte = 9)
+CMutableTransaction ShieldingTx(CAmount value, const SighashDomain& domain, uint8_t seed_byte = 9)
 {
     std::array<uint8_t, 32> seed{};
     seed.fill(seed_byte);
@@ -251,7 +256,7 @@ BOOST_AUTO_TEST_CASE(value_balance_range_before_the_pool)
     sidechain::EmptyStore empty;
     sidechain::StoreOverlay store{empty};
     ShieldedState state{store};
-    const CMutableTransaction good{ShieldingTx(1000, std::nullopt)};
+    const CMutableTransaction good{ShieldingTx(1000, TEST_DOMAIN)};
     std::string reason;
     BOOST_CHECK(state.CheckState(CTransaction{good}, reason));
     for (const int64_t balance : {std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max(), -MAX_MONEY - 1, MAX_MONEY + 1}) {
@@ -264,7 +269,7 @@ BOOST_AUTO_TEST_CASE(value_balance_range_before_the_pool)
         BOOST_CHECK(!state.CheckState(tx, reason));
         BOOST_CHECK_EQUAL(reason, "bad-zs-value-balance");
         reason.clear();
-        BOOST_CHECK(!state.ApplyTx(tx, reason, std::nullopt));
+        BOOST_CHECK(!state.ApplyTx(tx, reason, TEST_DOMAIN));
         BOOST_CHECK_EQUAL(reason, "bad-zs-value-balance");
     }
     // In range, but more than the pool holds: refused for the pool.
@@ -275,37 +280,30 @@ BOOST_AUTO_TEST_CASE(value_balance_range_before_the_pool)
 
 BOOST_AUTO_TEST_CASE(sighash_commits_to_the_chain)
 {
-    // From audit2_height, the sighash commits to the genesis block and the slot of the chain.
+    // The sighash commits to the genesis block and the slot of the chain.
     Consensus::SidechainParams params;
     params.slot = 6;
-    params.zside.audit2_height = 100;
     const uint256 genesis{uint256::ONE};
-    BOOST_CHECK(!SighashDomainAt(params, genesis, 99));
-    const auto domain{SighashDomainAt(params, genesis, 100)};
-    BOOST_REQUIRE(domain);
-    BOOST_CHECK(domain->genesis == genesis);
-    BOOST_CHECK_EQUAL(domain->slot, 6U);
-    BOOST_CHECK(SighashDomainAt(params, genesis, 1000));
-    // The networks: from their first block, but on the test network, which ran before the rule: from
-    // the height set at deploy (read here, not repeated: it moves with each deploy).
-    for (const auto chain : {ChainType::MAIN, ChainType::SIGNET, ChainType::REGTEST}) {
-        BOOST_CHECK_EQUAL(CreateChainParams(m_args, chain)->GetConsensus().sidechain.zside.audit2_height, 0);
+    const SighashDomain domain{SighashDomainOf(params, genesis)};
+    BOOST_CHECK(domain.genesis == genesis);
+    BOOST_CHECK_EQUAL(domain.slot, 6U);
+    // Each network: its own genesis block and slot.
+    for (const auto chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::SIGNET, ChainType::REGTEST}) {
+        const auto chain_params{CreateChainParams(m_args, chain)};
+        const SighashDomain of_chain{SighashDomainOf(chain_params->GetConsensus())};
+        BOOST_CHECK(of_chain.genesis == chain_params->GenesisBlock().GetHash());
+        BOOST_CHECK_EQUAL(of_chain.slot, chain_params->GetConsensus().sidechain.slot);
     }
-    const auto testnet{CreateChainParams(m_args, ChainType::TESTNET)};
-    const int testnet_audit2{testnet->GetConsensus().sidechain.zside.audit2_height};
-    BOOST_CHECK_GT(testnet_audit2, 0);
-    BOOST_CHECK(!SighashDomainAt(testnet->GetConsensus(), testnet_audit2 - 1));
-    BOOST_CHECK(SighashDomainAt(testnet->GetConsensus(), testnet_audit2));
 
-    // Another genesis, another slot, none: another sighash.
+    // Another genesis, another slot: another sighash.
     const CMutableTransaction mtx{ShieldingTx(1000, domain)};
     const CTransaction tx{mtx};
     const uint256 commitment{uint256::ONE};
     const SighashDomain other_genesis{.genesis = uint256::ZERO, .slot = 6};
     const SighashDomain other_slot{.genesis = genesis, .slot = 7};
     const std::set<uint256> sighashes{ShieldedSighash(tx, 0, commitment, domain), ShieldedSighash(tx, 0, commitment, other_genesis),
-                                      ShieldedSighash(tx, 0, commitment, other_slot), ShieldedSighash(tx, 0, commitment, std::nullopt)};
-    BOOST_CHECK_EQUAL(sighashes.size(), 4U);
+                                      ShieldedSighash(tx, 0, commitment, other_slot)};
+    BOOST_CHECK_EQUAL(sighashes.size(), 3U);
 
     // The bundle is valid in its domain alone, found valid there first or not (the cache of verified
     // bundles is by domain too).
@@ -314,11 +312,7 @@ BOOST_AUTO_TEST_CASE(sighash_commits_to_the_chain)
     BOOST_CHECK(!CheckShieldedTx(tx, reason, other_genesis));
     BOOST_CHECK_EQUAL(reason, "bad-zs-proof");
     BOOST_CHECK(!CheckShieldedTx(tx, reason, other_slot));
-    BOOST_CHECK(!CheckShieldedTx(tx, reason, std::nullopt));
     BOOST_CHECK(CheckShieldedTx(tx, reason, domain));
-    const CTransaction before{ShieldingTx(1000, std::nullopt)};
-    BOOST_CHECK(CheckShieldedTx(before, reason, std::nullopt));
-    BOOST_CHECK(!CheckShieldedTx(before, reason, domain));
 }
 
 BOOST_AUTO_TEST_CASE(tx_only_reasons_fail_whatever_the_record)
@@ -340,45 +334,14 @@ BOOST_AUTO_TEST_CASE(tx_only_reasons_fail_whatever_the_record)
     BOOST_CHECK(!sidechain::RecordIndependent("bad-sc-payout"));
 }
 
-BOOST_AUTO_TEST_CASE(proof_failure_near_audit2_is_not_punished)
-{
-    // A peer whose tip is a few blocks from this node's signs in the other sighash domain near
-    // audit2_height: that is no misbehaviour. A bundle valid in neither domain, or one sent far
-    // from that height, is.
-    Consensus::Params params;
-    params.hashGenesisBlock = uint256::ONE;
-    params.sidechain.slot = 6;
-    params.sidechain.zside.audit2_height = 100;
-    const auto domain{SighashDomainAt(params, 100)};
-    BOOST_REQUIRE(domain);
-    const CTransaction after{ShieldingTx(1000, domain, 7)};
-    const CTransaction before{ShieldingTx(1000, std::nullopt, 8)};
-    const CTransaction elsewhere{ShieldingTx(1000, SighashDomain{.genesis = uint256::ZERO, .slot = 6}, 10)};
-    std::string reason;
-    // Signed after the change, checked just before it (and the reverse): not punished.
-    BOOST_CHECK(!CheckShieldedTx(after, reason, SighashDomainAt(params, 95)));
-    BOOST_CHECK(!PunishableProofFailure(after, params, 95));
-    BOOST_CHECK(!CheckShieldedTx(before, reason, SighashDomainAt(params, 105)));
-    BOOST_CHECK(!PunishableProofFailure(before, params, 105));
-    // Far from the change: punished.
-    BOOST_CHECK(PunishableProofFailure(after, params, 100 - AUDIT2_GRACE_BLOCKS - 1));
-    BOOST_CHECK(PunishableProofFailure(before, params, 100 + AUDIT2_GRACE_BLOCKS + 1));
-    // Valid in neither domain: punished, near the change too.
-    BOOST_CHECK(PunishableProofFailure(elsewhere, params, 95));
-    BOOST_CHECK(PunishableProofFailure(elsewhere, params, 105));
-    // A chain with the domain from its start has no other.
-    params.sidechain.zside.audit2_height = 0;
-    BOOST_CHECK(PunishableProofFailure(before, params, 1));
-}
-
 BOOST_AUTO_TEST_CASE(bundles_of_a_block_in_one_batch)
 {
-    const SighashDomain domain{.genesis = uint256::ONE, .slot = 6};
+    const SighashDomain domain{TEST_DOMAIN};
     const auto a{MakeTransactionRef(ShieldingTx(1000, domain, 1))};
     const auto b{MakeTransactionRef(ShieldingTx(2000, domain, 2))};
     const auto c{MakeTransactionRef(ShieldingTx(3000, domain, 3))};
     // One signed for another chain: the batch fails, and nothing of it is taken as verified.
-    const auto bad{MakeTransactionRef(ShieldingTx(4000, std::nullopt, 4))};
+    const auto bad{MakeTransactionRef(ShieldingTx(4000, OTHER_DOMAIN, 4))};
     CMutableTransaction plain;
     plain.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 1});
     plain.vout.emplace_back(1, CScript() << OP_TRUE);
@@ -395,7 +358,7 @@ BOOST_AUTO_TEST_CASE(bundles_of_a_block_in_one_batch)
     BOOST_CHECK(CheckShieldedTx(*a, reason, domain));
     BOOST_CHECK(CheckShieldedTx(*b, reason, domain));
     // In another domain they are not.
-    BOOST_CHECK(!VerifyBundles(block, std::nullopt));
+    BOOST_CHECK(!VerifyBundles(block, OTHER_DOMAIN));
 }
 
 BOOST_AUTO_TEST_CASE(block_with_a_shielded_transaction_twice)
@@ -403,10 +366,10 @@ BOOST_AUTO_TEST_CASE(block_with_a_shielded_transaction_twice)
     // A shielded transaction has no inputs, so a second copy of it in the same block spends nothing twice:
     // the block is refused for holding it twice (connecting it would otherwise add its outputs over
     // themselves). The bundle need not be valid: CheckBlock does not look at proofs.
-    CMutableTransaction shielding{ShieldingTx(1000, std::nullopt)};
+    CMutableTransaction shielding{ShieldingTx(1000, TEST_DOMAIN)};
     shielding.vin.clear();
     const auto tx{MakeTransactionRef(shielding)};
-    const auto other{MakeTransactionRef(ShieldingTx(2000, std::nullopt, 11))};
+    const auto other{MakeTransactionRef(ShieldingTx(2000, TEST_DOMAIN, 11))};
     CMutableTransaction coinbase;
     coinbase.vin.emplace_back(COutPoint{});
     coinbase.vin[0].scriptSig = CScript{} << 1 << OP_0;
@@ -441,22 +404,15 @@ BOOST_AUTO_TEST_CASE(tree_never_holds_two_to_the_32_leaves)
     ShieldedState state{store};
     BOOST_REQUIRE_EQUAL(state.Tree().Size(), CAPACITY - 2);
 
-    const SighashDomain domain{.genesis = uint256::ONE, .slot = 6};
-    const CTransaction after{ShieldingTx(1000, domain, 5)};
-    const CTransaction before{ShieldingTx(1000, std::nullopt, 6)};
+    const CTransaction tx{ShieldingTx(1000, TEST_DOMAIN, 5)};
     std::string reason;
-    // From audit2_height (a block in a sighash domain), and in the mempool: the tree is never full.
-    BOOST_CHECK(!state.ApplyTx(after, reason, domain));
+    // In a block and in the mempool: the tree is never full.
+    BOOST_CHECK(!state.ApplyTx(tx, reason, TEST_DOMAIN));
     BOOST_CHECK_EQUAL(reason, "bad-zs-tree-full");
     reason.clear();
-    BOOST_CHECK(!state.CheckState(before, reason));
+    BOOST_CHECK(!state.CheckState(tx, reason));
     BOOST_CHECK_EQUAL(reason, "bad-zs-tree-full");
     BOOST_CHECK_EQUAL(state.Tree().Size(), CAPACITY - 2);
-    // Before it, as the chain had it: it could be, and its root then was the empty tree's.
-    reason.clear();
-    BOOST_CHECK(state.ApplyTx(before, reason, std::nullopt));
-    BOOST_CHECK_EQUAL(state.Tree().Size(), CAPACITY);
-    BOOST_CHECK(state.Tree().Root() == EmptyRoot(TREE_DEPTH));
 }
 
 namespace {
@@ -470,7 +426,7 @@ BOOST_FIXTURE_TEST_CASE(no_inputs_only_on_a_sidechain, RegTestSetup)
     // Regtest (without -sidechainslot) is no sidechain: a transaction with a marker and no transparent
     // input passes the checks that know no chain, and not those of the chain.
     BOOST_REQUIRE(!Params().GetConsensus().sidechain.enabled);
-    CMutableTransaction mtx{ShieldingTx(1000, std::nullopt)};
+    CMutableTransaction mtx{ShieldingTx(1000, TEST_DOMAIN)};
     mtx.vin.clear();
     mtx.vout[0].nValue = 0;
     const CTransaction tx{mtx};

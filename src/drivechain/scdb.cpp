@@ -40,16 +40,12 @@ uint256 ParamsFingerprint(const Consensus::DrivechainParams& params, const Conse
     // A chain that is no sidechain has nothing of it in the database.
     if (!sidechain.enabled) return ParamsFingerprint(params);
     // Every field: a parameter added later has to be added here as well.
-    // zSide: ZsideParams included (its fields as well). It takes the 4 bytes of padding the
-    // template's fields left at the end, so the size alone would not see it: it is the last field.
-    static_assert(sizeof(Consensus::ZsideParams) == sizeof(int32_t), "a new zSide parameter goes into the fingerprint");
-    static_assert(offsetof(Consensus::SidechainParams, zside) + sizeof(Consensus::ZsideParams) == 48, "a new sidechain parameter goes into the fingerprint");
     static_assert(sizeof(Consensus::SidechainParams) == 48, "a new sidechain parameter goes into the fingerprint");
     HashWriter hasher{};
     hasher << std::string{"Sidechain parameters"} << ParamsFingerprint(params) << sidechain.slot << sidechain.min_withdrawal
            << sidechain.max_bundle_withdrawals << sidechain.bundle_retry_delay << sidechain.single_bundle_height
            << sidechain.main_activation_height << sidechain.audit2_height << sidechain.pending_min_score
-           << sidechain.unproposed_expiry_blocks << std::string{"zSide parameters"} << sidechain.zside.audit2_height;
+           << sidechain.unproposed_expiry_blocks;
     return hasher.GetHash();
 }
 

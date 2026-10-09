@@ -46,9 +46,9 @@ struct ZoBundle;
  *    everything in it except their own bytes and the transparent signatures (the marker is
  *    taken with the commitment to the bundle's effects, ZIP 244, in place of the bundle).
  *    The transparent inputs sign the whole transaction, the bundle included.
- *    From audit2_height (Consensus::ZsideParams), the sighash also commits to the chain: its
- *    genesis block, its slot and a branch id, so that a bundle signed for one chain (a test
- *    network, another sidechain of the same code) is invalid on any other.
+ *    The sighash also commits to the chain: its genesis block, its slot and a branch id, so
+ *    that a bundle signed for one chain (a test network, another sidechain of the same code)
+ *    is invalid on any other.
  */
 namespace zside {
 
@@ -101,43 +101,33 @@ struct SighashDomain {
 };
 /** Changed with anything the sighash commits to. */
 inline constexpr uint32_t SIGHASH_BRANCH_ID{0x7a530001};
-/** The domain of the sighash of a bundle in a block at `height`: none before audit2_height. */
-std::optional<SighashDomain> SighashDomainAt(const Consensus::SidechainParams& params, const uint256& genesis, int height);
-std::optional<SighashDomain> SighashDomainAt(const Consensus::Params& params, int height);
+/** The domain of the sighash of the bundles of a chain. */
+SighashDomain SighashDomainOf(const Consensus::SidechainParams& params, const uint256& genesis);
+SighashDomain SighashDomainOf(const Consensus::Params& params);
 
-/** The hash the bundle of a transaction signs (in `domain`, from audit2_height). */
-uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uint256& bundle_commitment, const std::optional<SighashDomain>& domain);
+/** The hash the bundle of a transaction signs, in `domain`. */
+uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uint256& bundle_commitment, const SighashDomain& domain);
 
 /**
  * Check what depends on the transaction alone: one well-formed marker at most, not in a
- * coinbase, the value put in carried by the marker, the proof and signatures valid (for a
- * block of the given sighash domain).
+ * coinbase, the value put in carried by the marker, the proof and signatures valid (in the
+ * given sighash domain).
  */
-[[nodiscard]] bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason, const std::optional<SighashDomain>& domain);
+[[nodiscard]] bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason, const SighashDomain& domain);
 
 /**
  * Whether `reject_reason` is one of CheckShieldedTx's, which looks at the transaction alone (its
- * marker, its bundle, the proof in the sighash domain of the block's height): a block that fails
- * so fails whatever the record of the mainchain says (sidechain::RecordIndependent).
+ * marker, its bundle, the proof in the sighash domain of the chain): a block that fails so
+ * fails whatever the record of the mainchain says (sidechain::RecordIndependent).
  */
 bool TxOnlyReason(const std::string& reject_reason);
-
-/**
- * Whether a peer that sent a transaction the mempool refused for "bad-zs-proof", checked for a block
- * at `height`, is to be punished. Near audit2_height a peer whose tip is a few blocks from this
- * node's signs in the other sighash domain in good faith: punished only if the bundle fails in
- * that one as well.
- */
-bool PunishableProofFailure(const CTransaction& tx, const Consensus::Params& params, int height);
-//! How close to audit2_height (in blocks, either side) a bundle is also checked in the other domain.
-inline constexpr int AUDIT2_GRACE_BLOCKS{10};
 
 /**
  * Verify the proofs and signatures of the bundles of several transactions (a block's) in one batch,
  * and remember them valid: CheckShieldedTx then finds them so. False if one is invalid; nothing is
  * remembered then, and CheckShieldedTx finds which, one by one.
  */
-bool VerifyBundles(std::span<const CTransactionRef> txs, const std::optional<SighashDomain>& domain);
+bool VerifyBundles(std::span<const CTransactionRef> txs, const SighashDomain& domain);
 
 /** The right edge of the note commitment tree: enough to append to it and compute its root. */
 class Frontier
@@ -177,7 +167,7 @@ public:
     explicit ShieldedState(sidechain::StoreOverlay& overlay) : m_view{&overlay}, m_overlay{&overlay} {}
 
     /** Check a transaction (CheckShieldedTx, in `domain`) and against the pool, and apply it. A transaction that fails changes nothing. */
-    [[nodiscard]] bool ApplyTx(const CTransaction& tx, std::string& reject_reason, const std::optional<SighashDomain>& domain);
+    [[nodiscard]] bool ApplyTx(const CTransaction& tx, std::string& reject_reason, const SighashDomain& domain);
     /**
      * Whether the bundle of a transaction fits the pool now (its anchor, its nullifiers, the pool's
      * balance), its value balance in range: the cheap part of ApplyTx, without the proof
@@ -197,8 +187,7 @@ public:
     uint64_t NullifierCount() const;
 
 private:
-    //! @param[in] audit2  the rules from audit2_height (a block in a sighash domain, or the mempool)
-    [[nodiscard]] bool Check(const CTransaction& tx, const Bundle& bundle, std::string& reject_reason, bool audit2) const;
+    [[nodiscard]] bool Check(const CTransaction& tx, const Bundle& bundle, std::string& reject_reason) const;
 
     const sidechain::StoreView* m_view;
     sidechain::StoreOverlay* m_overlay;

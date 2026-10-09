@@ -243,7 +243,6 @@ public:
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
-        consensus.sidechain.zside.audit2_height = 0;
     }
 };
 
@@ -353,7 +352,6 @@ public:
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
-        consensus.sidechain.zside.audit2_height = 1788; // audits 2-4 on the test network, a few blocks after the deploy
     }
 };
 
@@ -467,7 +465,6 @@ public:
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
-        consensus.sidechain.zside.audit2_height = 0;
     }
 };
 
@@ -567,7 +564,6 @@ public:
             // A sidechain has no sidechains of its own.
             consensus.drivechain.max_sidechains = 0;
             consensus.coinbase_maturity = 0;
-            consensus.sidechain.zside.audit2_height = 0;
         }
         m_assumed_blockchain_size = 0;
         m_assumed_chain_state_size = 0;

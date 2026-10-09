@@ -935,9 +935,6 @@ public:
     //! branch are connected one by one, and the shielded pass waits for its end (after_reorg, from
     //! MaybeUpdateMempoolForReorg) rather than judge them against a state on the way.
     bool m_blocks_disconnected GUARDED_BY(::cs_main){false};
-    //! zSide: whether the shielded transactions of the mempool were last looked at for a block in the
-    //! sighash domain of audit2_height (nullopt: never yet).
-    std::optional<bool> m_mempool_shielded_audit2 GUARDED_BY(::cs_main);
 
     /**
      * The sidechain database as the deposits in the mempool leave it, for the

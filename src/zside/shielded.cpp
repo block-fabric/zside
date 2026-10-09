@@ -173,22 +173,21 @@ CAmount ShieldedValueIn(const CTransaction& tx)
     return 0;
 }
 
-std::optional<SighashDomain> SighashDomainAt(const Consensus::SidechainParams& params, const uint256& genesis, int height)
+SighashDomain SighashDomainOf(const Consensus::SidechainParams& params, const uint256& genesis)
 {
-    if (height < params.zside.audit2_height) return std::nullopt;
     return SighashDomain{.genesis = genesis, .slot = params.slot};
 }
 
-std::optional<SighashDomain> SighashDomainAt(const Consensus::Params& params, int height)
+SighashDomain SighashDomainOf(const Consensus::Params& params)
 {
-    return SighashDomainAt(params.sidechain, params.hashGenesisBlock, height);
+    return SighashDomainOf(params.sidechain, params.hashGenesisBlock);
 }
 
-uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uint256& bundle_commitment, const std::optional<SighashDomain>& domain)
+uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uint256& bundle_commitment, const SighashDomain& domain)
 {
-    // In a domain: a tag of its own (no sighash of one is one of the other), then the chain.
-    HashWriter h{TaggedHash(domain ? "zSide/Orchard sighash/chain" : "zSide/Orchard sighash")};
-    if (domain) h << SIGHASH_BRANCH_ID << domain->genesis << domain->slot;
+    // The chain first.
+    HashWriter h{TaggedHash("zSide/Orchard sighash/chain")};
+    h << SIGHASH_BRANCH_ID << domain.genesis << domain.slot;
     h << tx.version;
     WriteCompactSize(h, tx.vin.size());
     for (const CTxIn& in : tx.vin) h << in.prevout << in.nSequence;
@@ -206,7 +205,7 @@ uint256 ShieldedSighash(const CTransaction& tx, uint32_t marker_index, const uin
     return h.GetSHA256();
 }
 
-bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason, const std::optional<SighashDomain>& domain)
+bool CheckShieldedTx(const CTransaction& tx, std::string& reject_reason, const SighashDomain& domain)
 {
     const auto invalid{[&](const char* reason) {
         reject_reason = reason;
@@ -247,17 +246,7 @@ bool TxOnlyReason(const std::string& reject_reason)
     return reasons.contains(reject_reason);
 }
 
-bool PunishableProofFailure(const CTransaction& tx, const Consensus::Params& params, int height)
-{
-    const int audit2{params.sidechain.zside.audit2_height};
-    // A chain with the domain from its start (or far from the change): there is no other.
-    if (audit2 <= 0 || height < audit2 - AUDIT2_GRACE_BLOCKS || height > audit2 + AUDIT2_GRACE_BLOCKS) return true;
-    const std::optional<SighashDomain> other{SighashDomainAt(params, height) ? std::nullopt : SighashDomainAt(params, audit2)};
-    std::string reason;
-    return !CheckShieldedTx(tx, reason, other);
-}
-
-bool VerifyBundles(std::span<const CTransactionRef> txs, const std::optional<SighashDomain>& domain)
+bool VerifyBundles(std::span<const CTransactionRef> txs, const SighashDomain& domain)
 {
     std::vector<Bundle> bundles;
     std::vector<const ZoBundle*> list;
@@ -358,7 +347,7 @@ uint64_t ShieldedState::AnchorCount() const { return 1 + ANCHOR_COUNT.Get(*m_vie
 CAmount ShieldedState::Pool() const { return POOL.Get(*m_view); }
 uint64_t ShieldedState::NullifierCount() const { return NULLIFIER_COUNT.Get(*m_view); }
 
-bool ShieldedState::Check(const CTransaction& tx, const Bundle& bundle, std::string& reject_reason, bool audit2) const
+bool ShieldedState::Check(const CTransaction& tx, const Bundle& bundle, std::string& reject_reason) const
 {
     const auto invalid{[&](const char* reason) {
         reject_reason = reason;
@@ -373,10 +362,9 @@ bool ShieldedState::Check(const CTransaction& tx, const Bundle& bundle, std::str
     for (const uint256& nf : bundle.Nullifiers()) {
         if (IsSpent(nf) || !seen.insert(nf).second) return invalid("bad-zs-double-spend");
     }
-    // The tree holds 2^32 leaves; from audit2_height, one less: a frontier of exactly 2^32 leaves
-    // has a root equal to the empty tree's (Frontier::Root sees no bit of its size set), which every
-    // bundle may use as its anchor.
-    const uint64_t capacity{(uint64_t{1} << TREE_DEPTH) - (audit2 ? 1 : 0)};
+    // The tree holds 2^32 leaves, less one: a frontier of exactly 2^32 leaves has a root equal to the
+    // empty tree's (Frontier::Root sees no bit of its size set), which every bundle may use as its anchor.
+    const uint64_t capacity{(uint64_t{1} << TREE_DEPTH) - 1};
     if (Tree().Size() + bundle.NumActions() > capacity) return invalid("bad-zs-tree-full");
     // The pool never holds less than nothing: a flaw in the proofs could not take out more than went in.
     if (Pool() - balance < 0) return invalid("bad-zs-pool-negative");
@@ -393,18 +381,16 @@ bool ShieldedState::CheckState(const CTransaction& tx, std::string& reject_reaso
         reject_reason = error;
         return false;
     }
-    // The mempool: the rule of audit2_height already (no stricter one is relaxed later).
-    return !bundle || Check(tx, *bundle, reject_reason, /*audit2=*/true);
+    return !bundle || Check(tx, *bundle, reject_reason);
 }
 
-bool ShieldedState::ApplyTx(const CTransaction& tx, std::string& reject_reason, const std::optional<SighashDomain>& domain)
+bool ShieldedState::ApplyTx(const CTransaction& tx, std::string& reject_reason, const SighashDomain& domain)
 {
     if (!CheckShieldedTx(tx, reject_reason, domain)) return false;
     std::string error;
     const auto bundle{Bundle::FromTx(tx, error)};
     if (!bundle) return true;
-    // A block from audit2_height is one with a sighash domain (SighashDomainAt).
-    if (!Check(tx, *bundle, reject_reason, /*audit2=*/domain.has_value())) return false;
+    if (!Check(tx, *bundle, reject_reason)) return false;
     sidechain::StoreOverlay& out{*Assert(m_overlay)};
     uint64_t spent{NullifierCount()};
     for (const uint256& nf : bundle->Nullifiers()) {

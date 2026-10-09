@@ -1014,7 +1014,7 @@ static CMutableTransaction ShieldingTxTo(const OrchardFvk& ovk, const OrchardAdd
     mtx.vout.emplace_back(value, zside::ShieldedMarkerScript(std::vector<uint8_t>(BundleSize(zo_unsigned_num_actions(unsigned_bundle)), 0)));
     uint256 commitment;
     BOOST_REQUIRE_EQUAL(zo_unsigned_commitment(unsigned_bundle, commitment.data()), ZO_OK);
-    const uint256 sighash{zside::ShieldedSighash(CTransaction{mtx}, 0, commitment, std::nullopt)};
+    const uint256 sighash{zside::ShieldedSighash(CTransaction{mtx}, 0, commitment, zside::SighashDomainOf(Params().GetConsensus()))};
     uint8_t* bytes{nullptr};
     size_t len{0};
     BOOST_REQUIRE_EQUAL(zo_unsigned_finish(unsigned_bundle, sighash.data(), &bytes, &len), ZO_OK);

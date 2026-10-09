@@ -62,7 +62,9 @@ one bill at a time.
   encoding: the extended format with flag 2 (as segwit's flag 1).
 - The bundle's proof and signatures sign the **sighash**: the transaction, with the marker taken
   as the commitment to the bundle's effects (ZIP 244) instead of the bundle. The transparent
-  inputs sign the whole transaction, the bundle included.
+  inputs sign the whole transaction, the bundle included. The sighash also commits to the chain
+  (its genesis block, its slot and a branch id): a bundle signed for one chain is invalid on any
+  other.
 
 ## The rules
 
@@ -75,17 +77,16 @@ one bill at a time.
 - **The pool never holds less than nothing**: what bundles take out never exceeds what went in.
   Should the proofs ever have a flaw, no more than the pool holds could be taken.
 - No bundle in a coinbase. A bundle has at most 256 actions.
-- The tree holds fewer than 2^32 notes (from `audit2_height`; a full tree's root would be the
-  empty tree's).
+- The tree holds fewer than 2^32 notes (a full tree's root would be the empty tree's).
 
 ## The node and the wallet
 
 - The node keeps the right edge of the note commitment tree, the roots that are anchors, the
   nullifiers and the pool's value in its sidechain state. **`-orchardindex`** (on by default)
   keeps the whole tree, from which a wallet gets the path of its notes; wallets need it to spend.
-- A spend in the mempool whose anchor a reorg took away, or signed for the other side of
-  `audit2_height`, leaves it once the reorg is done (not on the way, against a state in between);
-  the wallet then abandons it, and its notes are the account's again.
+- A spend in the mempool whose anchor a reorg took away leaves it once the reorg is done (not on
+  the way, against a state in between); the wallet then abandons it, and its notes are the
+  account's again.
 - A payment spends at most as many notes as a transaction the network relays holds (about 30);
   past that the wallet says so: pay less, or join notes first by paying the account itself.
 - Melt & cast run on a thread of the wallets of their own (not the scheduler's, which runs the

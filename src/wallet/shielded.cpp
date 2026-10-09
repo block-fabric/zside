@@ -461,11 +461,8 @@ bool SetSighash(const CWallet& wallet, PendingPayment& p) EXCLUSIVE_LOCKS_REQUIR
 {
     uint256 commitment;
     if (zo_unsigned_commitment(p.bundle.get(), commitment.data()) != ZO_OK) return false;
-    // Signed for the next block of the node's chain (zside/shielded.h): the one the mempool checks it
-    // for. The wallet may not have seen the node's tip yet, and the domain changes at audit2_height.
-    const std::optional<int> tip{wallet.chain().getHeight()};
-    const int height{(tip ? *tip : wallet.GetLastBlockHeight()) + 1};
-    p.sighash = zside::ShieldedSighash(CTransaction{p.mtx}, p.marker_index, commitment, zside::SighashDomainAt(Params().GetConsensus(), height));
+    // Signed for the chain of the node (zside/shielded.h).
+    p.sighash = zside::ShieldedSighash(CTransaction{p.mtx}, p.marker_index, commitment, zside::SighashDomainOf(Params().GetConsensus()));
     return true;
 }
 

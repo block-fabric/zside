@@ -1583,8 +1583,7 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
     // Looked up again: SyncTransaction above may have inserted into mapWallet (a rehash
     // invalidates its iterators).
     // zSide: so is a shielded transaction the mempool drops for a conflict: one of its notes spent in a
-    // block, its anchor taken by a reorg, or signed in the sighash domain that ended at audit2_height
-    // (Chainstate::RemoveStaleDrivechainTxs). Left inactive, it would hold its notes as spent forever
+    // block, or its anchor taken by a reorg (Chainstate::RemoveStaleDrivechainTxs). Left inactive, it would hold its notes as spent forever
     // (ShieldedNotes); abandoned, they are the account's again (and if it is mined after all, it is
     // the wallet's again).
     it = mapWallet.find(tx->GetHash());
