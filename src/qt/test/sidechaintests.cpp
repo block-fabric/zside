@@ -28,6 +28,7 @@
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/proofoffundsdialog.h>
+#include <qt/shieldedpage.h>
 #include <qt/sidechainpage.h>
 #include <qt/theme.h>
 #include <qt/timestampdialog.h>
@@ -363,6 +364,113 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     QObject::disconnect(counting);
 }
 
+/** Wait until the calls queued on the thread of NodeRpc::CallAsync so far are answered on the GUI thread. */
+void DrainNodeRpc()
+{
+    bool drained{false};
+    QObject anchor;
+    NodeRpc::RunAsync(&anchor, [&drained]() -> std::function<void()> { return [&drained] { drained = true; }; });
+    QTRY_VERIFY_WITH_TIMEOUT(drained, 60000);
+}
+
+/**
+ * The shielded page: it shows the account's address and balances, as the wallet has them, through
+ * calls off the GUI thread; refreshes asked for while others are under way, or of a page deleted
+ * meanwhile, are harmless. Shielding goes through the page's own Shield button. The test chain is
+ * no sidechain, so the coins may not reach the shielded pool here (feature_zside.py covers that on
+ * a sidechain); the page has to show what the wallet says either way.
+ */
+void TestShieldedPage(TestChain100Setup& test, ClientModel& client_model)
+{
+    const NodeRpc::WalletNameFn wallet_name{[] { return std::optional<QString>{QString{}}; }};
+    // AppTests shut its node down, which stopped the thread the page calls the node on.
+    NodeRpc::Restart();
+    const auto call{[&](const std::string& method, const UniValue& params) {
+        QString error;
+        const auto result{NodeRpc::Call(&client_model, method, params, error, QString{})};
+        if (!result) qWarning("%s: %s", method.c_str(), qPrintable(error));
+        return result;
+    }};
+
+    // A page deleted while its first refresh is still queued: the answers are dropped.
+    {
+        auto* page{new ShieldedPage(wallet_name)};
+        page->setClientModel(&client_model);
+        page->show();
+        delete page;
+        DrainNodeRpc();
+    }
+
+    ShieldedPage page(wallet_name);
+    page.resize(1000, 700);
+    page.setClientModel(&client_model);
+    page.show();
+    auto* address{page.findChild<QLineEdit*>("address")};
+    auto* available{page.findChild<QLabel*>("bigNumber")};
+    auto* transparent{page.findChild<QLabel*>("midNumber")};
+    auto* status{page.findChild<QLabel*>("shieldedStatus")};
+    auto* tabs{page.findChild<QTabWidget*>()};
+    QVERIFY(address && available && transparent && status && tabs);
+
+    // The address and the balances, once the calls are answered.
+    QTRY_VERIFY_WITH_TIMEOUT(!address->text().isEmpty(), 30000);
+    const auto own_address{call("getshieldedaddress", UniValue{UniValue::VARR})};
+    QVERIFY(own_address);
+    QCOMPARE(address->text(), QString::fromStdString(own_address->get_str()));
+    QVERIFY2(address->text().startsWith("rzo1"), qPrintable(address->text()));
+    QTRY_COMPARE_WITH_TIMEOUT(available->text(), QString("0.00000000 CHN"), 30000);
+    QTRY_VERIFY_WITH_TIMEOUT(transparent->text() != QString::fromUtf8("—"), 30000);
+
+    // Refreshes asked for one after the other, while the first is under way: one follows the other.
+    for (int i{0}; i < 2 * tabs->count(); ++i) tabs->setCurrentIndex(i % tabs->count());
+    DrainNodeRpc();
+    DrainNodeRpc();
+    QCOMPARE(address->text(), QString::fromStdString(own_address->get_str()));
+
+    // Shield a coin through the page.
+    QPushButton* shield{nullptr};
+    for (auto* button : page.findChildren<QPushButton*>()) {
+        if (button->text() == "Shield") shield = button;
+    }
+    QVERIFY(shield);
+    tabs->setCurrentIndex(2);
+    auto* shield_amount{shield->parentWidget()->findChild<QLineEdit*>()};
+    QVERIFY(shield_amount);
+    shield_amount->setText("1");
+    QCOMPARE(WithMessageBoxes(QMessageBox::Yes, [&] { shield->click(); }).size(), 1);
+    // A refresh while the shielding is under way waits for it.
+    tabs->setCurrentIndex(0);
+    tabs->setCurrentIndex(2);
+    QTRY_VERIFY_WITH_TIMEOUT(shield->isEnabled(), 120000);
+    QCOMPARE(status->text(), QString("Shielding 1 CHN: spendable after the next block."));
+    QVERIFY(shield_amount->text().isEmpty());
+    // Waiting for a block: shown as such, and in the history.
+    QLabel* pending{nullptr};
+    QTRY_VERIFY_WITH_TIMEOUT([&] {
+        for (auto* label : page.findChildren<QLabel*>()) {
+            if (label->text() == "1.00000000 CHN waiting for a block") pending = label;
+        }
+        return pending != nullptr;
+    }(), 30000);
+    auto* history{qobject_cast<QTableWidget*>(tabs->widget(4))};
+    QVERIFY(history);
+    tabs->setCurrentWidget(history);
+    QTRY_COMPARE_WITH_TIMEOUT(history->item(0, 1) ? history->item(0, 1)->text() : QString{}, QString("Shielded"), 30000);
+    QCOMPARE(history->item(0, 2)->text(), QString("1.00000000"));
+    QCOMPARE(history->item(0, 4)->text(), QString("waiting"));
+    SaveScreenshot(page, "shielded-page");
+
+    // In a block. The test chain is no sidechain, which has no shielded pool: the note is not
+    // counted as available here (feature_zside.py covers that). The page shows what the wallet says.
+    MineBlock(test);
+    const auto balance{call("getshieldedbalance", UniValue{UniValue::VARR})};
+    QVERIFY(balance);
+    tabs->setCurrentIndex(0);
+    QTRY_COMPARE_WITH_TIMEOUT(available->text(), QString::fromStdString((*balance)["available"].getValStr()) + " CHN", 30000);
+    SaveScreenshot(page, "shielded-balance");
+    DrainNodeRpc();
+}
+
 void TestSidechainPage(interfaces::Node& node)
 {
     TestChain100Setup test;
@@ -422,6 +530,7 @@ void TestSidechainPage(interfaces::Node& node)
     SaveScreenshot(page, "mainchain-page");
 
     TestTools(test, client_model);
+    TestShieldedPage(test, client_model);
 
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }

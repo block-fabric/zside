@@ -323,6 +323,7 @@ ShieldedPage::ShieldedPage(NodeRpc::WalletNameFn wallet_name, QWidget* parent)
     });
 
     m_status = new QLabel(this);
+    m_status->setObjectName("shieldedStatus");
     m_status->setWordWrap(true);
     m_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
     outer->addWidget(m_status);

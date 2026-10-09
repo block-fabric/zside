@@ -53,6 +53,12 @@ void RunAsync(QObject* receiver, std::function<std::function<void()>()> work);
  */
 void Stop();
 
+/**
+ * Take calls again after Stop, on a new thread: for the tests, where a node is set up again after
+ * another one shut down (AppTests). GUI thread only.
+ */
+void Restart();
+
 /** The parameters of a call. */
 UniValue Args(std::initializer_list<UniValue> values);
 /** Text of a string or number. */

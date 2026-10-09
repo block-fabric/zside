@@ -41,7 +41,8 @@ QPointer<QThread> g_thread;
 QObject* Worker()
 {
     static QPointer<QObject> worker;
-    if (!worker) {
+    // Made again after Restart: the thread of the one before was stopped.
+    if (!worker || !g_thread || g_thread->isFinished()) {
         auto* thread{new QThread(qApp)};
         thread->setObjectName(QStringLiteral("noderpc"));
         worker = new QObject;
@@ -102,6 +103,12 @@ void Stop()
     // A call under way is waited for: it holds on to the node.
     g_thread->quit();
     g_thread->wait();
+}
+
+void Restart()
+{
+    Stop();
+    g_stopped = false;
 }
 
 UniValue Args(std::initializer_list<UniValue> values)
