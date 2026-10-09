@@ -851,6 +851,8 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
     if (slots.empty()) return true;
 
     // The escrow of those sidechains as the mempool leaves it, up to the transactions this one would replace.
+    // m_pool is the active chainstate's mempool: lock it as the chainstate names it (recursively).
+    LOCK(m_active_chainstate.MempoolMutex());
     drivechain::SidechainDB scdb{m_active_chainstate.GetMempoolSidechainDB(slots, &ws.m_conflicts)};
     drivechain::SidechainDB::EscrowOutputs escrow_outputs{scdb.GetEscrowOutputs()};
     drivechain::BlockUndo undo;
@@ -5174,7 +5176,7 @@ drivechain::SidechainDB Chainstate::GetMempoolSidechainDB(const std::set<drivech
                     // Nor one whose inputs are missing: in a reorg, the deposits of the disconnected
                     // blocks come back one by one, and a later one that stayed in the mempool waits
                     // for the one before it (which would otherwise be refused, as not following it).
-                    if (std::any_of(candidate->vin.begin(), candidate->vin.end(), [&](const CTxIn& in) { return !m_mempool->exists(in.prevout.hash) && !m_coins_views->m_cacheview->HaveCoin(in.prevout); })) continue;
+                    if (std::any_of(candidate->vin.begin(), candidate->vin.end(), [&](const CTxIn& in) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return !m_mempool->exists(in.prevout.hash) && !m_coins_views->m_cacheview->HaveCoin(in.prevout); })) continue;
                     drivechain::SidechainDB probe{scdb};
                     drivechain::SidechainDB::EscrowOutputs probe_outputs{escrow_outputs};
                     drivechain::BlockUndo probe_undo;

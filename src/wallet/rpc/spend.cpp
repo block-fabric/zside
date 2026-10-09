@@ -341,12 +341,6 @@ RPCMethod sendtoaddress()
 }
 
 /**
- * Sign the inputs of a transaction that belong to the wallet, commit it, and
- * make sure the mempool took it. `external` holds the coins of the inputs
- * that do not belong to the wallet and need no signature.
- * @return the id of the signed transaction
- */
-/**
  * Let a BMM request or a deposit be paid from the unconfirmed outputs of earlier ones (a wallet that
  * serves several sidechains), when the wallet has nothing else: the mempool takes it then only if it
  * is small (dc-unconfirmed-parent). A deposit is never paid from the change of a BMM request
@@ -360,6 +354,12 @@ static void AllowDrivechainParents(CCoinControl& coin_control, bool bmm_request_
     coin_control.m_max_tx_weight = TRUC_CHILD_MAX_WEIGHT;
 }
 
+/**
+ * Sign the inputs of a transaction that belong to the wallet, commit it, and
+ * make sure the mempool took it. `external` holds the coins of the inputs
+ * that do not belong to the wallet and need no signature.
+ * @return the id of the signed transaction
+ */
 static Txid SignAndCommit(CWallet& wallet, CMutableTransaction& mtx, const std::map<COutPoint, Coin>& external)
 {
     std::map<COutPoint, Coin> coins{external};

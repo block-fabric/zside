@@ -186,10 +186,8 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     // they spend the escrow output as the deposits in the block leave it.
     ChainstateManager& chainman{m_chainstate.m_chainman};
     // What the active chain closed, for good: a failed bundle the sidechain database forgot is not proposed again.
-    const auto history{[&](drivechain::SidechainId slot, const uint256& hash) -> std::optional<int> {
-        AssertLockHeld(::cs_main);
-        const auto closure{chainman.m_blockman.m_drivechain_db->FindClosure(slot, hash, [&](const uint256& block_hash) {
-            AssertLockHeld(::cs_main);
+    const auto history{[&](drivechain::SidechainId slot, const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> std::optional<int> {
+        const auto closure{chainman.m_blockman.m_drivechain_db->FindClosure(slot, hash, [&](const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
             const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(block_hash)};
             return index && m_chainstate.m_chain.Contains(*index);
         })};

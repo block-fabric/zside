@@ -900,7 +900,7 @@ public:
      * is activated, before the mempool is loaded from disk: its transactions that spend theirs then
      * find their inputs.
      */
-    void ReaddRolledBackTransactions() EXCLUSIVE_LOCKS_REQUIRED(!::cs_main);
+    void ReaddRolledBackTransactions() LOCKS_EXCLUDED(::cs_main);
 
     /** Name under which the sidechain database of this chainstate is stored. */
     std::string DrivechainStateName() const;

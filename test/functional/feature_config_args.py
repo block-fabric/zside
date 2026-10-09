@@ -16,6 +16,11 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.test_node import ErrorMatch
 from test_framework import util
 
+# Until its slot's activation height (SidechainParams::main_activation_height) is set, this release
+# refuses to start on the main network, before it reads most of the options a test gives it there.
+MAIN_REFUSED = (r'This release names slot \d+ of the mainchain but not the height of the block that activated '
+                r'the sidechain there \(SidechainParams::main_activation_height\): it must not run on the main network\.')
+
 
 class ConfArgsTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -146,7 +151,11 @@ class ConfArgsTest(BitcoinTestFramework):
         util.write_config(main_conf_file_path, n=0, chain='', extra_config=f'includeconf={inc_conf_file_path}\n')
         with open(inc_conf_file_path, 'w') as conf:
             conf.write('acceptnonstdtxn=1\n')
-        self.nodes[0].assert_start_raises_init_error(extra_args=[f"-conf={main_conf_file_path}", "-allowignoredconf"], expected_msg='Error: acceptnonstdtxn is not currently supported for main chain')
+        # Until its slot's activation height is set, this release refuses the main network before it
+        # reads acceptnonstdtxn: either error proves the main chain section was picked up.
+        self.nodes[0].assert_start_raises_init_error(extra_args=[f"-conf={main_conf_file_path}", "-allowignoredconf"],
+            expected_msg=rf'Error: (acceptnonstdtxn is not currently supported for main chain|{MAIN_REFUSED})',
+            match=ErrorMatch.FULL_REGEX)
 
         with open(inc_conf_file_path, 'w') as conf:
             conf.write('nono\n')
@@ -505,7 +514,11 @@ class ConfArgsTest(BitcoinTestFramework):
         conf_file = self.nodes[0].datadir_path / "zside.conf"
         for chain, chain_name in {("main", ""), ("test", "testnet"), ("signet", "signet")}:
             util.write_config(conf_file, n=0, chain=chain_name, extra_config='acceptstalefeeestimates=1\n')
-            self.nodes[0].assert_start_raises_init_error(expected_msg=f'Error: acceptstalefeeestimates is not supported on {chain} chain.')
+            # On main, the refusal of an unactivated slot comes first (see MAIN_REFUSED).
+            expected = re.escape(f'Error: acceptstalefeeestimates is not supported on {chain} chain.')
+            if chain == "main":
+                expected = f'({expected}|Error: {MAIN_REFUSED})'
+            self.nodes[0].assert_start_raises_init_error(expected_msg=expected, match=ErrorMatch.FULL_REGEX)
         util.write_config(conf_file, n=0, chain="regtest")  # Reset to regtest
 
     def run_test(self):

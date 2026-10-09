@@ -6,7 +6,8 @@
 
 from test_framework.address import HRP_BY_CHAIN
 from test_framework.segwit_addr import encode_segwit_address
-from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_framework import BitcoinTestFramework, SkipTest
+from test_framework.test_node import FailedToStartError
 
 from test_framework.util import assert_equal
 
@@ -192,6 +193,20 @@ class ValidateAddressMainTest(BitcoinTestFramework):
         self.chain = ""  # main
         self.num_nodes = 1
         self.extra_args = [["-prune=899"]] * self.num_nodes
+
+    def setup_nodes(self):
+        # Until its slot's activation height (SidechainParams::main_activation_height) is set, this
+        # release refuses to start on the main network: there is no main node to ask until then.
+        try:
+            super().setup_nodes()
+        except FailedToStartError as e:
+            if "it must not run on the main network" not in str(e):
+                raise
+            for node in self.nodes:  # it exited: nothing to stop
+                node.process.wait()
+                node.running = False
+                node.process = None
+            raise SkipTest("this release does not run on the main network until its slot's activation height is set")
 
     def check_valid(self, addr, spk):
         info = self.nodes[0].validateaddress(addr)

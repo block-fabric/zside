@@ -783,7 +783,7 @@ void BitcoinGUI::createToolBars()
         }};
         // An entry is a button as wide as the bar, with its icon and its text at the left. The button of
         // a tool bar puts them in the middle, so the entries are buttons of their own that stand for the actions.
-        const auto entry{[this, toolbar](QAction* action) {
+        const auto entry{[toolbar](QAction* action) {
             auto* button{new QPushButton(toolbar)};
             button->setObjectName("sidebarEntry");
             button->setFlat(true);

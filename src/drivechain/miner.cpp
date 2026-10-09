@@ -349,20 +349,20 @@ void MinerState::Prune(const SidechainDB& scdb, int height, const ClosureLookup&
             changed = true;
         }
     }
-    const auto vouched{[&](SidechainId slot, const uint256& hash) {
+    const auto vouched{[&](SidechainId slot, const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(m_mutex) {
         const auto latest{m_latest_bundle.find(slot)};
         return latest != m_latest_bundle.end() && latest->second == hash;
     }};
-    changed |= std::erase_if(m_bundles, [&](const auto& entry) {
+    changed |= std::erase_if(m_bundles, [&](const auto& entry) EXCLUSIVE_LOCKS_REQUIRED(m_mutex) {
         const BundleInfo& info{m_bundle_info.at(entry.first)};
         // Closed deep enough that a reorg is unlikely to reopen it.
         if (info.closed >= 0) return height - info.closed >= PRUNE_DEPTH;
         // Handed long ago, never proposed, and the sidechain node moved on to another one.
         return !info.proposed && height - info.handed >= UNPROPOSED_EXPIRY && !vouched(entry.first.first, entry.first.second);
     }) > 0;
-    std::erase_if(m_bundle_info, [&](const auto& entry) { return !m_bundles.contains(entry.first); });
+    std::erase_if(m_bundle_info, [&](const auto& entry) EXCLUSIVE_LOCKS_REQUIRED(m_mutex) { return !m_bundles.contains(entry.first); });
     // (A null bundle is the word that the sidechain has none: it stays.)
-    std::erase_if(m_latest_bundle, [&](const auto& entry) { return !entry.second.IsNull() && !m_bundles.contains({entry.first, entry.second}); });
+    std::erase_if(m_latest_bundle, [&](const auto& entry) EXCLUSIVE_LOCKS_REQUIRED(m_mutex) { return !entry.second.IsNull() && !m_bundles.contains({entry.first, entry.second}); });
     if (changed) Save();
 }
 

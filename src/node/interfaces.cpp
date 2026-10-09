@@ -656,7 +656,7 @@ public:
         const Chainstate& chainstate{chainman().ActiveChainstate()};
         drivechain::SidechainDB scdb;
         if (m_node.mempool) {
-            LOCK(m_node.mempool->cs);
+            LOCK(chainstate.MempoolMutex());
             scdb = chainstate.GetMempoolSidechainDB({slot});
         } else {
             scdb = chainstate.m_scdb.Subset({slot});

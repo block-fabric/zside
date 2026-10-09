@@ -479,7 +479,7 @@ RPCMethod sendwithdrawalbundle()
 {
     node::NodeContext& node{EnsureAnyNodeContext(request.context)};
     ChainstateManager& chainman{EnsureChainman(node)};
-    CTxMemPool& mempool{EnsureMemPool(node)};
+    EnsureMemPool(node);
     const SidechainId id{ParseSlot(request.params[0], chainman)};
     const uint256 hash{ParseHashV(request.params[1], "hash")};
     UniValue result(UniValue::VOBJ);
@@ -493,8 +493,10 @@ RPCMethod sendwithdrawalbundle()
     if (!blind) return not_sent("this node was not handed the bundle (receivewithdrawalbundle)");
     CTransactionRef tx;
     {
-        LOCK2(::cs_main, mempool.cs);
+        LOCK(::cs_main);
         Chainstate& chainstate{chainman.ActiveChainstate()};
+        // The node's mempool (ensured above), locked as the chainstate names it.
+        LOCK(chainstate.MempoolMutex());
         const Slot* slot{chainstate.m_scdb.GetSlot(id)};
         if (!slot) return not_sent("no active sidechain in this slot");
         const auto bundle{std::find_if(slot->bundles.begin(), slot->bundles.end(), [&](const Bundle& b) { return b.hash == hash; })};
@@ -675,8 +677,7 @@ RPCMethod getwithdrawalbundle()
         }
     }
     // Forgotten by the sidechain database: the record of the block of the active chain that closed it.
-    const auto closure{chainman.m_blockman.m_drivechain_db->FindClosure(id, hash, [&](const uint256& block_hash) {
-        AssertLockHeld(::cs_main);
+    const auto closure{chainman.m_blockman.m_drivechain_db->FindClosure(id, hash, [&](const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(block_hash)};
         return index && chainman.ActiveChain().Contains(*index);
     })};
@@ -855,8 +856,7 @@ RPCMethod listsidechaindeposits()
     LOCK(::cs_main);
     // Records of blocks the active chain no longer has (blocks that left it keep theirs) are neither
     // listed nor counted, nor taken as the place to go on from.
-    const auto in_active_chain{[&](const uint256& block_hash) {
-        AssertLockHeld(::cs_main);
+    const auto in_active_chain{[&](const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         const CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(block_hash)};
         return pindex && chainman.ActiveChain().Contains(*pindex);
     }};

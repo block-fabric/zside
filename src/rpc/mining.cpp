@@ -1198,12 +1198,10 @@ static RPCMethod getblocktemplate()
     }
     result.pushKV("drivechain_coinbase_outputs", std::move(drivechain_outputs));
     UniValue votable(UniValue::VARR);
-    {
-        LOCK(::cs_main);
-        // The template is built on the tip, and the votes of a block refer to the bundles before it.
-        if (chainman.ActiveChain().Tip() == pindexPrev) {
-            for (const auto& [slot, bundles] : chainman.ActiveChainstate().m_scdb.GetPendingBundles()) votable.push_back(uint64_t{bundles.size()});
-        }
+    // The template is built on the tip, and the votes of a block refer to the bundles before it
+    // (cs_main is held from the WAIT_LOCK above).
+    if (chainman.ActiveChain().Tip() == pindexPrev) {
+        for (const auto& [slot, bundles] : chainman.ActiveChainstate().m_scdb.GetPendingBundles()) votable.push_back(uint64_t{bundles.size()});
     }
     result.pushKV("drivechain_votable", std::move(votable));
     // A coinbase as this node would make it, for mining software that builds its own from one: the

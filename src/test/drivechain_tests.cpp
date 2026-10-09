@@ -171,7 +171,8 @@ struct TestChain {
     {
         CMutableTransaction tx;
         tx.vin.resize(1);
-        tx.vin[0].prevout = COutPoint{Txid::FromUint256(uint256{static_cast<uint8_t>(++counter)}), counter};
+        ++counter;
+        tx.vin[0].prevout = COutPoint{Txid::FromUint256(uint256{static_cast<uint8_t>(counter)}), counter};
         return tx;
     }
 
