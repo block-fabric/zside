@@ -10,6 +10,7 @@
 #include <dbwrapper.h>
 
 #include <algorithm>
+#include <cassert>
 #include <memory>
 
 namespace sidechain {
@@ -79,7 +80,32 @@ struct DbStore::Cursor {
 };
 
 DbStore::DbStore(CDBWrapper& db, StoreBytes prefix) : m_db{db}, m_prefix{std::move(prefix)} {}
+DbStore::DbStore(CDBWrapper& db, StoreBytes prefix, Pinned) : m_db{db}, m_prefix{std::move(prefix)}, m_pinned{true}
+{
+    // A database iterator sees the database as it was when it was made: this one is the snapshot.
+    m_cursor = std::make_unique<Cursor>();
+    m_cursor->it.reset(m_db.NewIterator());
+    Seek(m_prefix);
+}
 DbStore::~DbStore() = default;
+
+std::unique_ptr<StoreView> DbStore::Snapshot() const
+{
+    // A snapshot of a snapshot would be of the database as it is now, not as the snapshot sees it.
+    if (m_pinned) return nullptr;
+    return std::unique_ptr<DbStore>(new DbStore{m_db, m_prefix, Pinned{}});
+}
+
+void DbStore::Seek(const StoreBytes& start) const
+{
+    if (!m_cursor) {
+        m_cursor = std::make_unique<Cursor>();
+        m_cursor->it.reset(m_db.NewIterator());
+    }
+    m_cursor->it->Seek(RawKey{start});
+    m_cursor->from = start;
+    m_cursor->Load();
+}
 
 StoreBytes DbStore::Full(std::span<const unsigned char> key) const
 {
@@ -90,6 +116,16 @@ StoreBytes DbStore::Full(std::span<const unsigned char> key) const
 
 std::optional<StoreBytes> DbStore::Get(std::span<const unsigned char> key) const
 {
+    if (m_pinned) {
+        // Through the iterator of the snapshot: a read of the database would see it as it is now.
+        const StoreBytes full{Full(key)};
+        std::lock_guard lock{m_cursor_mutex};
+        Seek(full);
+        if (!m_cursor->valid || m_cursor->key != full) return std::nullopt;
+        RawValue value;
+        if (!m_cursor->it->GetValue(value)) return std::nullopt;
+        return std::move(value.bytes);
+    }
     RawValue value;
     if (!m_db.Read(RawKey{Full(key)}, value)) return std::nullopt;
     return std::move(value.bytes);
@@ -121,15 +157,7 @@ std::optional<std::pair<StoreBytes, StoreBytes>> DbStore::Next(std::span<const u
             }
         }
     }
-    if (!found) {
-        if (!m_cursor) {
-            m_cursor = std::make_unique<Cursor>();
-            m_cursor->it.reset(m_db.NewIterator());
-        }
-        m_cursor->it->Seek(RawKey{start});
-        m_cursor->from = start;
-        m_cursor->Load();
-    }
+    if (!found) Seek(start);
     const Cursor& cursor{*m_cursor};
     if (!cursor.valid || !StartsWith(cursor.key, full_prefix)) return std::nullopt;
     RawValue value;
@@ -139,12 +167,15 @@ std::optional<std::pair<StoreBytes, StoreBytes>> DbStore::Next(std::span<const u
 
 void DbStore::Reset() const
 {
+    // A snapshot's iterator is what it is a snapshot of; nothing writes through it.
+    if (m_pinned) return;
     std::lock_guard lock{m_cursor_mutex};
     m_cursor.reset();
 }
 
 void DbStore::Write(CDBBatch& batch, const std::map<StoreBytes, std::optional<StoreBytes>>& changes) const
 {
+    assert(!m_pinned);
     for (const auto& [key, value] : changes) {
         if (value) {
             batch.Write(RawKey{Full(key)}, RawValue{*value});
@@ -158,6 +189,7 @@ void DbStore::Write(CDBBatch& batch, const std::map<StoreBytes, std::optional<St
 
 void DbStore::Wipe(size_t batch_bytes) const
 {
+    assert(!m_pinned);
     Reset();
     // One batch per so many entries: a state of any size, never held whole in memory. An iterator sees
     // the database as it was when made, so erasing under it is no matter.

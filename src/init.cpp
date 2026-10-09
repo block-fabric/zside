@@ -987,7 +987,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     // deposits the mainchain made to whatever held the slot before are credited on this chain, and a
     // node that first meets the mainchain after a replacement follows the wrong sidechain. On the main
     // network that is a release that must not run; a test network or signet is launched before its slot
-    // activates, so it is said loudly instead. Regtest sets its slot with -sidechainslot, and needs
+    // activates, so it is logged as a warning instead. Regtest sets its slot with -sidechainslot, and needs
     // nothing more. The template's own networks, which no slot activated, are left out: their first
     // block says so, and a sidechain made from the template has a first block of its own.
     const auto is_template_chain{[&] {
@@ -1001,8 +1001,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
             return InitError(Untranslated(strprintf("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
                                                     "(SidechainParams::main_activation_height): it must not run on the main network.", side.slot)));
         }
-        InitWarning(Untranslated(strprintf("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
-                                           "(SidechainParams::main_activation_height): set it once the slot activates.", side.slot)));
+        // Only logged: a warning at init is a modal dialog in the GUI, which holds the start of a
+        // test network node until it is clicked away, for something its user can do nothing about.
+        LogWarning("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
+                   "(SidechainParams::main_activation_height): set it once the slot activates.", side.slot);
     }
 
     // Error if network-specific options (-addnode, -connect, etc) are
@@ -2168,6 +2170,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             chainman.GetNotifications().fatalError(err_str);
             return;
         }
+        // The transactions of the blocks a rollback at startup took back (a block of the chain broke
+        // the drivechain rules), before the mempool from disk: some of its transactions spend theirs.
+        chainman.ActiveChainstate().ReaddRolledBackTransactions();
         // Load mempool from disk
         if (auto* pool{chainman.ActiveChainstate().GetMempool()}) {
             const bool loaded{LoadMempool(*pool, ShouldPersistMempool(args) ? MempoolPath(args) : fs::path{}, chainman.ActiveChainstate(), {})};

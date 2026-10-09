@@ -164,12 +164,13 @@ static RPCMethod verifytxoutproof()
 
             UniValue res(UniValue::VARR);
 
+            ChainstateManager& chainman = EnsureAnyChainman(request.context);
+
             std::vector<Txid> vMatch;
             std::vector<unsigned int> vIndex;
-            if (merkleBlock.txn.ExtractMatches(vMatch, vIndex) != merkleBlock.header.hashMerkleRoot)
+            if (merkleBlock.txn.ExtractMatches(vMatch, vIndex, chainman.GetConsensus().max_block_weight) != merkleBlock.header.hashMerkleRoot)
                 return res;
 
-            ChainstateManager& chainman = EnsureAnyChainman(request.context);
             LOCK(cs_main);
 
             const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(merkleBlock.header.GetHash());

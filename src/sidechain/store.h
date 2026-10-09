@@ -90,6 +90,13 @@ public:
     bool Contains(std::span<const unsigned char> key) const { return Get(key).has_value(); }
     /** Every entry under `prefix`, in key order, until `fn` returns false. */
     void ForEach(std::span<const unsigned char> prefix, const std::function<bool(const StoreBytes&, const StoreBytes&)>& fn) const;
+    /**
+     * A view of the entries as they are now, which later changes do not reach: it can be read
+     * without whatever lock guards this view (the chainstate's state under cs_main, say), for as
+     * long as the database under it is open. Made in time proportional to the changes an overlay
+     * holds, not to the entries. nullptr if this view cannot make one.
+     */
+    virtual std::unique_ptr<StoreView> Snapshot() const { return nullptr; }
 };
 
 /** No entries: the base of a state that has none yet, and of tests. */
@@ -98,6 +105,7 @@ class EmptyStore : public StoreView
 public:
     std::optional<StoreBytes> Get(std::span<const unsigned char>) const override { return std::nullopt; }
     std::optional<std::pair<StoreBytes, StoreBytes>> Next(std::span<const unsigned char>, std::span<const unsigned char>) const override { return std::nullopt; }
+    std::unique_ptr<StoreView> Snapshot() const override { return std::make_unique<EmptyStore>(); }
 };
 
 /**
@@ -106,6 +114,9 @@ public:
  * Reads in key order (Next, as ForEach and the overlays over it make them) go on with the database
  * iterator of the read before, rather than one per entry. That iterator sees the database as it was
  * when it was made: whoever writes the database calls Reset after.
+ *
+ * A snapshot of it (Snapshot) is a DbStore that reads everything, Get included, through one
+ * iterator made at once and kept: the database as it was then, whatever is written to it after.
  */
 class DbStore : public StoreView
 {
@@ -114,6 +125,7 @@ public:
     ~DbStore() override;
     std::optional<StoreBytes> Get(std::span<const unsigned char> key) const override;
     std::optional<std::pair<StoreBytes, StoreBytes>> Next(std::span<const unsigned char> from, std::span<const unsigned char> prefix) const override;
+    std::unique_ptr<StoreView> Snapshot() const override;
     /** Put the changes in a batch. */
     void Write(CDBBatch& batch, const std::map<StoreBytes, std::optional<StoreBytes>>& changes) const;
     /** Erase every entry (a state started over), in batches of about `batch_bytes`; synced at the end. */
@@ -124,9 +136,15 @@ public:
 
 private:
     struct Cursor;
+    struct Pinned {};
+    DbStore(CDBWrapper& db, StoreBytes prefix, Pinned);
     StoreBytes Full(std::span<const unsigned char> key) const;
+    /** Put the cursor at the first entry at or after the full key `start`, if it is not there already. */
+    void Seek(const StoreBytes& start) const; // m_cursor_mutex held
     CDBWrapper& m_db;
     StoreBytes m_prefix;
+    //! A snapshot: the cursor, made with it, is the only way it reads, and is never dropped.
+    const bool m_pinned{false};
     mutable std::mutex m_cursor_mutex;
     mutable std::unique_ptr<Cursor> m_cursor;
 };
@@ -141,6 +159,8 @@ public:
 
     std::optional<StoreBytes> Get(std::span<const unsigned char> key) const override;
     std::optional<std::pair<StoreBytes, StoreBytes>> Next(std::span<const unsigned char> from, std::span<const unsigned char> prefix) const override;
+    /** A copy of the changes over a snapshot of the base. */
+    std::unique_ptr<StoreView> Snapshot() const override;
 
     void Put(std::span<const unsigned char> key, StoreBytes value);
     void Erase(std::span<const unsigned char> key);

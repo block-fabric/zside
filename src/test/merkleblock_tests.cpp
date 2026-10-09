@@ -2,6 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <arith_uint256.h>
+#include <consensus/consensus.h>
 #include <merkleblock.h>
 #include <test/util/common.h>
 #include <test/util/setup_common.h>
@@ -76,6 +78,36 @@ BOOST_AUTO_TEST_CASE(merkleblock_construct_from_txids_not_found)
     BOOST_CHECK_EQUAL(merkleBlock.txn.ExtractMatches(vMatched, vIndex).GetHex(), block.hashMerkleRoot.GetHex());
     BOOST_CHECK_EQUAL(vMatched.size(), 0U);
     BOOST_CHECK_EQUAL(vIndex.size(), 0U);
+}
+
+/**
+ * A proof may claim more transactions than fit in a Bitcoin block when the
+ * chain's maximum block weight is larger, and the limit comes from the caller
+ * rather than from the global chain params.
+ */
+BOOST_AUTO_TEST_CASE(merkleblock_tx_count_bounded_by_max_block_weight)
+{
+    const uint32_t n_tx{MAX_BLOCK_WEIGHT / MIN_TRANSACTION_WEIGHT + 1};
+    std::vector<Txid> txids;
+    std::vector<bool> match(n_tx, false);
+    txids.reserve(n_tx);
+    for (uint32_t i = 0; i < n_tx; ++i) {
+        txids.push_back(Txid::FromUint256(ArithToUint256(arith_uint256{i + 1})));
+    }
+    match[n_tx - 1] = true;
+
+    std::vector<Txid> vMatched;
+    std::vector<unsigned int> vIndex;
+
+    CPartialMerkleTree too_many(txids, match);
+    BOOST_CHECK(too_many.ExtractMatches(vMatched, vIndex).IsNull());
+    BOOST_CHECK(too_many.ExtractMatches(vMatched, vIndex, MAX_BLOCK_WEIGHT).IsNull());
+
+    CPartialMerkleTree large_block(txids, match);
+    BOOST_CHECK(!large_block.ExtractMatches(vMatched, vIndex, 6'000'000).IsNull());
+    BOOST_REQUIRE_EQUAL(vMatched.size(), 1U);
+    BOOST_CHECK_EQUAL(vMatched[0], txids.back());
+    BOOST_CHECK_EQUAL(vIndex[0], n_tx - 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

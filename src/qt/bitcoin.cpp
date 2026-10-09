@@ -222,6 +222,9 @@ void BitcoinApplication::setupPlatformStyle()
 
 BitcoinApplication::~BitcoinApplication()
 {
+    // In case requestShutdown did not run (an initialization that failed, the tests): no RPC call
+    // of the pages may still run once the node and the thread's parent (this) are gone.
+    NodeRpc::Stop();
     m_executor.reset();
 
     delete window;

@@ -21,6 +21,8 @@ const std::string HELP_REQUIRING_PASSPHRASE{"\nRequires wallet passphrase to be 
 
 bool CommittedTransactionRefused(CWallet& wallet, const CTransactionRef& tx)
 {
+    // With -walletbroadcast=0 CommitTransaction does not submit it: it is kept for the user to send.
+    if (!wallet.GetBroadcastTransactions()) return false;
     if (wallet.chain().isInMempool(tx->GetHash())) return false;
     // The wallet hears of the block that took it after the mempool dropped it.
     wallet.BlockUntilSyncedToCurrentChain();

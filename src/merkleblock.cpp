@@ -5,8 +5,6 @@
 
 #include <merkleblock.h>
 
-#include <chainparams.h>
-
 #include <consensus/consensus.h>
 #include <hash.h>
 #include <util/overflow.h>
@@ -152,13 +150,13 @@ CPartialMerkleTree::CPartialMerkleTree(const std::vector<Txid> &vTxid, const std
 
 CPartialMerkleTree::CPartialMerkleTree() : nTransactions(0), fBad(true) {}
 
-uint256 CPartialMerkleTree::ExtractMatches(std::vector<Txid> &vMatch, std::vector<unsigned int> &vnIndex) {
+uint256 CPartialMerkleTree::ExtractMatches(std::vector<Txid> &vMatch, std::vector<unsigned int> &vnIndex, uint32_t max_block_weight) {
     vMatch.clear();
     // An empty set will not work
     if (nTransactions == 0)
         return uint256();
     // check for excessively high numbers of transactions
-    if (nTransactions > std::max<uint32_t>(MAX_BLOCK_WEIGHT, Params().GetConsensus().max_block_weight) / MIN_TRANSACTION_WEIGHT)
+    if (nTransactions > std::max<uint32_t>(MAX_BLOCK_WEIGHT, max_block_weight) / MIN_TRANSACTION_WEIGHT)
         return uint256();
     // there can never be more hashes provided than one for every txid
     if (vHash.size() > nTransactions)

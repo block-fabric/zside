@@ -891,6 +891,16 @@ public:
      * too, is written with it. False, with `error` set, if the blocks cannot be disconnected.
      */
     bool RollBackFromInvalidBlock(CBlockIndex* invalid, drivechain::SidechainDB&& scdb, bilingual_str& error) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! The transactions of the blocks RollBackFromInvalidBlock took back (the most recently confirmed
+    //! first, as in DisconnectedBlockTransactions), for ReaddRolledBackTransactions.
+    std::vector<CTransactionRef> m_rolled_back_txs GUARDED_BY(::cs_main);
+    /**
+     * Return the transactions of the blocks taken back at startup by RollBackFromInvalidBlock to the
+     * mempool, as a reorg does (the mempool is not there yet when that runs). Called once the chain
+     * is activated, before the mempool is loaded from disk: its transactions that spend theirs then
+     * find their inputs.
+     */
+    void ReaddRolledBackTransactions() EXCLUSIVE_LOCKS_REQUIRED(!::cs_main);
 
     /** Name under which the sidechain database of this chainstate is stored. */
     std::string DrivechainStateName() const;

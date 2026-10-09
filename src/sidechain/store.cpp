@@ -19,6 +19,23 @@ bool StartsWith(std::span<const unsigned char> key, std::span<const unsigned cha
     return key.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), key.begin());
 }
 
+/** The snapshot of an overlay: a copy of its changes, over a snapshot of its base that it owns. */
+class OverlaySnapshot final : public StoreView
+{
+public:
+    explicit OverlaySnapshot(std::unique_ptr<StoreView> base) : m_base{std::move(base)}, m_overlay{*m_base} {}
+    std::optional<StoreBytes> Get(std::span<const unsigned char> key) const override { return m_overlay.Get(key); }
+    std::optional<std::pair<StoreBytes, StoreBytes>> Next(std::span<const unsigned char> from, std::span<const unsigned char> prefix) const override
+    {
+        return m_overlay.Next(from, prefix);
+    }
+    StoreOverlay& Overlay() { return m_overlay; }
+
+private:
+    const std::unique_ptr<StoreView> m_base;
+    StoreOverlay m_overlay;
+};
+
 } // namespace
 
 void StoreView::ForEach(std::span<const unsigned char> prefix, const std::function<bool(const StoreBytes&, const StoreBytes&)>& fn) const
@@ -63,6 +80,16 @@ std::optional<std::pair<StoreBytes, StoreBytes>> StoreOverlay::Next(std::span<co
         }
         ++change;
     }
+}
+
+std::unique_ptr<StoreView> StoreOverlay::Snapshot() const
+{
+    auto base{m_base->Snapshot()};
+    if (!base) return nullptr;
+    auto snapshot{std::make_unique<OverlaySnapshot>(std::move(base))};
+    snapshot->Overlay().m_changes = m_changes;
+    snapshot->Overlay().m_bytes = m_bytes;
+    return snapshot;
 }
 
 void StoreOverlay::Note(std::span<const unsigned char> key)

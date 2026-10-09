@@ -255,6 +255,63 @@ BOOST_AUTO_TEST_CASE(database_reads_from_below_the_prefix)
     BOOST_CHECK(!store.Next(B({0}), B({2})));
 }
 
+BOOST_AUTO_TEST_CASE(snapshots_do_not_change)
+{
+    // A snapshot of a database store under an overlay reads what the overlay read when it was made,
+    // Get and Next alike, whatever is written, flushed or wiped after.
+    CDBWrapper db{DBParams{.path = m_args.GetDataDirBase() / "store5", .cache_bytes = 1 << 20, .memory_only = true}};
+    DbStore store{db, B({'T', 0})};
+    db.Write(std::make_pair(uint8_t{'U'}, uint8_t{1}), uint8_t{1});
+    CDBBatch batch{db};
+    store.Write(batch, {{B({1, 1}), B({1})}, {B({1, 2}), B({2})}, {B({2, 1}), B({3})}});
+    db.WriteBatch(batch);
+    StoreOverlay cache{store};
+    cache.Put(B({1, 3}), B({4}));
+    cache.Erase(B({1, 2}));
+
+    const auto expected{All(cache)};
+    const uint256 hash{StoreHash(cache)};
+    const auto snapshot{cache.Snapshot()};
+    BOOST_REQUIRE(snapshot);
+    BOOST_CHECK(All(*snapshot) == expected);
+
+    // Changed in the overlay, then flushed to the database and changed there again.
+    cache.Put(B({1, 1}), B({9}));
+    cache.Put(B({3, 3}), B({9}));
+    cache.Erase(B({1, 3}));
+    CDBBatch flush{db};
+    store.Write(flush, cache.Changes());
+    db.WriteBatch(flush);
+    cache.Clear();
+    CDBBatch more{db};
+    store.Write(more, {{B({2, 1}), std::nullopt}, {B({0, 0}), B({7})}});
+    db.WriteBatch(more);
+    BOOST_CHECK(All(cache) != expected);
+
+    BOOST_CHECK(All(*snapshot) == expected);
+    BOOST_CHECK(StoreHash(*snapshot) == hash);
+    BOOST_CHECK(snapshot->Get(B({1, 1})) == B({1}));
+    BOOST_CHECK(snapshot->Get(B({1, 3})) == B({4}));
+    BOOST_CHECK(!snapshot->Get(B({1, 2})));
+    BOOST_CHECK(snapshot->Get(B({2, 1})) == B({3}));
+    BOOST_CHECK(!snapshot->Get(B({0, 0})));
+    BOOST_CHECK(!snapshot->Get(B({3, 3})));
+    // Reads in order and by key, mixed, from an overlay over the snapshot.
+    StoreOverlay over{*snapshot};
+    BOOST_CHECK(over.Next(B({1}), B({1}))->first == B({1, 1}));
+    BOOST_CHECK(over.Get(B({2, 1})) == B({3}));
+    BOOST_CHECK(over.Next(B({1, 2}), B({1}))->first == B({1, 3}));
+    BOOST_CHECK(!over.Next(B({1, 4}), B({1})));
+
+    // Wiped: the snapshot still reads what it had.
+    store.Wipe();
+    BOOST_CHECK(All(store).empty());
+    BOOST_CHECK(All(*snapshot) == expected);
+
+    EmptyStore empty;
+    BOOST_CHECK(empty.Snapshot() && All(*empty.Snapshot()).empty());
+}
+
 BOOST_AUTO_TEST_CASE(hash_with_entries)
 {
     EmptyStore empty;

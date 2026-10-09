@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chain.h>
+#include <chainparams.h>
 #include <clientversion.h>
 #include <core_io.h>
 #include <hash.h>
@@ -64,7 +65,7 @@ RPCMethod importprunedfunds()
     //Search partial merkle tree in proof for our transaction and index in valid block
     std::vector<Txid> vMatch;
     std::vector<unsigned int> vIndex;
-    if (merkleBlock.txn.ExtractMatches(vMatch, vIndex) != merkleBlock.header.hashMerkleRoot) {
+    if (merkleBlock.txn.ExtractMatches(vMatch, vIndex, Params().GetConsensus().max_block_weight) != merkleBlock.header.hashMerkleRoot) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Something wrong with merkleblock");
     }
 

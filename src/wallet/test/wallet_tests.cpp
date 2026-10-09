@@ -255,6 +255,29 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions_abort, TestChain100Setup)
     BOOST_CHECK(result.last_failed_block.IsNull());
 }
 
+//! Unloading a wallet aborts its rescan under way, which would otherwise hold the wallet until its end.
+BOOST_FIXTURE_TEST_CASE(remove_wallet_aborts_rescan, TestChain100Setup)
+{
+    m_args.ForceSetArg("-unsafesqlitesync", "1");
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    auto wallet = TestCreateWallet(context);
+    BOOST_REQUIRE(AddWallet(context, wallet));
+    const uint256 genesis_hash{WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain().Genesis()->GetBlockHash())};
+    {
+        WalletRescanReserver reserver(*wallet);
+        BOOST_REQUIRE(reserver.reserve());
+        BOOST_CHECK(!wallet->IsAbortingRescan());
+        BOOST_CHECK(RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt));
+        BOOST_CHECK(wallet->IsAbortingRescan());
+        const CWallet::ScanResult result{wallet->ScanForWalletTransactions(genesis_hash, /*start_height=*/0, /*max_height=*/{}, reserver, /*save_progress=*/false)};
+        BOOST_CHECK_EQUAL(result.status, CWallet::ScanResult::USER_ABORT);
+        BOOST_CHECK(!result.last_scanned_height);
+    }
+    TestUnloadWallet(std::move(wallet));
+}
+
 // This test verifies that wallet settings can be added and removed
 // concurrently, ensuring no race conditions occur during either process.
 BOOST_FIXTURE_TEST_CASE(write_wallet_settings_concurrently, TestingSetup)

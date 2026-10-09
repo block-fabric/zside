@@ -19,7 +19,11 @@
 #include <sidechain/mainchain.h>
 #include <sidechain/state.h>
 #include <univalue.h>
+#include <util/check.h>
 #include <validation.h>
+
+#include <memory>
+#include <set>
 
 using node::NodeContext;
 using sidechain::Follower;
@@ -32,7 +36,31 @@ Follower& EnsureFollower(const NodeContext& node)
     return *node.follower;
 }
 
-UniValue WithdrawalToJSON(const sidechain::Withdrawal& withdrawal, const sidechain::State& side)
+/**
+ * The sidechain state as of the tip, taken under cs_main and read without it: the RPCs that read
+ * all of it do not hold block validation back for as long as they take. The copy is of the changes
+ * not flushed yet; the database is read as it was when it was taken (sidechain::StoreView::Snapshot).
+ */
+struct SideSnapshot {
+    std::unique_ptr<sidechain::StoreView> view;
+    uint256 tip;
+    int height;
+
+    sidechain::State State() const { return sidechain::State{*view}; }
+};
+
+SideSnapshot TakeSideSnapshot(ChainstateManager& chainman)
+{
+    LOCK(::cs_main);
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    return SideSnapshot{
+        .view = Assert(chainstate.SideCache().Snapshot()),
+        .tip = chainstate.m_chain.Tip()->GetBlockHash(),
+        .height = chainstate.m_chain.Height(),
+    };
+}
+
+UniValue WithdrawalToJSON(const sidechain::Withdrawal& withdrawal, bool bundled)
 {
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("txid", withdrawal.outpoint.hash.GetHex());
@@ -42,7 +70,7 @@ UniValue WithdrawalToJSON(const sidechain::Withdrawal& withdrawal, const sidecha
     obj.pushKV("mainchainscript", HexStr(withdrawal.main_script));
     obj.pushKV("refundaddress", EncodeDestination(WitnessV0KeyHash{withdrawal.refund_keyhash}));
     obj.pushKV("height", withdrawal.height);
-    obj.pushKV("status", side.InBundle(withdrawal.outpoint) ? "bundled" : "waiting");
+    obj.pushKV("status", bundled ? "bundled" : "waiting");
     return obj;
 }
 
@@ -324,11 +352,14 @@ RPCMethod listwithdrawals()
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
-    LOCK(::cs_main);
-    const sidechain::State side{chainman.ActiveChainstate().SideState()};
+    const SideSnapshot snapshot{TakeSideSnapshot(chainman)};
+    const sidechain::State side{snapshot.State()};
+    // The pending bundle, read once rather than for each withdrawal.
+    std::set<COutPoint> bundled;
+    if (const auto bundle{side.Bundle()}) bundled.insert(bundle->withdrawals.begin(), bundle->withdrawals.end());
     UniValue result(UniValue::VARR);
     side.ForEachWithdrawal([&](const sidechain::Withdrawal& withdrawal) {
-        result.push_back(WithdrawalToJSON(withdrawal, side));
+        result.push_back(WithdrawalToJSON(withdrawal, bundled.contains(withdrawal.outpoint)));
         return true;
     });
     return result;
@@ -359,8 +390,8 @@ RPCMethod getwithdrawalbundle()
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
-    LOCK(::cs_main);
-    const sidechain::State side{chainman.ActiveChainstate().SideState()};
+    const SideSnapshot snapshot{TakeSideSnapshot(chainman)};
+    const sidechain::State side{snapshot.State()};
     UniValue result(UniValue::VOBJ);
     std::optional<CMutableTransaction> tx;
     std::vector<COutPoint> withdrawals;
@@ -369,7 +400,7 @@ RPCMethod getwithdrawalbundle()
         tx = side.BundleTx();
         withdrawals = pending->withdrawals;
         result.pushKV("height", pending->height);
-    } else if ((tx = side.NextBundle(chainman.ActiveHeight() + 1, chainman.ActiveChain().Tip()->GetBlockHash(), chainman.GetConsensus().sidechain, &withdrawals))) {
+    } else if ((tx = side.NextBundle(snapshot.height + 1, snapshot.tip, chainman.GetConsensus().sidechain, &withdrawals))) {
         result.pushKV("status", "next");
     } else {
         result.pushKV("status", "none");
@@ -423,9 +454,8 @@ RPCMethod getsidechainstate()
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
-    LOCK(::cs_main);
-    Chainstate& chainstate{chainman.ActiveChainstate()};
-    const sidechain::StoreView& view{chainstate.SideCache()};
+    const SideSnapshot snapshot{TakeSideSnapshot(chainman)};
+    const sidechain::StoreView& view{*snapshot.view};
     std::map<unsigned char, uint64_t> tables;
     uint64_t entries{0};
     // Counted on the way, in the one pass over the state that the hash takes.
@@ -434,8 +464,8 @@ RPCMethod getsidechainstate()
         ++entries;
     })};
     UniValue result(UniValue::VOBJ);
-    result.pushKV("bestblock", chainstate.m_chain.Tip()->GetBlockHash().GetHex());
-    result.pushKV("height", chainstate.m_chain.Height());
+    result.pushKV("bestblock", snapshot.tip.GetHex());
+    result.pushKV("height", snapshot.height);
     result.pushKV("hash", hash.GetHex());
     result.pushKV("entries", entries);
     UniValue by_table(UniValue::VOBJ);

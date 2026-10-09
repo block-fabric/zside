@@ -5396,24 +5396,33 @@ bool Chainstate::RollBackFromInvalidBlock(CBlockIndex* invalid, drivechain::Side
                                                   "Restart with -reindex-chainstate (with -reindex on a pruned node)"),
                                                 invalid->GetBlockHash().ToString(), invalid->nHeight)};
     // Like DisconnectTip without the sidechain database (already at the parent, the store of the
-    // sidechain state with it), the mempool (empty at startup) or notifications (nothing listens
-    // yet: wallets and indexes catch up from their own best block).
+    // sidechain state with it), the mempool (not loaded yet: the transactions of the blocks go to it
+    // later, ReaddRolledBackTransactions) or notifications (nothing listens yet: wallets and indexes
+    // catch up from their own best block).
     // All in one view: if a block cannot be disconnected, nothing changed.
     CCoinsViewCache view(&CoinsTip());
+    // Bounded like the pool of a reorg: past the bound, the most recently confirmed are dropped.
+    DisconnectedBlockTransactions disconnected{MAX_DISCONNECTED_TX_POOL_BYTES};
     for (CBlockIndex* pindex{m_chain.Tip()}; pindex != invalid->pprev; pindex = pindex->pprev) {
         CBlock block;
         if (!(pindex->nStatus & BLOCK_HAVE_DATA) || !(pindex->nStatus & BLOCK_HAVE_UNDO) || !m_blockman.ReadBlock(block, *pindex)) {
             LogError("%s: no block or undo data for block %s at height %d", __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
             error = reindex_error;
+            disconnected.clear();
             return false;
         }
         if (DisconnectBlock(block, pindex, view) != DISCONNECT_OK) {
             LogError("%s: failed to disconnect block %s at height %d", __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
             error = reindex_error;
+            disconnected.clear();
             return false;
         }
+        (void)disconnected.AddTransactionsFromBlock(block.vtx);
     }
     view.Flush(/*reallocate_cache=*/false);
+    for (CTransactionRef& tx : disconnected.take()) {
+        if (!tx->IsCoinBase()) m_rolled_back_txs.push_back(std::move(tx));
+    }
     m_chain.SetTip(*invalid->pprev);
     invalid->nStatus |= BLOCK_FAILED_VALID;
     m_blockman.m_dirty_blockindex.insert(invalid);
@@ -5425,6 +5434,23 @@ bool Chainstate::RollBackFromInvalidBlock(CBlockIndex* invalid, drivechain::Side
     // changes) together.
     ForceFlushStateToDisk();
     return true;
+}
+
+void Chainstate::ReaddRolledBackTransactions()
+{
+    LOCK(::cs_main);
+    if (m_rolled_back_txs.empty()) return;
+    const std::vector<CTransactionRef> txs{std::exchange(m_rolled_back_txs, {})};
+    if (!m_mempool) return;
+    LOCK(m_mempool->cs);
+    // In the order of DisconnectedBlockTransactions (AddTransactionsFromBlock takes a block's
+    // transactions last first): MaybeUpdateMempoolForReorg adds the earliest confirmed first.
+    DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_BYTES};
+    (void)disconnectpool.AddTransactionsFromBlock({txs.rbegin(), txs.rend()});
+    const size_t before{m_mempool->size()};
+    // Those in a block connected since (another branch), or that no longer pass, are left out.
+    MaybeUpdateMempoolForReorg(disconnectpool, /*fAddToMempool=*/true);
+    LogInfo("%u of the %u transactions of the blocks taken back at startup returned to the mempool", m_mempool->size() - before, txs.size());
 }
 
 bool Chainstate::PrepareDrivechainDB(const CBlockIndex* rebuild_from, bilingual_str& error)

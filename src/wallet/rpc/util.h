@@ -51,7 +51,8 @@ void EnsureWalletIsUnlocked(const CWallet&);
  * Whether a transaction the wallet just committed was refused: it is neither in the mempool nor
  * in a block of the active chain. A block may have taken it from the mempool between the commit
  * and the check: that one is kept, not reported as a failure (abandoning it would make a retry
- * pay twice). Waits for the wallet to catch up with the chain; call it without cs_wallet.
+ * pay twice). Waits for the wallet to catch up with the chain; call it without cs_wallet. Never
+ * refused when the wallet does not broadcast (-walletbroadcast=0): it was not submitted.
  */
 bool CommittedTransactionRefused(CWallet& wallet, const CTransactionRef& tx) EXCLUSIVE_LOCKS_REQUIRED(!wallet.cs_wallet);
 WalletContext& EnsureWalletContext(const std::any& context);

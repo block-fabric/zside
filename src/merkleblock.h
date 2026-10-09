@@ -7,11 +7,13 @@
 #define BITCOIN_MERKLEBLOCK_H
 
 #include <common/bloom.h>
+#include <consensus/consensus.h>
 #include <primitives/block.h>
 #include <primitives/transaction_identifier.h>
 #include <serialize.h>
 #include <uint256.h>
 
+#include <cstdint>
 #include <set>
 #include <vector>
 
@@ -106,8 +108,11 @@ public:
      * extract the matching txid's represented by this partial merkle tree
      * and their respective indices within the partial tree.
      * returns the merkle root, or 0 in case of failure
+     * max_block_weight is the chain's maximum block weight (consensus
+     * max_block_weight), which bounds the number of transactions a proof may
+     * claim; it never goes below Bitcoin's MAX_BLOCK_WEIGHT.
      */
-    uint256 ExtractMatches(std::vector<Txid> &vMatch, std::vector<unsigned int> &vnIndex);
+    uint256 ExtractMatches(std::vector<Txid> &vMatch, std::vector<unsigned int> &vnIndex, uint32_t max_block_weight = MAX_BLOCK_WEIGHT);
 
     /** Get number of transactions the merkle proof is indicating for cross-reference with
      * local blockchain knowledge.
