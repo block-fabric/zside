@@ -339,14 +339,14 @@ public:
         };
 
         // This chain is a sidechain of the Chains testnet.
-        MakeSidechain({.slot = 6, .genesis_message = "zSide testnet", .genesis_time = 1791302400,
+        MakeSidechain({.slot = 6, .genesis_message = "zSide testnet", .genesis_time = 1791513282,
                        .message_start = {0x7a, 0x73, 0x64, 0x02}, .default_port = 19455, .bech32_hrp = "tzs"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
         // The test network ran without it until then; see SidechainParams.
         consensus.sidechain.single_bundle_height = 2300;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
-        consensus.sidechain.main_activation_height = 4900;
+        consensus.sidechain.main_activation_height = 0; // set after the slot activates on the restarted test network
         consensus.sidechain.audit2_height = 1788; // audits 2-4 on the test network, a few blocks after the deploy
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
