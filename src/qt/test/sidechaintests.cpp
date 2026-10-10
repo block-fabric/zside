@@ -367,22 +367,22 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     QCOMPARE(Theme::SavedFontSizeAdjustment(), Theme::DEFAULT_FONT_SIZE_ADJUSTMENT);
     Theme::SaveFont({}, 0);
     const QPalette original_palette{QApplication::palette()};
-    QCOMPARE(Theme::Available().size(), 18);
-    Theme::Apply("midnight");
-    QCOMPARE(QApplication::palette().color(QPalette::Window).name(), QString("#0d1117"));
+    QCOMPARE(Theme::Available().size(), 6);
+    Theme::Apply("ocean");
+    QCOMPARE(QApplication::palette().color(QPalette::Window).name(), QString("#06232e"));
     multisig.findChild<QTabWidget*>("multisigTabs")->setCurrentIndex(2);
     QApplication::processEvents();
-    SaveScreenshot(multisig, "theme-midnight");
-    Theme::Apply("solar");
+    SaveScreenshot(multisig, "theme-ocean");
+    Theme::Apply("matrix");
     QApplication::processEvents();
-    SaveScreenshot(explorer, "theme-gold");
+    SaveScreenshot(explorer, "theme-matrix");
     Theme::Apply("system");
     QCOMPARE(QApplication::palette().color(QPalette::Window), original_palette.color(QPalette::Window));
     QVERIFY(qApp->styleSheet().isEmpty());
 
     // Looks: the colours of a theme with a font, picked together
     const QList<Theme::Info> looks{Theme::Looks()};
-    QCOMPARE(looks.size(), 18);
+    QCOMPARE(looks.size(), 6);
     QCOMPARE(looks.at(0).id, QString("system"));
     int look_changes{0};
     const auto counting{QObject::connect(Theme::Changes(), &Theme::Signals::changed, [&] { ++look_changes; })};
@@ -394,13 +394,13 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     // The font of a look is one this computer has, or the one of the desktop.
     QVERIFY(Theme::SavedFontFamily().isEmpty() || QFontDatabase::families().contains(Theme::SavedFontFamily()));
     // Other colours with the same font are a combination of one's own, unless the fonts of both looks are the same here.
-    Theme::Save("rose");
+    Theme::Save("light");
     QCOMPARE(look_changes, 2);
     // The size of the text is set apart from the look, and a look leaves it as it is.
-    Theme::SaveLook("rose");
-    QCOMPARE(Theme::SavedLook(), QString("rose"));
+    Theme::SaveLook("light");
+    QCOMPARE(Theme::SavedLook(), QString("light"));
     Theme::SaveFont(Theme::SavedFontFamily(), 5);
-    QCOMPARE(Theme::SavedLook(), QString("rose"));
+    QCOMPARE(Theme::SavedLook(), QString("light"));
     Theme::SaveLook("matrix");
     QCOMPARE(Theme::SavedFontSizeAdjustment(), 5);
     Theme::SaveFont(Theme::SavedFontFamily(), 0);
@@ -1062,11 +1062,11 @@ void TestMoreWindows(TestChain100Setup& test, ClientModel& client_model, WalletM
         options.setModel(&options_model);
         options.setCurrentTab(OptionsDialog::TAB_DISPLAY);
         auto* theme{options.findChild<QComboBox*>("theme")};
-        theme->setCurrentIndex(theme->findData("midnight"));
+        theme->setCurrentIndex(theme->findData("ocean"));
         options.findChild<QSpinBox*>("fontSize")->setValue(3);
         options.findChild<QCheckBox*>("themedFrame")->setChecked(!frame);
         WithMessageBoxes(QMessageBox::Ok, [&] { options.findChild<QPushButton*>("okButton")->click(); });
-        QCOMPARE(Theme::Saved(), QString("midnight"));
+        QCOMPARE(Theme::Saved(), QString("ocean"));
         QCOMPARE(Theme::SavedFontSizeAdjustment(), 3);
         QCOMPARE(Theme::SavedFrame(), !frame);
 

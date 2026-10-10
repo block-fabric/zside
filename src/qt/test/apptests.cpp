@@ -127,9 +127,9 @@ void TestWindowMenus(BitcoinGUI* window)
     QVERIFY(themes);
     Q_EMIT themes->aboutToShow();
     for (QAction* look : themes->actions()) {
-        if (look->data().toString() == "midnight") look->trigger();
+        if (look->data().toString() == "ocean") look->trigger();
     }
-    QCOMPARE(Theme::SavedLook(), QString("midnight"));
+    QCOMPARE(Theme::SavedLook(), QString("ocean"));
     const int size{Theme::SavedFontSizeAdjustment()};
     action("This &Node", "Increase font size")->trigger();
     QCOMPARE(Theme::SavedFontSizeAdjustment(), size + 1);
@@ -138,8 +138,8 @@ void TestWindowMenus(BitcoinGUI* window)
 #ifdef ENABLE_WALLET
     auto* looks{window->findChild<QComboBox*>("lookSelector")};
     QVERIFY(looks);
-    Q_EMIT looks->activated(looks->findData("rose"));
-    QCOMPARE(Theme::SavedLook(), QString("rose"));
+    Q_EMIT looks->activated(looks->findData("light"));
+    QCOMPARE(Theme::SavedLook(), QString("light"));
     window->findChild<QToolButton*>("textLarger")->click();
     QCOMPARE(Theme::SavedFontSizeAdjustment(), size + 1);
     window->findChild<QToolButton*>("textSmaller")->click();
