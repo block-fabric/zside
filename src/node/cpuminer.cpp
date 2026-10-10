@@ -34,6 +34,8 @@ constexpr auto TEMPLATE_LIFETIME{20s};
 constexpr auto MIN_BLOCK_INTERVAL{2500ms};
 } // namespace
 
+CpuMiner::CpuMiner(NodeContext& node) : m_node{node}, m_template_lifetime{TEMPLATE_LIFETIME} {}
+
 bool CpuMiner::Start(int threads, const CScript& coinbase_output_script, std::string& error)
 {
     if (threads < 1) {
@@ -88,6 +90,7 @@ CpuMiner::Stats CpuMiner::GetStats()
     stats.hashes = m_hashes;
     stats.blocks_found = m_blocks_found;
     stats.blocks_rejected = m_blocks_rejected;
+    stats.templates = m_templates;
     stats.coinbase_output_script = m_coinbase_output_script;
     if (stats.running) {
         const auto now{SteadyClock::now()};
@@ -138,6 +141,8 @@ void CpuMiner::Run(int thread, int threads, CScript coinbase_output_script)
         arith_uint256 target;
         target.SetCompact(block.nBits, &negative, &overflow);
         if (negative || overflow || target == 0) return;
+        if (m_max_target && target > *m_max_target) target = *m_max_target;
+        ++m_templates;
 
         const auto template_time{SteadyClock::now()};
         // Threads work on the same template, so each takes its share of the nonces.
@@ -159,7 +164,7 @@ void CpuMiner::Run(int thread, int threads, CScript coinbase_output_script)
             }
             m_hashes += count;
             if (found || stopped()) break;
-            if (SteadyClock::now() - template_time > TEMPLATE_LIFETIME) break;
+            if (SteadyClock::now() - template_time > m_template_lifetime) break;
             if (WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->GetBlockHash()) != block.hashPrevBlock) break;
         }
         if (!found) continue;

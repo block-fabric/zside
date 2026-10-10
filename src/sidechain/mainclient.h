@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace sidechain {
 
@@ -20,7 +21,10 @@ class MainClientError : public std::runtime_error
 public:
     //! Whether the node was reached and refused the call; if not, the node could not be reached.
     const bool rpc_error;
-    explicit MainClientError(const std::string& message, bool rpc_error_in) : std::runtime_error{message}, rpc_error{rpc_error_in} {}
+    //! The message of the node's error, as it gave it, if it refused the call.
+    const std::string rpc_message;
+    explicit MainClientError(const std::string& message, bool rpc_error_in, std::string rpc_message_in = {})
+        : std::runtime_error{message}, rpc_error{rpc_error_in}, rpc_message{std::move(rpc_message_in)} {}
 };
 
 /** JSON-RPC client for the mainchain node that this sidechain node follows. */

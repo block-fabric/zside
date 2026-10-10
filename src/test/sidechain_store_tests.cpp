@@ -351,4 +351,27 @@ BOOST_AUTO_TEST_CASE(table_ids_and_short_keys)
     BOOST_CHECK_THROW(table.ForEach(store, [](const uint32_t&, const uint32_t&) { return true; }), std::ios_base::failure);
 }
 
+BOOST_AUTO_TEST_CASE(small_tables_and_views)
+{
+    // A table with keys of one byte and values of four, read in order, and a walk that stops early.
+    EmptyStore empty;
+    StoreOverlay store{empty};
+    const Table<uint8_t, uint32_t> table{0xf3};
+    for (const uint8_t key : {3, 1, 2}) table.Put(store, key, uint32_t{key} * 1000);
+    std::vector<std::pair<uint8_t, uint32_t>> seen;
+    table.ForEach(store, [&](const uint8_t& key, const uint32_t& value) {
+        seen.emplace_back(key, value);
+        return seen.size() < 2;
+    });
+    BOOST_CHECK((seen == std::vector<std::pair<uint8_t, uint32_t>>{{1, 1000}, {2, 2000}}));
+    BOOST_CHECK(table.Get(store, uint8_t{3}) == uint32_t{3000});
+    BOOST_CHECK(!table.Get(store, uint8_t{4}));
+    // A view of its own that cannot be read without its lock makes no snapshot.
+    struct Locked : EmptyStore {
+        std::unique_ptr<StoreView> Snapshot() const override { return StoreView::Snapshot(); }
+    } locked;
+    BOOST_CHECK(!locked.Snapshot());
+    BOOST_CHECK(empty.Snapshot());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

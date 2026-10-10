@@ -119,9 +119,6 @@ const std::vector<std::string> CHECKLEVEL_DOC {
  *  noticeably interfere with the pruning mechanism.
  * */
 static constexpr int PRUNE_LOCK_BUFFER{10};
-/** Largest BMM request or deposit the mempool takes (see PreChecks): ten times a TRUC child,
- *  room for a deposit paid from a hundred and more inputs. */
-static constexpr int64_t MAX_DRIVECHAIN_TX_VSIZE{10 * TRUC_CHILD_MAX_VSIZE};
 
 // Return whether the completed full flush should compact chainstate
 static bool ShouldCompactChainstate(bool in_ibd)
@@ -5326,7 +5323,7 @@ void Chainstate::EraseDrivechainUndo()
     for (int height{std::max(0, m_drivechain_undo_erased_height + 1)}; height <= last; ++height) {
         hashes.push_back(m_chain[height]->GetBlockHash());
         // In batches: after a long initial sync without a flush there can be many.
-        if (hashes.size() >= 10'000) {
+        if (hashes.size() >= m_drivechain_undo_erase_batch) {
             m_blockman.m_drivechain_db->EraseBlockUndo(hashes);
             hashes.clear();
         }
@@ -6720,6 +6717,10 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         // before any sidechain, takes them.
         if (GetConsensus().drivechain.max_sidechains > 0 && GetParams().GetChainType() != ChainType::REGTEST) {
             return util::Error{Untranslated("UTXO snapshots are not supported with drivechains: the snapshot does not hold the drivechain state")};
+        }
+        // Nor does it hold the state of a sidechain (its withdrawals and the store of its own rules).
+        if (GetConsensus().sidechain.enabled && GetParams().GetChainType() != ChainType::REGTEST) {
+            return util::Error{Untranslated("UTXO snapshots are not supported on a sidechain: the snapshot does not hold the sidechain state")};
         }
         if (!GetParams().AssumeutxoForBlockhash(base_blockhash).has_value()) {
             auto available_heights = GetParams().GetAvailableSnapshotHeights();

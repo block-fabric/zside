@@ -367,4 +367,68 @@ BOOST_AUTO_TEST_CASE(asert_slow_bootstrap)
     BOOST_CHECK_EQUAL(blocks[anchor_height].nBits, limit_bits);
 }
 
+/* aserti3: more than sixteen half-lives behind schedule, a small target is shifted left whole, without reaching the limit. */
+BOOST_AUTO_TEST_CASE(asert_large_shift)
+{
+    const arith_uint256 pow_limit{UintToArith256(uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"})};
+    const int64_t spacing{60}, half_life{7200};
+    // 20 half-lives: 2^20 times the target, exactly (the fractional part is zero).
+    BOOST_CHECK(CalculateASERT(arith_uint256{1}, spacing, spacing + 20 * half_life, 0, pow_limit, half_life) == arith_uint256{1} << 20);
+    BOOST_CHECK(CalculateASERT(arith_uint256{3}, spacing, spacing + 17 * half_life, 0, pow_limit, half_life) == arith_uint256{3} << 17);
+    // Half a half-life more: within the error of the cubic approximation of the square root of two.
+    const arith_uint256 half{CalculateASERT(arith_uint256{1} << 10, spacing, spacing + 20 * half_life + half_life / 2, 0, pow_limit, half_life)};
+    BOOST_CHECK(half > (arith_uint256{1} << 30) * 14140 / 10000);
+    BOOST_CHECK(half < (arith_uint256{1} << 30) * 14145 / 10000);
+    // Shifted past 256 bits: the limit.
+    BOOST_CHECK(CalculateASERT(pow_limit >> 8, spacing, spacing + 300 * half_life, 0, pow_limit, half_life) == pow_limit);
+}
+
+/* aserti3 on test networks: a block more than two target spacings after its parent may be mined at the limit; others follow aserti3. */
+BOOST_AUTO_TEST_CASE(asert_min_difficulty_blocks)
+{
+    const auto chain_params{CreateChainParams(*m_node.args, ChainType::TESTNET)};
+    Consensus::Params params{chain_params->GetConsensus()};
+    if (params.sidechain.enabled) {
+        // The blocks of a sidechain carry no work of their own (see CChainParams::MakeSidechain): the
+        // rule is checked with the test network's parameters as the mainchain has them.
+        BOOST_REQUIRE(!params.fPowAllowMinDifficultyBlocks && params.fPowNoRetargeting);
+        params.fPowAllowMinDifficultyBlocks = true;
+        params.fPowNoRetargeting = false;
+    }
+    BOOST_REQUIRE(params.fPowAllowMinDifficultyBlocks);
+    BOOST_REQUIRE(params.asert_half_life > 0);
+    const int anchor_height{params.asert_anchor_height};
+    const uint32_t limit_bits{UintToArith256(params.powLimit).GetCompact()};
+    const int64_t spacing{params.nPowTargetSpacing};
+
+    std::vector<CBlockIndex> blocks(anchor_height + 10);
+    blocks[0].nTime = 1790879567;
+    blocks[0].nBits = limit_bits;
+    // Bootstrap blocks four times faster than the target: the anchor is harder than the limit.
+    for (int h{1}; h <= anchor_height + 1; ++h) {
+        CBlockHeader header;
+        blocks[h].pprev = &blocks[h - 1];
+        blocks[h].nHeight = h;
+        blocks[h].nTime = blocks[h - 1].nTime + (h == 1 ? 1000 : spacing / 4);
+        header.nTime = blocks[h].nTime;
+        blocks[h].nBits = GetNextWorkRequired(&blocks[h - 1], &header, params);
+        blocks[h].BuildSkip();
+    }
+    const CBlockIndex& last{blocks[anchor_height + 1]};
+    BOOST_REQUIRE(last.nBits != limit_bits);
+    CBlockHeader header;
+    // Exactly two spacings after its parent: aserti3.
+    header.nTime = last.nTime + 2 * spacing;
+    const uint32_t asert_bits{GetNextWorkRequired(&last, &header, params)};
+    BOOST_CHECK(asert_bits != limit_bits);
+    // One second more: the limit.
+    header.nTime = last.nTime + 2 * spacing + 1;
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&last, &header, params), limit_bits);
+
+    // Not on the main chain.
+    const auto main_params{CreateChainParams(*m_node.args, ChainType::MAIN)};
+    BOOST_REQUIRE(!main_params->GetConsensus().fPowAllowMinDifficultyBlocks);
+    BOOST_CHECK(GetNextWorkRequired(&last, &header, main_params->GetConsensus()) != limit_bits);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -139,12 +139,6 @@ bool MinerState::IsAcked(SidechainId slot, const uint256& proposal_hash) const
     return m_acks.contains({slot, proposal_hash});
 }
 
-std::set<std::pair<SidechainId, uint256>> MinerState::GetAcks() const
-{
-    LOCK(m_mutex);
-    return m_acks;
-}
-
 bool MinerState::Vouch(SidechainId slot, const std::optional<uint256>& hash)
 {
     LOCK(m_mutex);
@@ -205,17 +199,6 @@ void MinerState::ClearVote(SidechainId slot)
     if (m_votes.erase(slot) > 0) Save();
 }
 
-Vote MinerState::GetVote(SidechainId slot) const
-{
-    LOCK(m_mutex);
-    const auto it{m_votes.find(slot)};
-    if (it != m_votes.end()) return it->second;
-    Vote vote;
-    // Which bundle the default upvotes depends on the bundles that are pending: see ResolveVote.
-    vote.type = m_default_vote;
-    return vote;
-}
-
 Vote MinerState::ResolveVote(SidechainId slot, const std::vector<Bundle>& pending) const
 {
     LOCK(m_mutex);
@@ -273,12 +256,6 @@ Vote MinerState::ResolveVote(SidechainId slot, const std::vector<Bundle>& pendin
         vote.type = Vote::Type::ABSTAIN;
     }
     return vote;
-}
-
-std::map<SidechainId, Vote> MinerState::GetVotes() const
-{
-    LOCK(m_mutex);
-    return m_votes;
 }
 
 void MinerState::SetDefaultVote(Vote::Type type)

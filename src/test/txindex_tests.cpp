@@ -21,7 +21,9 @@
 #include <script/script.h>
 #include <streams.h>
 #include <sync.h>
+#include <test/util/logging.h>
 #include <test/util/setup_common.h>
+#include <tinyformat.h>
 #include <util/byte_units.h>
 #include <util/check.h>
 #include <util/strencodings.h>
@@ -222,6 +224,75 @@ BOOST_FIXTURE_TEST_CASE(txindex_collision_scan_path, TestChain100Setup)
     db.Erase(txindex::DBKey{fake_prefix, fake_pos});
     db.Write(txindex::LegacyTxKey(fake_txid), fake_physical);
     BOOST_CHECK(!txindex.FindTx(fake_txid));
+
+    txindex.Stop();
+}
+
+BOOST_FIXTURE_TEST_CASE(txindex_unusual_entries, TestChain100Setup)
+{
+    // Entries a lookup has to get past: of a position too far into a large block to be stored (the
+    // block is read whole), of a block sequence or a block the node does not know, of a block whose
+    // data is gone or cannot be read.
+    TxIndex txindex(interfaces::MakeChain(m_node), /*n_cache_size=*/1_MiB, /*f_memory=*/false);
+    BOOST_REQUIRE(txindex.Init());
+    txindex.Sync();
+    CDBWrapper& db{TxIndexTest::GetDB(txindex)};
+    const SipHasher13UJ hasher{ReadHasher(db)};
+
+    const Txid txid{m_coinbase_txns[5]->GetHash()};
+    const auto prefix{txindex::CreateKeyPrefix(hasher, txid)};
+    const auto bucket{BucketPositions(db, prefix)};
+    BOOST_REQUIRE_EQUAL(bucket.size(), 1U);
+    const txindex::BlockTxPosition real{bucket.front()};
+    const uint256 block_hash{LookupTx(txindex, txid)};
+
+    // The position is not known: the block is read whole.
+    db.Erase(txindex::DBKey{prefix, real});
+    db.Write(txindex::DBKey{prefix, {real.block_seq, txindex::BlockTxPosition::OFFSET_UNKNOWN}}, txindex::EMPTY_VALUE);
+    BOOST_CHECK(LookupTx(txindex, txid) == block_hash);
+    // Read whole, a block without the transaction is passed over. (Entries of later blocks are tried first.)
+    const Txid later{m_coinbase_txns[50]->GetHash()};
+    const auto later_bucket{BucketPositions(db, txindex::CreateKeyPrefix(hasher, later))};
+    BOOST_REQUIRE_EQUAL(later_bucket.size(), 1U);
+    const uint32_t later_seq{later_bucket.front().block_seq};
+    BOOST_REQUIRE_GT(later_seq, real.block_seq);
+    db.Write(txindex::DBKey{prefix, {later_seq, txindex::BlockTxPosition::OFFSET_UNKNOWN}}, txindex::EMPTY_VALUE);
+    BOOST_CHECK(LookupTx(txindex, txid) == block_hash);
+    db.Erase(txindex::DBKey{prefix, {later_seq, txindex::BlockTxPosition::OFFSET_UNKNOWN}});
+
+    // A block sequence number nobody assigned, and one of a block the node does not know.
+    constexpr uint32_t UNASSIGNED{1'000'000}, UNKNOWN_BLOCK{1'000'001};
+    db.Write(txindex::DBKey{prefix, {UNASSIGNED, 100}}, txindex::EMPTY_VALUE);
+    db.Write(txindex::BlockSeqKey{UNKNOWN_BLOCK}, uint256{0xee});
+    db.Write(txindex::DBKey{prefix, {UNKNOWN_BLOCK, 100}}, txindex::EMPTY_VALUE);
+    {
+        ASSERT_DEBUG_LOG(strprintf("Block sequence %u not found for txid %s", UNASSIGNED, txid.ToString()));
+        ASSERT_DEBUG_LOG(strprintf("Block index entry %s not found for txid %s", uint256{0xee}.ToString(), txid.ToString()));
+        BOOST_CHECK(LookupTx(txindex, txid) == block_hash);
+    }
+
+    // A position past the end of the block file: the read fails, and the entry is passed over.
+    db.Write(txindex::DBKey{prefix, {later_seq, txindex::BlockTxPosition::OFFSET_UNKNOWN - 1}}, txindex::EMPTY_VALUE);
+    {
+        ASSERT_DEBUG_LOG("Deserialize or I/O error");
+        BOOST_CHECK(LookupTx(txindex, txid) == block_hash);
+    }
+
+    CBlockIndex* block_index{WITH_LOCK(cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(block_hash))};
+    BOOST_REQUIRE(block_index);
+    // A block file that cannot be opened.
+    const int file{WITH_LOCK(cs_main, return block_index->nFile)};
+    WITH_LOCK(cs_main, block_index->nFile = 99'999);
+    {
+        ASSERT_DEBUG_LOG(strprintf("OpenBlockFile failed for txid %s", txid.ToString()));
+        BOOST_CHECK(!txindex.FindTx(txid));
+    }
+    WITH_LOCK(cs_main, block_index->nFile = file);
+    // A block whose data is gone (pruned): not found.
+    WITH_LOCK(cs_main, block_index->nStatus &= ~BLOCK_HAVE_DATA);
+    BOOST_CHECK(!txindex.FindTx(txid));
+    WITH_LOCK(cs_main, block_index->nStatus |= BLOCK_HAVE_DATA);
+    BOOST_CHECK(LookupTx(txindex, txid) == block_hash);
 
     txindex.Stop();
 }

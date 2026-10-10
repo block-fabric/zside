@@ -125,6 +125,10 @@ public:
     //! The mempool drops a request that is not in the next block, and every transaction spending
     //! its outputs with it: only another BMM request (which expires with it anyway) should spend them.
     bool m_allow_bmm_request_parents{true};
+    //! A transaction in the mempool that the one being made replaces (a BMM request of the same
+    //! sidechain): neither its outputs nor those of the unconfirmed transactions spending them can
+    //! be spent, the replacement taking them out of the mempool.
+    std::optional<Txid> m_replaced_txid;
 
     CCoinControl();
 

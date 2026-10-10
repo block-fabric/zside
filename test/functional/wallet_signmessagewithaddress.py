@@ -6,6 +6,7 @@
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    assert_equal,
     assert_raises_rpc_error,
 )
 
@@ -40,6 +41,22 @@ class SignMessagesWithAddressTest(BitcoinTestFramework):
             assert not self.nodes[0].verifymessage(typed_address, typed_signature, message + '!')
             assert not self.nodes[0].verifymessage(self.nodes[0].getnewaddress(address_type=address_type), typed_signature, message)
             assert not self.nodes[0].verifymessage(typed_address, signature, message)
+        self.log.info('test signing with the key of a P2TR address the wallet does not have')
+        self.nodes[0].createwallet("other")
+        other = self.nodes[0].get_wallet_rpc("other")
+        wallet = self.nodes[0].get_wallet_rpc(self.default_wallet_name)
+        foreign = other.getnewaddress(address_type='bech32m')
+        assert_raises_rpc_error(-4, "Private key not available", wallet.signmessage, foreign, message)
+        self.log.info('test signing with a P2TR address of a wallet without private keys')
+        self.nodes[0].createwallet("watch", disable_private_keys=True)
+        watch = self.nodes[0].get_wallet_rpc("watch")
+        assert_equal(watch.importdescriptors([{"desc": other.getaddressinfo(foreign)["desc"], "timestamp": "now"}])[0]["success"], True)
+        assert_equal(watch.getaddressinfo(foreign)["ismine"], True)
+        assert_raises_rpc_error(-4, "Private key not available", watch.signmessage, foreign, message)
+        assert other.verifymessage(foreign, other.signmessage(foreign, message), message)
+        self.nodes[0].unloadwallet("other")
+        self.nodes[0].unloadwallet("watch")
+
         # An address of scripts stands for no single key
         assert_raises_rpc_error(-3, "Address does not refer to key", self.nodes[0].signmessage, self.nodes[0].getnewaddress(address_type='p2sh-segwit'), message)
 

@@ -744,6 +744,11 @@ std::optional<std::string> Follower::RequestCommitment(const Candidate& candidat
             return std::nullopt;
         }
         return result["txid"].get_str();
+    } catch (const MainClientError& e) {
+        // Outbid by another node of this chain: the mainchain wallet's own words, which start with
+        // "Outbid:" (see Mine), not wrapped in those of a failed call.
+        error = e.rpc_error && e.rpc_message.starts_with("Outbid:") ? e.rpc_message : e.what();
+        return std::nullopt;
     } catch (const std::exception& e) {
         error = e.what();
         return std::nullopt;

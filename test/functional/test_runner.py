@@ -173,7 +173,11 @@ BASE_SCRIPTS = [
     'feature_zside_rules.py',
     'feature_sidechain_network.py',
     'feature_sidechain_follower.py',
+    'feature_sidechain_rules.py',
+    'feature_sidechain_record.py',
     'feature_drivechain_rebuild.py',
+    'feature_drivechain_rejects.py',
+    'feature_drivechain_wallet.py',
     'rpc_setgenerate.py',
     'feature_reindex_readonly.py',
     'wallet_labels.py',
@@ -766,7 +770,15 @@ class TestHandler:
         self.tests_dir = tests_dir
         self.tmpdir = tmpdir
         self.test_list = test_list
-        self.flags = flags
+        # A --portseed given to the runner is the base of the seeds of its tests, so that runs
+        # started side by side (each with its own base) do not use the same ports.
+        self.portseed_base = 0
+        self.flags = []
+        for flag in flags:
+            if flag.startswith("--portseed="):
+                self.portseed_base = int(flag.split("=", 1)[1])
+            else:
+                self.flags.append(flag)
         self.jobs = {}
         self.use_term_control = use_term_control
 
@@ -777,7 +789,7 @@ class TestHandler:
         while len(self.jobs) < self.num_jobs and self.test_list:
             # Add tests
             test = self.test_list.popleft()
-            portseed = len(self.test_list)
+            portseed = self.portseed_base + len(self.test_list)
             portseed_arg = ["--portseed={}".format(portseed)]
             log_stdout = tempfile.SpooledTemporaryFile(max_size=2**16)
             log_stderr = tempfile.SpooledTemporaryFile(max_size=2**16)

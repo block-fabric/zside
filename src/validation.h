@@ -914,6 +914,8 @@ public:
     void EraseDrivechainUndo() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Height up to which EraseDrivechainUndo erased the undo data of the active chain.
     int m_drivechain_undo_erased_height GUARDED_BY(::cs_main){-1};
+    //! How many blocks EraseDrivechainUndo erases the undo data of in one batch (tests make it smaller).
+    size_t m_drivechain_undo_erase_batch GUARDED_BY(::cs_main){10'000};
     /**
      * Erase the drivechain undo data of every block (of any branch) DRIVECHAIN_UNDO_DEPTH or more
      * below `flushed`, by a pass over the undo records (a few thousand), and the deposit records of

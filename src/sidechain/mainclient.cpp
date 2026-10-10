@@ -97,7 +97,8 @@ UniValue MainClient::Call(const std::string& method, const UniValue& params, boo
     const UniValue& error{answer.find_value("error")};
     if (!error.isNull()) {
         const UniValue& message{error.find_value("message")};
-        throw MainClientError{strprintf("The mainchain node answered %s with an error: %s", method, message.isStr() ? message.get_str() : error.write()), /*rpc_error_in=*/true};
+        const std::string text{message.isStr() ? message.get_str() : error.write()};
+        throw MainClientError{strprintf("The mainchain node answered %s with an error: %s", method, text), /*rpc_error_in=*/true, text};
     }
     return answer.find_value("result");
 }

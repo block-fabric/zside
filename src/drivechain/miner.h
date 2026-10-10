@@ -65,7 +65,6 @@ public:
     /** Stop acking a proposal, in every slot. */
     void ClearAcks(const uint256& proposal_hash) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     bool IsAcked(SidechainId slot, const uint256& proposal_hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    std::set<std::pair<SidechainId, uint256>> GetAcks() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
      * Remember a withdrawal bundle received from a sidechain, in blind form.
@@ -86,7 +85,6 @@ public:
     /** How to vote on the bundles of a sidechain. Sidechains without a vote get the default. */
     void SetVote(SidechainId slot, const Vote& vote) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void ClearVote(SidechainId slot) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    Vote GetVote(SidechainId slot) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
      * The vote on a sidechain with these pending bundles. Where the default
      * applies and is to upvote, the bundle upvoted is the one a sidechain
@@ -95,7 +93,6 @@ public:
      * There is none to upvote if the last one handed is not pending.
      */
     Vote ResolveVote(SidechainId slot, const std::vector<Bundle>& pending) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    std::map<SidechainId, Vote> GetVotes() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void SetDefaultVote(Vote::Type type) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     Vote::Type GetDefaultVote() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**

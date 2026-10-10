@@ -325,6 +325,25 @@ bool IsDrivechainParent(const CTransaction& tx)
            std::any_of(tx.vout.begin(), tx.vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); });
 }
 
+/** Whether the unconfirmed transaction `wtx` is `txid`, or spends an output of it, directly or through unconfirmed transactions of the wallet. */
+static bool DependsOnTx(const CWallet& wallet, const CWalletTx& wtx, const Txid& txid) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    std::vector<const CWalletTx*> todo{&wtx};
+    std::set<Txid> seen;
+    while (!todo.empty()) {
+        const CWalletTx& tx{*todo.back()};
+        todo.pop_back();
+        if (tx.GetHash() == txid) return true;
+        if (!seen.insert(tx.GetHash()).second) continue;
+        for (const CTxIn& in : tx.GetTx()->vin) {
+            if (in.prevout.hash == txid) return true;
+            const CWalletTx* parent{wallet.GetWalletTx(in.prevout.hash)};
+            if (parent && wallet.GetTxDepthInMainChain(*parent) == 0) todo.push_back(parent);
+        }
+    }
+    return false;
+}
+
 CoinsResult AvailableCoins(const CWallet& wallet,
                            const CCoinControl* coinControl,
                            std::optional<CFeeRate> feerate,
@@ -433,6 +452,9 @@ CoinsResult AvailableCoins(const CWallet& wallet,
             }
             // Allowed, but maybe not the outputs of a BMM request (see CCoinControl).
             if (nDepth == 0 && skip_bmm_request_parents && IsBmmRequest(*wtx.GetTx())) {
+                continue;
+            }
+            if (nDepth == 0 && coinControl && coinControl->m_replaced_txid && DependsOnTx(wallet, wtx, *coinControl->m_replaced_txid)) {
                 continue;
             }
 

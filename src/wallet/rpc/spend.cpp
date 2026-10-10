@@ -458,6 +458,10 @@ RPCMethod createsidechaindeposit()
         {CNoDestination{escrow_script}, escrow.amount + amount, /*fSubtractFeeFromAmount=*/false},
         {CNoDestination{drivechain::DestinationScript(destination)}, 0, /*fSubtractFeeFromAmount=*/false},
     };
+    // The mempool takes a deposit of MAX_DRIVECHAIN_TX_VSIZE at most, and one that spends the
+    // treasury output of an unconfirmed deposit only as large as a TRUC child (dc-unconfirmed-parent).
+    const bool after_unconfirmed{escrow.has_output && pwallet->chain().isInMempool(escrow.outpoint.hash)};
+    coin_control.m_max_tx_weight = (after_unconfirmed ? TRUC_CHILD_MAX_VSIZE : MAX_DRIVECHAIN_TX_VSIZE) * WITNESS_SCALE_FACTOR;
     // The destination has to follow the treasury output (BIP300 M5): the change goes after both.
     const auto fund{[&] { return FundTransaction(*pwallet, tx, recipients, /*change_pos=*/2, /*lockUnspents=*/false, coin_control); }};
     auto first{fund()};
@@ -475,7 +479,10 @@ RPCMethod createsidechaindeposit()
         }
     }
     const auto& res{retry ? *retry : first};
-    if (!res) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(first).original);
+    if (!res) {
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(first).original +
+                               (after_unconfirmed ? strprintf(" (The deposit before this one is not confirmed yet: until it is, a deposit can have no more than %u vbytes.)", TRUC_CHILD_MAX_VSIZE) : ""));
+    }
 
     CMutableTransaction mtx{*res->tx};
     const Txid txid{SignAndCommit(*pwallet, mtx, external)};
@@ -548,13 +555,19 @@ RPCMethod createbmmrequest()
             throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("Outbid: the mempool holds a request for another block of this sidechain paying %s %s", FormatMoney(existing->fee), CURRENCY_UNIT));
         }
     }
+    // The request replaces the one in the mempool for the sidechain: it cannot be paid with the
+    // change of that one (or of what spends it), which goes with it.
+    CCoinControl coin_control;
+    if (existing) coin_control.m_replaced_txid = existing->txid;
+    // The mempool takes a BMM request of MAX_DRIVECHAIN_TX_VSIZE at most (and one paid from the
+    // change of another as large as a TRUC child: see AllowDrivechainParents).
+    coin_control.m_max_tx_weight = MAX_DRIVECHAIN_TX_VSIZE * WITNESS_SCALE_FACTOR;
     std::vector<CRecipient> recipients{
         {CNoDestination{drivechain::BmmRequestScript(bmm_request)}, 0, /*fSubtractFeeFromAmount=*/false},
     };
 
     // The whole point of the transaction is its fee. Find out its size first,
     // then pick the fee rate that makes it pay the amount offered.
-    CCoinControl coin_control;
     coin_control.fOverrideFeeRate = true;
     const CFeeRate probe_rate{DEFAULT_MIN_RELAY_TX_FEE * 10};
     coin_control.m_feerate = probe_rate;
@@ -573,19 +586,36 @@ RPCMethod createbmmrequest()
 
     auto res{CreateTransaction(*pwallet, recipients, /*change_pos=*/1, coin_control, /*sign=*/true)};
     if (!res) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(res).original);
-    pwallet->CommitTransaction(res->tx, /*replaces_txid=*/std::nullopt, /*comment=*/std::nullopt, /*comment_to=*/std::nullopt);
-    if (CommittedTransactionRefused(*pwallet, res->tx)) {
-        pwallet->AbandonTransaction(res->tx->GetHash());
+    CreatedTransactionResult created{*res};
+    // At the fee rate of the offer coin selection may take other coins than at the rate of the
+    // probe (at a low rate it gathers small ones): the transaction then has another size, and
+    // pays another fee. Its inputs are kept, at the rate that makes the fee the offer for its size.
+    // (The size is the one the wallet reckons with, from the fee it took at its rate.)
+    CFeeRate rate{*coin_control.m_feerate};
+    for (int i{0}; i < 3 && created.fee != amount; ++i) {
+        CCoinControl same_inputs{coin_control};
+        same_inputs.m_allow_other_inputs = false;
+        for (const CTxIn& in : created.tx->vin) same_inputs.Select(in.prevout);
+        const int64_t size{std::max<int64_t>(1, (created.fee * 1000 + rate.GetFeePerK() / 2) / std::max<CAmount>(1, rate.GetFeePerK()))};
+        rate = CFeeRate{amount, static_cast<int32_t>(size)};
+        same_inputs.m_feerate = rate;
+        const auto again{CreateTransaction(*pwallet, recipients, /*change_pos=*/1, same_inputs, /*sign=*/true)};
+        if (!again || again->fee == created.fee) break;
+        created = *again;
+    }
+    pwallet->CommitTransaction(created.tx, /*replaces_txid=*/std::nullopt, /*comment=*/std::nullopt, /*comment_to=*/std::nullopt);
+    if (CommittedTransactionRefused(*pwallet, created.tx)) {
+        pwallet->AbandonTransaction(created.tx->GetHash());
         const auto ahead{pwallet->chain().getMempoolBmmRequest(bmm_request.slot)};
-        if (ahead && ahead->prev_main_block_hash == bmm_request.prev_main_block_hash && ahead->txid != res->tx->GetHash()) {
+        if (ahead && ahead->prev_main_block_hash == bmm_request.prev_main_block_hash && ahead->txid != created.tx->GetHash()) {
             throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("Outbid: the mempool holds a request for another block of this sidechain paying %s %s; a replacement has to pay more than that and the relay fee", FormatMoney(ahead->fee), CURRENCY_UNIT));
         }
         throw JSONRPCError(RPC_WALLET_ERROR, "The request was not accepted into the mempool (see the debug log for why)");
     }
 
     UniValue result(UniValue::VOBJ);
-    result.pushKV("txid", res->tx->GetHash().GetHex());
-    result.pushKV("fee", ValueFromAmount(res->fee));
+    result.pushKV("txid", created.tx->GetHash().GetHex());
+    result.pushKV("fee", ValueFromAmount(created.fee));
     result.pushKV("prevblockhash", bmm_request.prev_main_block_hash.GetHex());
     return result;
 },

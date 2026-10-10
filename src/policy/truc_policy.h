@@ -32,6 +32,10 @@ inline constexpr int64_t TRUC_MAX_WEIGHT{TRUC_MAX_VSIZE * WITNESS_SCALE_FACTOR};
 /** Maximum sigop-adjusted virtual size of a tx which spends from an unconfirmed TRUC transaction. */
 inline constexpr int64_t TRUC_CHILD_MAX_VSIZE{1000};
 inline constexpr int64_t TRUC_CHILD_MAX_WEIGHT{TRUC_CHILD_MAX_VSIZE * WITNESS_SCALE_FACTOR};
+/** Largest BMM request or deposit the mempool takes (see PreChecks): ten times a TRUC child,
+ *  room for a deposit paid from a hundred and more inputs. One that spends an unconfirmed
+ *  treasury output or BMM request is no larger than a TRUC child. */
+inline constexpr int64_t MAX_DRIVECHAIN_TX_VSIZE{10 * TRUC_CHILD_MAX_VSIZE};
 // These limits are within the default cluster limits.
 static_assert(TRUC_MAX_VSIZE + TRUC_CHILD_MAX_VSIZE <= DEFAULT_CLUSTER_SIZE_LIMIT_KVB * 1000);
 
