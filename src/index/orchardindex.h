@@ -45,6 +45,7 @@ protected:
     bool CustomInit(const std::optional<interfaces::BlockRef>& block) override;
     bool CustomAppend(const interfaces::BlockInfo& block) override;
     bool CustomRemove(const interfaces::BlockInfo& block) override;
+    bool CustomCommit(CDBBatch& batch) override;
     BaseIndex::DB& GetDB() const override;
 
     std::optional<OrchardWitness> FindNoteLocked(const uint256& cmx, uint64_t size) const;

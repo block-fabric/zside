@@ -171,6 +171,7 @@ BASE_SCRIPTS = [
     'feature_sidechain.py',
     'feature_zside.py',
     'feature_zside_rules.py',
+    'feature_zside_edges.py',
     'feature_sidechain_network.py',
     'feature_sidechain_follower.py',
     'feature_sidechain_rules.py',

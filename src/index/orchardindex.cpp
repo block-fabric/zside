@@ -37,6 +37,16 @@ struct NodeKey {
 
 class OrchardIndex::DB : public BaseIndex::DB
 {
+    // What the index wrote since it last committed its best block. The tree on disk is that of the
+    // best block on disk, written with it (CustomCommit): after an unclean shutdown the index goes on
+    // from that block, and a tree written ahead of it (a block taken in, or one taken away and its
+    // leaves overwritten by another branch) would not be its tree. Under m_mutex, like every read.
+    std::optional<uint64_t> m_size;
+    std::map<NodeKey, uint256> m_nodes;
+    std::map<uint256, uint64_t> m_positions;
+    //! A block -> the size of the tree before it; nullopt: its record erased.
+    std::map<uint256, std::optional<uint64_t>> m_blocks;
+
 public:
     explicit DB(size_t n_cache_size, bool f_memory, bool f_wipe)
         : BaseIndex::DB(gArgs.GetDataDirNet() / "indexes" / "orchard", n_cache_size, f_memory, f_wipe) {}
@@ -45,18 +55,45 @@ public:
 
     uint64_t Size() const
     {
+        if (m_size) return *m_size;
         uint64_t size{0};
         Read(DB_SIZE, size);
         return size;
     }
 
+    void SetSize(uint64_t size) { m_size = size; }
+
+    /** The size of the tree before a block, if the index has a record of the block. */
+    std::optional<uint64_t> BlockStart(const uint256& hash) const
+    {
+        if (const auto it{m_blocks.find(hash)}; it != m_blocks.end()) return it->second;
+        uint64_t before;
+        if (!Read(std::make_pair(DB_BLOCK, hash), before)) return std::nullopt;
+        return before;
+    }
+
+    void SetBlockStart(const uint256& hash, std::optional<uint64_t> before) { m_blocks[hash] = before; }
+
+    /** Where a note is in the tree, if the index has it. */
+    std::optional<uint64_t> Position(const uint256& cmx) const
+    {
+        if (const auto it{m_positions.find(cmx)}; it != m_positions.end()) return it->second;
+        uint64_t position;
+        if (!Read(std::make_pair(DB_POSITION, cmx), position)) return std::nullopt;
+        return position;
+    }
+
+    void SetPosition(const uint256& cmx, uint64_t position) { m_positions[cmx] = position; }
+
     /** A node of the tree of `size` leaves: empty where the tree has no leaves yet. */
     uint256 Node(const std::map<NodeKey, uint256>& pending, unsigned level, uint64_t index, uint64_t size) const
     {
         if (level < 64 && (index << level) >= size) return zside::EmptyRoot(level);
-        if (const auto it{pending.find({static_cast<uint8_t>(level), index})}; it != pending.end()) return it->second;
+        const NodeKey key{static_cast<uint8_t>(level), index};
+        if (const auto it{pending.find(key)}; it != pending.end()) return it->second;
+        if (const auto it{m_nodes.find(key)}; it != m_nodes.end()) return it->second;
         uint256 node;
-        if (!Read(std::make_pair(DB_NODE, NodeKey{static_cast<uint8_t>(level), index}), node)) return zside::EmptyRoot(level);
+        if (!Read(std::make_pair(DB_NODE, key), node)) return zside::EmptyRoot(level);
         return node;
     }
 
@@ -86,9 +123,29 @@ public:
         }
     }
 
-    void Flush(const std::map<NodeKey, uint256>& pending, CDBBatch& batch) const
+    /** Keep computed nodes until the next commit. */
+    void Flush(const std::map<NodeKey, uint256>& pending)
     {
-        for (const auto& [key, node] : pending) batch.Write(std::make_pair(DB_NODE, key), node);
+        for (const auto& [key, node] : pending) m_nodes[key] = node;
+    }
+
+    /** Everything written since the last commit, into the batch that commits the best block. */
+    void Commit(CDBBatch& batch)
+    {
+        for (const auto& [key, node] : m_nodes) batch.Write(std::make_pair(DB_NODE, key), node);
+        for (const auto& [cmx, position] : m_positions) batch.Write(std::make_pair(DB_POSITION, cmx), position);
+        for (const auto& [hash, before] : m_blocks) {
+            if (before) {
+                batch.Write(std::make_pair(DB_BLOCK, hash), *before);
+            } else {
+                batch.Erase(std::make_pair(DB_BLOCK, hash));
+            }
+        }
+        if (m_size) batch.Write(DB_SIZE, *m_size);
+        m_nodes.clear();
+        m_positions.clear();
+        m_blocks.clear();
+        m_size.reset();
     }
 };
 
@@ -104,9 +161,7 @@ bool OrchardIndex::CustomInit(const std::optional<interfaces::BlockRef>& block)
     // From the start: the tree is empty, whatever an earlier one left (it is overwritten as it grows).
     if (!block) {
         LOCK(m_db->m_mutex);
-        CDBBatch batch{*m_db};
-        batch.Write(DB_SIZE, uint64_t{0});
-        m_db->WriteBatch(batch);
+        m_db->SetSize(0);
     }
     return true;
 }
@@ -115,12 +170,9 @@ bool OrchardIndex::CustomAppend(const interfaces::BlockInfo& block)
 {
     assert(block.data);
     LOCK(m_db->m_mutex);
-    // A block may come again (a reconnection, a replay after an unclean shutdown): its notes go
-    // where they went the first time.
-    uint64_t size{m_db->Size()};
-    if (uint64_t before; m_db->Read(std::make_pair(DB_BLOCK, block.hash), before)) size = before;
-    CDBBatch batch{*m_db};
-    batch.Write(std::make_pair(DB_BLOCK, block.hash), size);
+    // A block may come again (a reconnection): its notes go where they went the first time.
+    uint64_t size{m_db->BlockStart(block.hash).value_or(m_db->Size())};
+    m_db->SetBlockStart(block.hash, size);
     std::map<NodeKey, uint256> pending;
     for (const CTransactionRef& tx : block.data->vtx) {
         // As consensus: the coinbase has no bundle.
@@ -131,35 +183,41 @@ bool OrchardIndex::CustomAppend(const interfaces::BlockInfo& block)
         if (!bundle) continue;
         for (const uint256& cmx : bundle->Commitments()) {
             pending[{0, size}] = cmx;
-            batch.Write(std::make_pair(DB_POSITION, cmx), size);
+            m_db->SetPosition(cmx, size);
             ++size;
             m_db->Rehash(pending, size - 1, size);
         }
     }
-    m_db->Flush(pending, batch);
-    batch.Write(DB_SIZE, size);
-    m_db->WriteBatch(batch);
+    m_db->Flush(pending);
+    m_db->SetSize(size);
     return true;
 }
 
 bool OrchardIndex::CustomRemove(const interfaces::BlockInfo& block)
 {
     LOCK(m_db->m_mutex);
-    uint64_t before;
-    if (!m_db->Read(std::make_pair(DB_BLOCK, block.hash), before)) {
-        // A block the index never took in (one under a UTXO snapshot): nothing of it to remove.
+    const auto before{m_db->BlockStart(block.hash)};
+    if (!before) {
+        // Every block the index took in has its record until it is taken away (zSide starts from no
+        // UTXO snapshot): a block without one is no block of the index's tree.
         LogWarning("orchardindex: no record of block %s to remove", block.hash.ToString());
         return true;
     }
     // The tree as it was: the leaves beyond its size are ignored from now, and its right edge
     // is computed again without them.
-    CDBBatch batch{*m_db};
     std::map<NodeKey, uint256> pending;
-    if (before > 0) m_db->Rehash(pending, before - 1, before);
-    m_db->Flush(pending, batch);
-    batch.Write(DB_SIZE, before);
-    batch.Erase(std::make_pair(DB_BLOCK, block.hash));
-    m_db->WriteBatch(batch);
+    if (*before > 0) m_db->Rehash(pending, *before - 1, *before);
+    m_db->Flush(pending);
+    m_db->SetSize(*before);
+    m_db->SetBlockStart(block.hash, std::nullopt);
+    return true;
+}
+
+bool OrchardIndex::CustomCommit(CDBBatch& batch)
+{
+    // The tree, with the best block BaseIndex writes into the same batch: on disk, they go together.
+    LOCK(m_db->m_mutex);
+    m_db->Commit(batch);
     return true;
 }
 
@@ -169,9 +227,9 @@ std::optional<OrchardIndex::Witnesses> OrchardIndex::FindNotes(const std::vector
     LOCK(m_db->m_mutex);
     uint64_t size{m_db->Size()};
     if (next_block) {
-        uint64_t before;
-        if (!m_db->Read(std::make_pair(DB_BLOCK, *next_block), before) || before > size) return std::nullopt;
-        size = before;
+        const auto before{m_db->BlockStart(*next_block)};
+        if (!before || *before > size) return std::nullopt;
+        size = *before;
     }
     Witnesses out;
     out.anchor = m_db->NodeAt(zside::TREE_DEPTH, 0, size, m_db->Size());
@@ -185,8 +243,9 @@ std::optional<OrchardIndex::Witnesses> OrchardIndex::FindNotes(const std::vector
 
 std::optional<OrchardWitness> OrchardIndex::FindNoteLocked(const uint256& cmx, uint64_t size) const
 {
-    uint64_t position;
-    if (!m_db->Read(std::make_pair(DB_POSITION, cmx), position)) return std::nullopt;
+    const auto found{m_db->Position(cmx)};
+    if (!found) return std::nullopt;
+    const uint64_t position{*found};
     const uint64_t current{m_db->Size()};
     // A note of a block the index has removed since, or after the tree asked for.
     if (position >= size || size > current) return std::nullopt;
