@@ -13,6 +13,9 @@
 #include <vector>
 
 #include <addresstype.h>
+#include <bech32.h>
+#include <chainparams.h>
+#include <util/strencodings.h>
 #include <drivechain/sidechain.h>
 #include <interfaces/chain.h>
 #include <key_io.h>
@@ -1186,6 +1189,61 @@ BOOST_FIXTURE_TEST_CASE(meltcast_stops_between_steps, ListCoinsTestingSetup)
     RunMeltCast(*wallet, [&] { return ++asked > 1; });
     BOOST_CHECK_EQUAL(asked, 2);
     BOOST_CHECK_EQUAL(tried(), 1);
+}
+
+BOOST_AUTO_TEST_CASE(shielded_addresses_and_memos)
+{
+    // zSide: a shielded address is bech32m with a prefix of its network; one of another network, another
+    // encoding, another length or no valid address at all is none.
+    const OrchardAddress address{ShieldedKeyOf(6).second};
+    const auto encode_on{[&](ChainType chain) {
+        SelectParams(chain);
+        return EncodeShieldedAddress(address);
+    }};
+    const std::string main{encode_on(ChainType::MAIN)};
+    const std::string test{encode_on(ChainType::TESTNET)};
+    const std::string signet{encode_on(ChainType::SIGNET)};
+    const std::string regtest{encode_on(ChainType::REGTEST)};
+    BOOST_CHECK(main.starts_with("zo1"));
+    BOOST_CHECK(test.starts_with("tzo1"));
+    BOOST_CHECK_EQUAL(signet, test);
+    BOOST_CHECK(regtest.starts_with("rzo1"));
+    for (const auto& [chain, text] : std::vector<std::pair<ChainType, std::string>>{{ChainType::MAIN, main}, {ChainType::TESTNET, test}, {ChainType::REGTEST, regtest}}) {
+        SelectParams(chain);
+        BOOST_CHECK(DecodeShieldedAddress(text) == address);
+        for (const std::string& other : {main, test, regtest}) {
+            if (other != text) BOOST_CHECK(!DecodeShieldedAddress(other));
+        }
+    }
+    SelectParams(ChainType::MAIN);
+    std::vector<uint8_t> data;
+    ConvertBits<8, 5, true>([&](uint8_t c) { data.push_back(c); }, address.begin(), address.end());
+    BOOST_CHECK(!DecodeShieldedAddress(bech32::Encode(bech32::Encoding::BECH32, "zo", data)));
+    std::vector<uint8_t> shorter;
+    ConvertBits<8, 5, true>([&](uint8_t c) { shorter.push_back(c); }, address.begin(), address.end() - 1);
+    BOOST_CHECK(!DecodeShieldedAddress(bech32::Encode(bech32::Encoding::BECH32M, "zo", shorter)));
+    // 43 bytes that are no address: the transmission key is no point of the curve.
+    OrchardAddress invalid{address};
+    std::fill(invalid.begin() + 11, invalid.end(), 0xff);
+    BOOST_CHECK(!zo_address_valid(invalid.data()));
+    BOOST_CHECK(!DecodeShieldedAddress(EncodeShieldedAddress(invalid)));
+    BOOST_CHECK(!DecodeShieldedAddress(main.substr(0, main.size() - 1) + (main.back() == 'q' ? 'p' : 'q')));
+    BOOST_CHECK(!DecodeShieldedAddress(""));
+
+    // Memos: none (0xF6, then zeros), text up to 512 bytes, nothing else.
+    const OrchardMemo none{*MemoFromText("")};
+    BOOST_CHECK_EQUAL(none[0], 0xF6);
+    BOOST_CHECK(std::all_of(none.begin() + 1, none.end(), [](uint8_t b) { return b == 0; }));
+    BOOST_CHECK_EQUAL(MemoText(none), "");
+    BOOST_CHECK_EQUAL(MemoText(*MemoFromText("thanks")), "thanks");
+    const std::string longest(512, 'x');
+    BOOST_CHECK_EQUAL(MemoText(*MemoFromText(longest)), longest);
+    BOOST_CHECK(!MemoFromText(longest + "x"));
+    BOOST_CHECK(!MemoFromText("\xF5 not text"));
+    BOOST_CHECK(MemoFromText("\xF4"));
+    OrchardMemo arbitrary{};
+    arbitrary[0] = 0xFF;
+    BOOST_CHECK_EQUAL(MemoText(arbitrary), "");
 }
 
 BOOST_AUTO_TEST_CASE(meltcast_windows_and_bills)
