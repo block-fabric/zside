@@ -120,6 +120,13 @@ inline constexpr int KEY_THIS_CHAIN{2};
 std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet, int version);
 /** The same, for the chain of `genesis` and `slot` (version 2; version 1 ignores them). */
 std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet, int version, const uint256& genesis, uint32_t slot);
+/**
+ * The spending key of a viewing key of the account, of a version: of the wallet's active descriptor, or
+ * of another of its descriptors (encryptwallet makes new ones active; another may have been imported
+ * active since the account was set up). Nullopt if no descriptor of the wallet makes it, or the wallet
+ * is locked.
+ */
+std::optional<ShieldedKey> AccountSpendingKey(const CWallet& wallet, int version, const OrchardFvk& fvk);
 /** The viewing keys the account watches, the account's own first; with whether it is the one of version 1 it also watches. */
 std::vector<std::pair<const OrchardFvk*, bool>> ShieldedViewingKeys(const ShieldedAccount& account);
 /** What an address is to the account: 1 one of its own, 2 its change, 0 another's (zo_address_scope, for each key it watches). */

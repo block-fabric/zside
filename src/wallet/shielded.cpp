@@ -108,16 +108,15 @@ std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet, int versio
     return ShieldedSpendingKey(wallet, version, consensus.hashGenesisBlock, consensus.sidechain.slot);
 }
 
-std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet, int version, const uint256& genesis, uint32_t slot)
+namespace {
+/** A spending key of the account, of a version, made of the extended private key of a descriptor. */
+std::optional<ShieldedKey> SpendingKeyOf(const DescriptorScriptPubKeyMan& spkm, int version, const uint256& genesis, uint32_t slot)
 {
-    if (version != KEY_ANY_CHAIN && version != KEY_THIS_CHAIN) return std::nullopt;
-    const auto* spkm{dynamic_cast<const DescriptorScriptPubKeyMan*>(wallet.GetScriptPubKeyMan(OutputType::BECH32, /*internal=*/false))};
-    if (!spkm) return std::nullopt;
     // The descriptor with its private keys, and all made of it, wiped once read.
     const auto wipe{[](std::string& text) { memory_cleanse(text.data(), text.size()); }};
     std::string descriptor;
     std::optional<ShieldedKey> out;
-    if (spkm->GetDescriptorString(descriptor, /*priv=*/true)) {
+    if (spkm.GetDescriptorString(descriptor, /*priv=*/true)) {
         // The first extended private key of the descriptor (the account key, which is restored with it).
         for (const std::string prefix : {"xprv", "tprv"}) {
             const size_t at{descriptor.find(prefix)};
@@ -146,6 +145,41 @@ std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet, int versio
     }
     wipe(descriptor);
     return out;
+}
+
+/** Whether a spending key is that of a viewing key. */
+bool KeyOf(const ShieldedKey& key, const OrchardFvk& expected)
+{
+    OrchardFvk derived;
+    const bool same{zo_full_viewing_key(key.data(), derived.data()) == ZO_OK && derived == expected};
+    memory_cleanse(derived.data(), derived.size());
+    return same;
+}
+} // namespace
+
+std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet, int version, const uint256& genesis, uint32_t slot)
+{
+    if (version != KEY_ANY_CHAIN && version != KEY_THIS_CHAIN) return std::nullopt;
+    const auto* spkm{dynamic_cast<const DescriptorScriptPubKeyMan*>(wallet.GetScriptPubKeyMan(OutputType::BECH32, /*internal=*/false))};
+    if (!spkm) return std::nullopt;
+    return SpendingKeyOf(*spkm, version, genesis, slot);
+}
+
+std::optional<ShieldedKey> AccountSpendingKey(const CWallet& wallet, int version, const OrchardFvk& fvk)
+{
+    if (version != KEY_ANY_CHAIN && version != KEY_THIS_CHAIN) return std::nullopt;
+    const Consensus::Params& consensus{Params().GetConsensus()};
+    // The active descriptor first, which made the account unless another was made active since:
+    // encryptwallet makes new ones, and one may have been imported active.
+    auto sk{ShieldedSpendingKey(wallet, version)};
+    if (sk && KeyOf(*sk, fvk)) return sk;
+    for (const ScriptPubKeyMan* spkm : wallet.GetAllScriptPubKeyMans()) {
+        const auto* desc{dynamic_cast<const DescriptorScriptPubKeyMan*>(spkm)};
+        if (!desc) continue;
+        sk = SpendingKeyOf(*desc, version, consensus.hashGenesisBlock, consensus.sidechain.slot);
+        if (sk && KeyOf(*sk, fvk)) return sk;
+    }
+    return std::nullopt;
 }
 
 namespace {
@@ -566,22 +600,15 @@ Prepared PrepareSend(CWallet& wallet, const std::vector<ShieldedRecipient>& reci
     AssertLockHeld(wallet.cs_wallet);
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
     const ShieldedAccount& account{wallet.m_shielded};
-    const auto sk{ShieldedSpendingKey(wallet, account.key_version)};
+    if (wallet.IsLocked()) return std::string{"The wallet is locked"};
+    // The keys of the account, of whichever descriptor of the wallet made them.
+    const auto sk{AccountSpendingKey(wallet, account.key_version, *account.fvk)};
     // The key of version 1 too, for the notes paid to it (ShieldedAccount::legacy_fvk).
-    const auto legacy_sk{account.legacy_fvk ? ShieldedSpendingKey(wallet, KEY_ANY_CHAIN) : std::nullopt};
-    if (!sk || (account.legacy_fvk && !legacy_sk)) return std::string{"The wallet is locked"};
-    const uint8_t* fvk{account.fvk->data()};
-    // The keys come from the wallet's active descriptor: if another was made active since the account
-    // was set up, they are not the account's, and could spend none of its notes.
-    const auto matches{[](const ShieldedKey& key, const OrchardFvk& expected) {
-        OrchardFvk derived;
-        const bool same{zo_full_viewing_key(key.data(), derived.data()) == ZO_OK && derived == expected};
-        memory_cleanse(derived.data(), derived.size());
-        return same;
-    }};
-    if (!matches(*sk, *account.fvk) || (account.legacy_fvk && !matches(*legacy_sk, *account.legacy_fvk))) {
-        return std::string{"The active descriptor of the wallet is not the one the shielded account was made from: make that one active again to spend the account's notes"};
+    const auto legacy_sk{account.legacy_fvk ? AccountSpendingKey(wallet, KEY_ANY_CHAIN, *account.legacy_fvk) : std::nullopt};
+    if (!sk || (account.legacy_fvk && !legacy_sk)) {
+        return std::string{"No descriptor of the wallet holds the keys of its shielded account: import the one the account was made from to spend its notes"};
     }
+    const uint8_t* fvk{account.fvk->data()};
 
     CAmount to_pay{0};
     size_t shielded_outputs{0};

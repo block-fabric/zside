@@ -1191,6 +1191,43 @@ BOOST_FIXTURE_TEST_CASE(meltcast_stops_between_steps, ListCoinsTestingSetup)
     BOOST_CHECK_EQUAL(tried(), 1);
 }
 
+BOOST_FIXTURE_TEST_CASE(shielded_keys_of_any_descriptor_of_the_wallet, ListCoinsTestingSetup)
+{
+    // zSide: the account's keys are those of the descriptor it was made from, active or not: encryptwallet
+    // makes new descriptors active, and one may be imported active. With none of the wallet's, it cannot spend.
+    ShieldedRecipient recipient;
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_REQUIRE(SetupShieldedAccount(*wallet));
+        const OrchardFvk fvk{*wallet->m_shielded.fvk};
+        const OrchardFvk legacy{*wallet->m_shielded.legacy_fvk};
+        const auto fvk_of{[](const std::optional<ShieldedKey>& sk) {
+            BOOST_REQUIRE(sk);
+            OrchardFvk out;
+            BOOST_REQUIRE_EQUAL(zo_full_viewing_key(sk->data(), out.data()), ZO_OK);
+            return out;
+        }};
+        BOOST_CHECK(fvk_of(AccountSpendingKey(*wallet, KEY_THIS_CHAIN, fvk)) == fvk);
+        BOOST_CHECK(fvk_of(AccountSpendingKey(*wallet, KEY_ANY_CHAIN, legacy)) == legacy);
+        // New descriptors, of a new seed, active.
+        wallet->SetupDescriptorScriptPubKeyMans();
+        BOOST_CHECK(fvk_of(ShieldedSpendingKey(*wallet, KEY_THIS_CHAIN)) != fvk);
+        BOOST_CHECK(fvk_of(AccountSpendingKey(*wallet, KEY_THIS_CHAIN, fvk)) == fvk);
+        BOOST_CHECK(fvk_of(AccountSpendingKey(*wallet, KEY_ANY_CHAIN, legacy)) == legacy);
+        // Of the other version, or of no version: none.
+        BOOST_CHECK(!AccountSpendingKey(*wallet, KEY_ANY_CHAIN, fvk));
+        BOOST_CHECK(!AccountSpendingKey(*wallet, 3, fvk));
+        // A viewing key no descriptor of the wallet makes: none, and a payment says so.
+        const OrchardFvk foreign{ShieldedKeyOf(9).first};
+        BOOST_CHECK(!AccountSpendingKey(*wallet, KEY_THIS_CHAIN, foreign));
+        wallet->m_shielded.fvk = foreign;
+        recipient.script = GetScriptForRawPubKey(coinbaseKey.GetPubKey());
+        recipient.amount = COIN;
+    }
+    const auto result{SendShielded(*wallet, {recipient})};
+    BOOST_CHECK_EQUAL(std::get<std::string>(result), "No descriptor of the wallet holds the keys of its shielded account: import the one the account was made from to spend its notes");
+}
+
 BOOST_AUTO_TEST_CASE(shielded_addresses_and_memos)
 {
     // zSide: a shielded address is bech32m with a prefix of its network; one of another network, another

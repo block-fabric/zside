@@ -2,13 +2,14 @@
 # Copyright (c) 2026 The Chains developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test the shielded pool where feature_zside.py and feature_zside_rules.py do not: the orchard index
+"""Test the shielded pool where feature_zside.py and feature_zside_rules.py do not: a wallet whose active
+descriptor changed or that was encrypted after its shielded account was set up, and the orchard index
 after an unclean shutdown that followed the removal of a block."""
 
 from decimal import Decimal
 
 from feature_sidechain import ACTIVATION_PERIOD, SLOT, SidechainTest
-from test_framework.util import assert_equal, assert_greater_than
+from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error
 
 
 class ZSideEdgesTest(SidechainTest):
@@ -52,7 +53,74 @@ class ZSideEdgesTest(SidechainTest):
         assert_equal(side.getshieldedbalance()["available"], 5)
         assert_equal(other.getshieldedbalance()["available"], 2)
 
+        self.run_descriptor_test()
+        self.run_encrypt_test()
         self.run_index_crash_test()
+
+    def run_descriptor_test(self):
+        side, other = self.nodes
+        self.log.info("A wallet whose active descriptor is no longer the one its shielded account was made from still spends its notes")
+        other.createwallet("switched")
+        switched = other.get_wallet_rpc("switched")
+        address = switched.getshieldedaddress()
+        side.sendshielded({address: Decimal("0.3")})
+        self.mine_txs()
+        assert_equal(switched.getshieldedbalance()["available"], Decimal("0.3"))
+
+        def receiving(wallet):
+            return [d for d in wallet.listdescriptors(True)["descriptors"] if d["active"] and not d["internal"] and d["desc"].startswith("wpkh(")][0]
+
+        def make_active(wallet, d):
+            result = wallet.importdescriptors([{"desc": d["desc"], "active": True, "timestamp": "now", "range": d["range"], "next_index": d["next_index"]}])
+            assert result[0]["success"], result
+
+        original = receiving(switched)
+        other.createwallet("donor")
+        replacement = receiving(other.get_wallet_rpc("donor"))
+        other.unloadwallet("donor")
+        make_active(switched, replacement)
+        assert receiving(switched)["desc"] != original["desc"]
+        # The same account: its addresses, its notes; and it spends them, with the keys of the
+        # descriptor it was made from (no longer the active one).
+        assert_equal(switched.getshieldedaddress(), address)
+        assert_equal(switched.getshieldedbalance()["available"], Decimal("0.3"))
+        to = side.getshieldedaddress()
+        txid = switched.sendshielded({to: Decimal("0.1")})["txid"]
+        self.mine_txs()
+        assert_equal(switched.gettransaction(txid)["confirmations"], 1)
+        # The original active again: the same.
+        make_active(switched, original)
+        txid = switched.sendshielded({to: Decimal("0.1")})["txid"]
+        self.mine_txs()
+        assert_equal(switched.gettransaction(txid)["confirmations"], 1)
+        other.unloadwallet("switched")
+        self.check_in_sync()
+
+    def run_encrypt_test(self):
+        side, other = self.nodes
+        self.log.info("A wallet encrypted after its shielded account was set up (which makes it new descriptors) still spends its notes")
+        other.createwallet("later")
+        later = other.get_wallet_rpc("later")
+        address = later.getshieldedaddress()
+        side.sendshielded({address: Decimal("0.3")})
+        self.mine_txs()
+        before = later.listdescriptors()["descriptors"]
+        later.encryptwallet("secret")
+        assert later.listdescriptors()["descriptors"] != before
+        # The same account: its addresses, its notes.
+        assert_equal(later.getshieldedaddress(), address)
+        assert_equal(later.getshieldedbalance()["available"], Decimal("0.3"))
+        assert_raises_rpc_error(-13, "walletpassphrase", later.sendshielded, {side.getshieldedaddress(): Decimal("0.1")})
+        later.walletpassphrase("secret", 600)
+        txid = later.sendshielded({side.getshieldedaddress(): Decimal("0.1")})["txid"]
+        self.mine_txs()
+        assert_equal(later.gettransaction(txid)["confirmations"], 1)
+        unshield = later.unshieldcoins(Decimal("0.1"))
+        self.mine_txs()
+        assert_equal(later.getreceivedbyaddress(unshield["address"]), Decimal("0.1"))
+        later.walletlock()
+        other.unloadwallet("later")
+        self.check_in_sync()
 
     def run_index_crash_test(self):
         side, other = self.nodes
