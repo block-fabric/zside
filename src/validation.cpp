@@ -6718,10 +6718,6 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         if (GetConsensus().drivechain.max_sidechains > 0 && GetParams().GetChainType() != ChainType::REGTEST) {
             return util::Error{Untranslated("UTXO snapshots are not supported with drivechains: the snapshot does not hold the drivechain state")};
         }
-        // Nor does it hold the state of a sidechain (its withdrawals and the store of its own rules).
-        if (GetConsensus().sidechain.enabled && GetParams().GetChainType() != ChainType::REGTEST) {
-            return util::Error{Untranslated("UTXO snapshots are not supported on a sidechain: the snapshot does not hold the sidechain state")};
-        }
         if (!GetParams().AssumeutxoForBlockhash(base_blockhash).has_value()) {
             auto available_heights = GetParams().GetAvailableSnapshotHeights();
             std::string heights_formatted = util::Join(available_heights, ", ", [&](const auto& i) { return util::ToString(i); });

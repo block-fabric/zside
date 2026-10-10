@@ -726,7 +726,7 @@ BOOST_FIXTURE_TEST_CASE(no_utxo_snapshots_outside_regtest, MainSetup)
     const auto result{main.m_node.chainman->ActivateSnapshot(file, metadata, /*in_memory=*/true)};
     BOOST_REQUIRE(!result);
     BOOST_CHECK_EQUAL(util::ErrorString(result).original, main.m_node.chainman->GetConsensus().sidechain.enabled ?
-                                                                 "UTXO snapshots are not supported on a sidechain: the snapshot does not hold the sidechain state" :
+                                                                 "A sidechain cannot start from a UTXO snapshot: its state (the shielded pool) is not in it" :
                                                                  "UTXO snapshots are not supported with drivechains: the snapshot does not hold the drivechain state");
 }
 
