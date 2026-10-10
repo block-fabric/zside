@@ -1188,5 +1188,158 @@ BOOST_FIXTURE_TEST_CASE(meltcast_stops_between_steps, ListCoinsTestingSetup)
     BOOST_CHECK_EQUAL(tried(), 1);
 }
 
+BOOST_AUTO_TEST_CASE(meltcast_windows_and_bills)
+{
+    // zSide: on the main network a bill's window opens once a day (144 blocks), at bill * 7 into the
+    // period, for WINDOW blocks.
+    using namespace meltcast;
+    BOOST_CHECK_EQUAL(CastPeriod(), 144);
+    for (int h{0}; h < WINDOW; ++h) BOOST_CHECK(InCastWindow(0, h));
+    BOOST_CHECK(!InCastWindow(0, WINDOW));
+    BOOST_CHECK(InCastWindow(0, 144));
+    // Below the offset: the window of the period before (heights are never negative, the arithmetic is).
+    BOOST_CHECK(!InCastWindow(3, 0));
+    BOOST_CHECK(!InCastWindow(0, -1));
+    BOOST_CHECK(InCastWindow(0, -144));
+    BOOST_CHECK(InCastWindow(3, 21) && InCastWindow(3, 23) && !InCastWindow(3, 24) && !InCastWindow(3, 20));
+    BOOST_CHECK_EQUAL(NextCastWindow(3, 0), 21);
+    BOOST_CHECK_EQUAL(NextCastWindow(3, 22), 22);
+    BOOST_CHECK_EQUAL(NextCastWindow(3, 24), 21 + 144);
+    BOOST_CHECK_EQUAL(NextCastWindow(20, 143), 140 + 144);
+    // Every bill, from every height of a period: the next window is the first height in one.
+    for (int bill{0}; bill < NUM_BILLS; ++bill) {
+        for (int from{1000}; from < 1000 + 144; ++from) {
+            const int next{NextCastWindow(bill, from)};
+            BOOST_CHECK(next >= from && next - from < 144);
+            BOOST_CHECK(InCastWindow(bill, next));
+            for (int h{from}; h < next; ++h) BOOST_CHECK(!InCastWindow(bill, h));
+        }
+    }
+
+    // The binary digits of an amount in bills, the largest first; what is less than a bill stays.
+    BOOST_CHECK_EQUAL(BillAmount(0), BILL_UNIT);
+    BOOST_CHECK_EQUAL(BillAmount(20), BILL_UNIT << 20);
+    BOOST_CHECK(Bills(0).empty());
+    BOOST_CHECK(Bills(BILL_UNIT - 1).empty());
+    BOOST_CHECK(Bills(5'990'000) == std::vector<int>({2, 0}));
+    BOOST_CHECK(Bills(BILL_UNIT * 64) == std::vector<int>({6}));
+    std::vector<int> all;
+    for (int k{NUM_BILLS - 1}; k >= 0; --k) all.push_back(k);
+    BOOST_CHECK(Bills(BillAmount(NUM_BILLS) - 1) == all);
+
+    // A step of the plan as the wallet keeps it: all but the height it last tried at.
+    MeltCastJob job;
+    job.id = 7;
+    job.kind = MeltCastJob::CAST;
+    job.coin = COutPoint{Txid::FromUint256(uint256::ONE), 3};
+    job.amount = BillAmount(4);
+    job.bill = 4;
+    job.due = 1234;
+    job.created = 99;
+    job.error = "Waiting";
+    job.tried = 1230;
+    BOOST_CHECK(!job.Sent());
+    job.txid = uint256::ONE;
+    BOOST_CHECK(job.Sent());
+    DataStream s{};
+    s << job;
+    MeltCastJob read;
+    s >> read;
+    BOOST_CHECK(s.empty());
+    BOOST_CHECK_EQUAL(read.id, 7U);
+    BOOST_CHECK_EQUAL(read.kind, MeltCastJob::CAST);
+    BOOST_CHECK(read.coin == job.coin);
+    BOOST_CHECK_EQUAL(read.amount, job.amount);
+    BOOST_CHECK_EQUAL(read.bill, 4);
+    BOOST_CHECK_EQUAL(read.due, 1234);
+    BOOST_CHECK_EQUAL(read.created, 99);
+    BOOST_CHECK(read.txid == uint256::ONE);
+    BOOST_CHECK_EQUAL(read.error, "Waiting");
+    BOOST_CHECK_EQUAL(read.tried, -1);
+}
+
+BOOST_FIXTURE_TEST_CASE(meltcast_plan_refusals_and_cancelling, ListCoinsTestingSetup)
+{
+    // zSide: what a melt or a cast refuses to plan, what the plan holds back, and dropping steps.
+    using namespace meltcast;
+    BOOST_CHECK_EQUAL(std::get<std::string>(ScheduleMelt(*wallet, -1)), "spread must not be negative");
+    BOOST_CHECK_EQUAL(std::get<std::string>(ScheduleCast(*wallet, BILL_UNIT, -1)), "spread must not be negative");
+    BOOST_CHECK_EQUAL(std::get<std::string>(ScheduleCast(*wallet, BILL_UNIT, 0)), "The wallet has no shielded account yet");
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_REQUIRE(SetupShieldedAccount(*wallet));
+    }
+    // (Up to the largest amount below the 22nd bill: what is less than the smallest bill stays shielded.)
+    const std::string range{"The amount must be between 0.01 and 20971.51999999"};
+    BOOST_CHECK_EQUAL(std::get<std::string>(ScheduleCast(*wallet, 0, 0)), range);
+    BOOST_CHECK_EQUAL(std::get<std::string>(ScheduleCast(*wallet, -BILL_UNIT, 0)), range);
+    BOOST_CHECK_EQUAL(std::get<std::string>(ScheduleCast(*wallet, BillAmount(NUM_BILLS), 0)), range);
+    BOOST_CHECK_EQUAL(std::get<std::string>(ScheduleCast(*wallet, BILL_UNIT - 1, 0)), "The smallest bill is 0.01");
+    const std::string empty{std::get<std::string>(ScheduleCast(*wallet, BILL_UNIT, 0))};
+    BOOST_CHECK_MESSAGE(empty.starts_with("Not enough in the shielded account: ") && empty.ends_with(", 0.00 free (casts planned already hold back 0.00)"), empty);
+
+    // A note of 1 for the account, waiting for a block: a cast may count on it.
+    const CTransactionRef paid{MakeTransactionRef(ShieldingTxTo(ShieldedKeyOf(5).first, *WITH_LOCK(wallet->cs_wallet, return ShieldedAddress(*wallet, 0)), COIN))};
+    BOOST_REQUIRE(WITH_LOCK(wallet->cs_wallet, return wallet->AddToWallet(paid, TxStateInMempool{})));
+    BOOST_REQUIRE_EQUAL(WITH_LOCK(wallet->cs_wallet, return GetShieldedBalance(*wallet).pending), COIN);
+    const auto cast{ScheduleCast(*wallet, 5'990'000, 0)};
+    BOOST_REQUIRE(std::holds_alternative<std::vector<MeltCastJob>>(cast));
+    const auto bills{std::get<std::vector<MeltCastJob>>(cast)};
+    BOOST_REQUIRE_EQUAL(bills.size(), 2U);
+    const int tip{WITH_LOCK(wallet->cs_wallet, return wallet->GetLastBlockHeight())};
+    for (const MeltCastJob& job : bills) {
+        BOOST_CHECK_EQUAL(job.kind, MeltCastJob::CAST);
+        BOOST_CHECK_EQUAL(job.amount, BillAmount(job.bill));
+        BOOST_CHECK(InCastWindow(job.bill, job.due));
+        BOOST_CHECK_EQUAL(job.due, NextCastWindow(job.bill, tip + 1));
+    }
+    BOOST_CHECK_EQUAL(WITH_LOCK(wallet->cs_wallet, return CastReserved(*wallet)), 5 * BILL_UNIT);
+    // More than is free with what the plan holds back.
+    const std::string held{std::get<std::string>(ScheduleCast(*wallet, 99 * BILL_UNIT, 0))};
+    BOOST_CHECK_MESSAGE(held.ends_with("(casts planned already hold back 0.05)"), held);
+
+    // Melt: every coin in a block, each locked until it goes.
+    const auto melt{ScheduleMelt(*wallet, 0)};
+    BOOST_REQUIRE(std::holds_alternative<std::vector<MeltCastJob>>(melt));
+    const auto melts{std::get<std::vector<MeltCastJob>>(melt)};
+    BOOST_REQUIRE(!melts.empty());
+    for (const MeltCastJob& job : melts) {
+        BOOST_CHECK(WITH_LOCK(wallet->cs_wallet, return wallet->IsLockedCoin(job.coin)));
+        BOOST_CHECK_EQUAL(job.due, tip + 1);
+    }
+    // Nothing left to melt: all locked.
+    BOOST_CHECK(std::get<std::string>(ScheduleMelt(*wallet, 0)).starts_with("No transparent coin to melt"));
+    // Melts hold nothing of the shielded account back.
+    BOOST_CHECK_EQUAL(WITH_LOCK(wallet->cs_wallet, return CastReserved(*wallet)), 5 * BILL_UNIT);
+
+    // Cancelling: a step not there, a melt (its coin unlocked), a cast (no longer held back).
+    BOOST_CHECK(!CancelMeltCast(*wallet, 999));
+    BOOST_CHECK(CancelMeltCast(*wallet, melts[0].id));
+    BOOST_CHECK(!WITH_LOCK(wallet->cs_wallet, return wallet->IsLockedCoin(melts[0].coin)));
+    BOOST_CHECK(!CancelMeltCast(*wallet, melts[0].id));
+    BOOST_CHECK(CancelMeltCast(*wallet, bills[0].id));
+    BOOST_CHECK_EQUAL(WITH_LOCK(wallet->cs_wallet, return CastReserved(*wallet)), 5 * BILL_UNIT - bills[0].amount);
+    // A step sent stays, while its transaction may still be mined: in the mempool or a block.
+    const auto mark_sent{[&](uint64_t id, const uint256& txid) {
+        LOCK(wallet->cs_wallet);
+        wallet->m_shielded.jobs.at(id).txid = txid;
+    }};
+    mark_sent(bills[1].id, paid->GetHash().ToUint256());
+    BOOST_CHECK(!CancelMeltCast(*wallet, bills[1].id));
+    BOOST_CHECK_EQUAL(WITH_LOCK(wallet->cs_wallet, return CastReserved(*wallet)), 0);
+    // Abandoned, it will never be: the step can go.
+    {
+        LOCK(wallet->cs_wallet);
+        wallet->mapWallet.at(paid->GetHash()).m_state = TxStateInactive{/*abandoned=*/true};
+    }
+    BOOST_CHECK(CancelMeltCast(*wallet, bills[1].id));
+    // One whose transaction the wallet no longer has, too.
+    if (melts.size() > 1) {
+        mark_sent(melts[1].id, uint256::ONE);
+        BOOST_CHECK(CancelMeltCast(*wallet, melts[1].id));
+        BOOST_CHECK(!WITH_LOCK(wallet->cs_wallet, return wallet->IsLockedCoin(melts[1].coin)));
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 } // namespace wallet
