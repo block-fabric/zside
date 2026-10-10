@@ -46,13 +46,6 @@ std::string ShieldedHrp()
 /** ZIP 32 coin type of the account: the seed is of this chain already, so any fixed value does. */
 constexpr uint32_t COIN_TYPE{1};
 
-uint256 HashBytes(const uint8_t* bytes)
-{
-    uint256 out;
-    std::memcpy(out.data(), bytes, 32);
-    return out;
-}
-
 /** The bytes of a bundle's sighash marker placeholder: a bundle of `size` bytes, all zero. */
 CScript PlaceholderMarker(size_t size)
 {

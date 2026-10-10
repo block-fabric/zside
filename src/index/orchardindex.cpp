@@ -183,12 +183,6 @@ std::optional<OrchardIndex::Witnesses> OrchardIndex::FindNotes(const std::vector
     return out;
 }
 
-std::optional<OrchardWitness> OrchardIndex::FindNote(const uint256& cmx) const
-{
-    LOCK(m_db->m_mutex);
-    return FindNoteLocked(cmx, m_db->Size());
-}
-
 std::optional<OrchardWitness> OrchardIndex::FindNoteLocked(const uint256& cmx, uint64_t size) const
 {
     uint64_t position;

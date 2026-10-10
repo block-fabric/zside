@@ -53,8 +53,6 @@ public:
     explicit OrchardIndex(std::unique_ptr<interfaces::Chain> chain, size_t n_cache_size, bool f_memory = false, bool f_wipe = false);
     ~OrchardIndex() override;
 
-    /** Where the note with the commitment `cmx` is, with its path to the current root. */
-    std::optional<OrchardWitness> FindNote(const uint256& cmx) const;
     /**
      * Where several notes are, with their paths to the same root: that of the tree as it was before
      * the block `next_block` (the one the block before it left), or of the current tree. Nullopt if
