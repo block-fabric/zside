@@ -15,6 +15,7 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <scheduler.h>
+#include <sidechain/mainchain.h>
 #include <sidechain/state.h>
 #include <sidechain/store.h>
 #include <streams.h>
@@ -67,7 +68,7 @@ uint256 NaiveRoot(const std::vector<uint256>& leaves)
  * A transaction that puts `value` into the pool, its bundle (of two actions, one output) proved and
  * signed for `domain`; one transparent input (which no check here looks at).
  */
-CMutableTransaction ShieldingTx(CAmount value, const SighashDomain& domain, uint8_t seed_byte = 9)
+CMutableTransaction ShieldingTx(CAmount value, const SighashDomain& domain, uint8_t seed_byte = 9, const std::optional<uint256>& anchor = std::nullopt)
 {
     std::array<uint8_t, 32> seed{};
     seed.fill(seed_byte);
@@ -77,8 +78,9 @@ CMutableTransaction ShieldingTx(CAmount value, const SighashDomain& domain, uint
     std::array<uint8_t, ADDRESS_SIZE> address;
     BOOST_REQUIRE_EQUAL(zo_full_viewing_key(sk.data(), fvk.data()), ZO_OK);
     BOOST_REQUIRE_EQUAL(zo_address(fvk.data(), 0, false, address.data()), ZO_OK);
-    const uint256 empty{EmptyRoot(TREE_DEPTH)};
-    ZoBuilder* builder{zo_builder_new(empty.data())};
+    // Outputs only: the spends are dummies of no value, whose proof holds whatever the anchor.
+    const uint256 root{anchor.value_or(EmptyRoot(TREE_DEPTH))};
+    ZoBuilder* builder{zo_builder_new(root.data())};
     BOOST_REQUIRE(builder);
     std::array<uint8_t, MEMO_SIZE> memo{};
     memo[0] = 0xF6;
@@ -115,6 +117,79 @@ CMutableTransaction WithValueBalance(CMutableTransaction mtx, int64_t balance)
     const size_t at{bundle_at + 1 + 2 * 820 + 1};
     for (int i{0}; i < 8; ++i) script[at + i] = static_cast<uint8_t>(static_cast<uint64_t>(balance) >> (8 * i));
     return mtx;
+}
+
+/** Bytes of an action in an encoded bundle. */
+constexpr size_t ACTION_BYTES{820};
+/** The size of an Orchard proof for n actions. */
+size_t ProofSize(size_t n) { return 2720 + 2272 * n; }
+
+/** The bundle a marker carries: after OP_RETURN, the push header, the tag and the version. */
+std::vector<uint8_t> MarkerBundle(const CScript& script)
+{
+    CScript::const_iterator pc{script.begin() + 1};
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+    BOOST_REQUIRE(script.GetOp(pc, opcode, data));
+    BOOST_REQUIRE(data.size() > sizeof(SHIELDED_TAG));
+    return {data.begin() + sizeof(SHIELDED_TAG) + 1, data.end()};
+}
+
+void WriteCompact(std::vector<uint8_t>& out, uint64_t n)
+{
+    if (n < 0xfd) {
+        out.push_back(static_cast<uint8_t>(n));
+    } else if (n <= 0xffff) {
+        out.push_back(0xfd);
+        for (int i{0}; i < 2; ++i) out.push_back(static_cast<uint8_t>(n >> (8 * i)));
+    } else {
+        BOOST_REQUIRE(n <= 0xffffffff);
+        out.push_back(0xfe);
+        for (int i{0}; i < 4; ++i) out.push_back(static_cast<uint8_t>(n >> (8 * i)));
+    }
+}
+
+/**
+ * A well-formed bundle of `n` actions, each a copy of the first action of `bundle` (a bundle of two
+ * actions, as ShieldingTx makes), its value balance `balance`: it parses, its proof is all zeros and
+ * its signatures are copies (it does not verify). Every action reveals the same nullifier.
+ */
+std::vector<uint8_t> CopiedActions(const std::vector<uint8_t>& bundle, size_t n, int64_t balance)
+{
+    // Two actions: the count (one byte), the actions, flags, value balance, anchor, proof, signatures.
+    BOOST_REQUIRE_EQUAL(bundle.at(0), 2);
+    const auto action{bundle.begin() + 1};
+    const auto flags{action + 2 * ACTION_BYTES};
+    const auto anchor{flags + 1 + 8};
+    const auto sigs{anchor + 32 + 3 + ProofSize(2)};
+    std::vector<uint8_t> out;
+    WriteCompact(out, n);
+    for (size_t i{0}; i < n; ++i) out.insert(out.end(), action, action + ACTION_BYTES);
+    out.push_back(*flags);
+    for (int i{0}; i < 8; ++i) out.push_back(static_cast<uint8_t>(static_cast<uint64_t>(balance) >> (8 * i)));
+    out.insert(out.end(), anchor, anchor + 32);
+    WriteCompact(out, ProofSize(n));
+    out.resize(out.size() + ProofSize(n), 0);
+    for (size_t i{0}; i < n; ++i) out.insert(out.end(), sigs, sigs + 64);
+    out.insert(out.end(), sigs + 2 * 64, sigs + 3 * 64);
+    BOOST_REQUIRE(sigs + 3 * 64 == bundle.end());
+    return out;
+}
+
+/** A marker script whose push is written with `opcode`, not necessarily the minimal one. */
+CScript MarkerWithPush(std::span<const uint8_t> bundle, opcodetype opcode)
+{
+    std::vector<uint8_t> data(std::begin(SHIELDED_TAG), std::end(SHIELDED_TAG));
+    data.push_back(SHIELDED_VERSION);
+    data.insert(data.end(), bundle.begin(), bundle.end());
+    CScript script;
+    script.push_back(OP_RETURN);
+    script.push_back(opcode);
+    const uint32_t size{static_cast<uint32_t>(data.size())};
+    const int width{opcode == OP_PUSHDATA1 ? 1 : opcode == OP_PUSHDATA2 ? 2 : 4};
+    for (int i{0}; i < width; ++i) script.push_back(static_cast<uint8_t>(size >> (8 * i)));
+    script.insert(script.end(), data.begin(), data.end());
+    return script;
 }
 } // namespace
 
@@ -482,6 +557,372 @@ BOOST_FIXTURE_TEST_CASE(witnesses_never_wait_on_the_scheduler, TestChain100Setup
 
     g_orchardindex->Stop();
     g_orchardindex.reset();
+}
+
+
+BOOST_AUTO_TEST_CASE(every_reject_reason_of_a_shielded_tx)
+{
+    // One transaction per reason CheckShieldedTx gives, each with the exact reason; the valid one passes.
+    const CMutableTransaction good{ShieldingTx(1000, TEST_DOMAIN, 21)};
+    const CScript& marker{good.vout[0].scriptPubKey};
+    const std::vector<uint8_t> bundle{MarkerBundle(marker)};
+    const auto with_marker{[&](const CScript& script) {
+        CMutableTransaction mtx{good};
+        mtx.vout[0].scriptPubKey = script;
+        return mtx;
+    }};
+    const auto plus_output{[&](CTxOut out, bool before) {
+        CMutableTransaction mtx{good};
+        mtx.vout.insert(before ? mtx.vout.begin() : mtx.vout.end(), std::move(out));
+        return mtx;
+    }};
+    CMutableTransaction no_inputs_no_marker;
+    no_inputs_no_marker.vout.emplace_back(1, CScript{} << OP_TRUE);
+    CMutableTransaction coinbase{good};
+    coinbase.vin = {CTxIn{COutPoint{}, CScript{} << 1 << OP_0}};
+    CMutableTransaction marker_value_low{good};
+    --marker_value_low.vout[0].nValue;
+    CMutableTransaction marker_value_high{good};
+    ++marker_value_high.vout[0].nValue;
+    // Taking out of the pool: the marker carries nothing.
+    CMutableTransaction marker_value_on_unshield{WithValueBalance(good, 500)};
+    marker_value_on_unshield.vout[0].nValue = 0;
+    CMutableTransaction marker_value_unshield_ok{marker_value_on_unshield};
+    ++marker_value_on_unshield.vout[0].nValue;
+    // A byte of the proof changed: the sighash (which leaves the proof out) is the same, the proof is not.
+    CMutableTransaction proof_changed{good};
+    proof_changed.vout[0].scriptPubKey[proof_changed.vout[0].scriptPubKey.size() - 3 * 64 - 100] ^= 1;
+    // The tag and the version, then nothing.
+    CScript tag_only;
+    tag_only << OP_RETURN << std::vector<unsigned char>(std::begin(SHIELDED_TAG), std::end(SHIELDED_TAG));
+    CScript other_version{marker};
+    other_version[1 + 3 + sizeof(SHIELDED_TAG)] = SHIELDED_VERSION + 1;
+    CScript trailing{marker};
+    trailing << OP_TRUE;
+    std::vector<uint8_t> garbage(bundle.size(), 0x42);
+    std::vector<uint8_t> extra_byte{bundle};
+    extra_byte.push_back(0);
+    std::vector<uint8_t> two_fifty_seven{CopiedActions(bundle, MAX_ACTIONS + 1, -1000)};
+
+    struct Case {
+        const char* name;
+        CMutableTransaction tx;
+        std::string reason;
+    };
+    const std::vector<Case> cases{
+        {"valid", good, ""},
+        {"no marker, transparent inputs", [&] { CMutableTransaction m{good}; m.vout[0] = CTxOut{1, CScript{} << OP_TRUE}; return m; }(), ""},
+        {"two markers", plus_output(good.vout[0], false), "bad-zs-markers"},
+        {"a bad marker, then a good one", plus_output(CTxOut{0, ShieldedMarkerScript(garbage)}, true), "bad-zs-markers"},
+        {"a good marker, then a bad one", plus_output(CTxOut{0, ShieldedMarkerScript(garbage)}, false), "bad-zs-markers"},
+        {"garbage for a bundle", with_marker(ShieldedMarkerScript(garbage)), "bad-zs-bundle"},
+        {"a byte after the bundle", with_marker(ShieldedMarkerScript(extra_byte)), "bad-zs-bundle"},
+        {"a push wider than needed", with_marker(MarkerWithPush(bundle, OP_PUSHDATA4)), "bad-zs-bundle"},
+        {"another version", with_marker(other_version), "bad-zs-bundle"},
+        {"the tag alone", with_marker(tag_only), "bad-zs-bundle"},
+        {"an opcode after the push", with_marker(trailing), "bad-zs-bundle"},
+        // More actions than MAX_ACTIONS: the bundle's parser refuses them before CheckShieldedTx counts them.
+        {"257 actions", with_marker(ShieldedMarkerScript(two_fifty_seven)), "bad-zs-bundle"},
+        {"no input, no marker", no_inputs_no_marker, "bad-txns-vin-empty"},
+        {"in a coinbase", coinbase, "bad-zs-coinbase"},
+        {"value balance below -MAX_MONEY", WithValueBalance(good, -MAX_MONEY - 1), "bad-zs-value-balance"},
+        {"value balance above MAX_MONEY", WithValueBalance(good, MAX_MONEY + 1), "bad-zs-value-balance"},
+        {"marker carries less than goes in", marker_value_low, "bad-zs-marker-value"},
+        {"marker carries more than goes in", marker_value_high, "bad-zs-marker-value"},
+        {"marker carries value out of the pool", marker_value_on_unshield, "bad-zs-marker-value"},
+        // Its value balance changed: well formed, carried right, but not what was signed.
+        {"value balance changed", marker_value_unshield_ok, "bad-zs-proof"},
+        {"proof changed", proof_changed, "bad-zs-proof"},
+        {"signed for another chain", ShieldingTx(1000, OTHER_DOMAIN, 21), "bad-zs-proof"},
+    };
+    for (const Case& c : cases) {
+        std::string reason;
+        const bool ok{CheckShieldedTx(CTransaction{c.tx}, reason, TEST_DOMAIN)};
+        BOOST_CHECK_MESSAGE(ok == c.reason.empty(), c.name);
+        if (!c.reason.empty()) {
+            BOOST_CHECK_MESSAGE(reason == c.reason, c.name << ": " << reason);
+            // A transaction's own reasons fail a block whatever the record of the mainchain; the
+            // transparent rule is the template's.
+            BOOST_CHECK_EQUAL(TxOnlyReason(reason), reason.starts_with("bad-zs-"));
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(too_many_actions_is_refused_by_the_parser)
+{
+    // CheckShieldedTx refuses a bundle of more than MAX_ACTIONS actions, but such a bundle never parses
+    // (the library has the same limit): bad-zs-too-many-actions is defensive. The limit itself parses.
+    const std::vector<uint8_t> bundle{MarkerBundle(ShieldingTx(1000, TEST_DOMAIN, 22).vout[0].scriptPubKey)};
+    for (const size_t n : {size_t{1}, size_t{2}, size_t{252}, size_t{253}, MAX_ACTIONS}) {
+        const auto parsed{Bundle::FromBytes(CopiedActions(bundle, n, -1000))};
+        BOOST_REQUIRE_MESSAGE(parsed, n);
+        BOOST_CHECK_EQUAL(parsed->NumActions(), n);
+        BOOST_CHECK_EQUAL(parsed->ValueBalance(), -1000);
+        BOOST_CHECK_EQUAL(parsed->Nullifiers().size(), n);
+        BOOST_CHECK_EQUAL(parsed->Commitments().size(), n);
+    }
+    BOOST_CHECK(!Bundle::FromBytes(CopiedActions(bundle, MAX_ACTIONS + 1, -1000)));
+    // No action at all, or the proof of another number of actions: neither parses.
+    std::vector<uint8_t> none{CopiedActions(bundle, 1, 0)};
+    none[0] = 0;
+    BOOST_CHECK(!Bundle::FromBytes(none));
+    std::vector<uint8_t> short_proof{CopiedActions(bundle, 3, 0)};
+    const size_t proof_at{1 + 3 * ACTION_BYTES + 1 + 8 + 32};
+    short_proof[proof_at + 1] = static_cast<uint8_t>(ProofSize(2));
+    short_proof[proof_at + 2] = static_cast<uint8_t>(ProofSize(2) >> 8);
+    short_proof.erase(short_proof.begin() + proof_at + 3, short_proof.begin() + proof_at + 3 + 2272);
+    BOOST_CHECK(!Bundle::FromBytes(short_proof));
+}
+
+BOOST_AUTO_TEST_CASE(value_in_with_every_action_count_encoding)
+{
+    // ShieldedValueIn reads the value balance past the actions, whose count is a compact size.
+    const std::vector<uint8_t> bundle{MarkerBundle(ShieldingTx(1000, TEST_DOMAIN, 23).vout[0].scriptPubKey)};
+    CMutableTransaction mtx;
+    for (const size_t n : {size_t{1}, size_t{252}, size_t{253}, MAX_ACTIONS}) {
+        mtx.vout = {CTxOut{0, ShieldedMarkerScript(CopiedActions(bundle, n, 777))}};
+        BOOST_CHECK_MESSAGE(ShieldedValueIn(CTransaction{mtx}) == 777, n);
+    }
+    // Bundles it cannot read: nothing.
+    const auto value_in{[&](std::vector<uint8_t> payload) {
+        mtx.vout = {CTxOut{0, ShieldedMarkerScript(payload)}};
+        return ShieldedValueIn(CTransaction{mtx});
+    }};
+    // No bundle after the version.
+    BOOST_CHECK_EQUAL(value_in({}), 0);
+    // A compact size of three bytes cut short.
+    BOOST_CHECK_EQUAL(value_in({0xfd, 0x01}), 0);
+    // Compact sizes of five and nine bytes: more actions than any bundle has.
+    std::vector<uint8_t> wide{CopiedActions(bundle, 1, 777)};
+    wide[0] = 0xfe;
+    BOOST_CHECK_EQUAL(value_in(wide), 0);
+    wide[0] = 0xff;
+    BOOST_CHECK_EQUAL(value_in(wide), 0);
+    // More than MAX_ACTIONS, written as a compact size of three bytes.
+    std::vector<uint8_t> too_many{CopiedActions(bundle, MAX_ACTIONS, 777)};
+    too_many[1] = static_cast<uint8_t>(MAX_ACTIONS + 1);
+    too_many[2] = static_cast<uint8_t>((MAX_ACTIONS + 1) >> 8);
+    BOOST_CHECK_EQUAL(value_in(too_many), 0);
+    // A marker that is no well-formed marker (a wider push than needed) is not read either.
+    mtx.vout = {CTxOut{0, MarkerWithPush(CopiedActions(bundle, 1, 777), OP_PUSHDATA4)}};
+    BOOST_CHECK_EQUAL(ShieldedValueIn(CTransaction{mtx}), 0);
+    // The first marker that reads counts.
+    mtx.vout = {CTxOut{1, CScript{} << OP_TRUE}, CTxOut{0, ShieldedMarkerScript(CopiedActions(bundle, 1, 5))}};
+    BOOST_CHECK_EQUAL(ShieldedValueIn(CTransaction{mtx}), 5);
+}
+
+BOOST_AUTO_TEST_CASE(every_reject_reason_of_the_state)
+{
+    // The checks against the pool (CheckState, and ApplyTx after the proof), one per reason.
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay store{empty};
+    ShieldedState state{store};
+    BOOST_CHECK_EQUAL(state.AnchorCount(), 1U);
+    BOOST_CHECK_EQUAL(state.Pool(), 0);
+    const CMutableTransaction good{ShieldingTx(1000, TEST_DOMAIN, 31)};
+    std::string reason;
+
+    // A transaction it cannot read: the reason of the bundle.
+    CMutableTransaction two_markers{good};
+    two_markers.vout.push_back(good.vout[0]);
+    BOOST_CHECK(!state.CheckState(CTransaction{two_markers}, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-zs-markers");
+    CMutableTransaction garbage{good};
+    garbage.vout[0].scriptPubKey = ShieldedMarkerScript(std::vector<uint8_t>(100, 0x42));
+    reason.clear();
+    BOOST_CHECK(!state.CheckState(CTransaction{garbage}, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-zs-bundle");
+    // No bundle: nothing to check.
+    CMutableTransaction transparent{good};
+    transparent.vout[0] = CTxOut{1, CScript{} << OP_TRUE};
+    reason.clear();
+    BOOST_CHECK(state.CheckState(CTransaction{transparent}, reason));
+    BOOST_CHECK(state.ApplyTx(CTransaction{transparent}, reason, TEST_DOMAIN));
+    BOOST_CHECK_EQUAL(state.Tree().Size(), 0U);
+
+    // Two actions that reveal the same nullifier, in one bundle.
+    CMutableTransaction twice{good};
+    twice.vout[0].scriptPubKey = ShieldedMarkerScript(CopiedActions(MarkerBundle(good.vout[0].scriptPubKey), 2, -1000));
+    reason.clear();
+    BOOST_CHECK(!state.CheckState(CTransaction{twice}, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-zs-double-spend");
+
+    // An anchor that is no root the tree had.
+    Frontier other_tree;
+    other_tree.Append(Leaf(1));
+    const CMutableTransaction unanchored{ShieldingTx(1000, TEST_DOMAIN, 32, other_tree.Root())};
+    reason.clear();
+    BOOST_CHECK(!state.CheckState(CTransaction{unanchored}, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-zs-anchor");
+    const uint256 before{sidechain::StoreHash(store)};
+    reason.clear();
+    BOOST_CHECK(!state.ApplyTx(CTransaction{unanchored}, reason, TEST_DOMAIN));
+    BOOST_CHECK_EQUAL(reason, "bad-zs-anchor");
+    BOOST_CHECK(sidechain::StoreHash(store) == before);
+
+    // Applied: its nullifiers spent, its notes in the tree, its value in the pool.
+    reason.clear();
+    BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{good}, reason, TEST_DOMAIN), reason);
+    BOOST_CHECK_EQUAL(state.Pool(), 1000);
+    BOOST_CHECK_EQUAL(state.NullifierCount(), 2U);
+    BOOST_CHECK_EQUAL(state.Tree().Size(), 2U);
+    std::string error;
+    for (const uint256& nf : Bundle::FromTx(CTransaction{good}, error)->Nullifiers()) BOOST_CHECK(state.IsSpent(nf));
+    // Its tree's root is an anchor once the block ends, once only.
+    BOOST_CHECK(!state.IsAnchor(state.Tree().Root()));
+    state.EndBlock();
+    BOOST_CHECK(state.IsAnchor(state.Tree().Root()));
+    BOOST_CHECK_EQUAL(state.AnchorCount(), 2U);
+    state.EndBlock();
+    BOOST_CHECK_EQUAL(state.AnchorCount(), 2U);
+
+    // Again: its nullifiers are spent.
+    reason.clear();
+    BOOST_CHECK(!state.CheckState(CTransaction{good}, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-zs-double-spend");
+    const uint256 applied{sidechain::StoreHash(store)};
+    reason.clear();
+    BOOST_CHECK(!state.ApplyTx(CTransaction{good}, reason, TEST_DOMAIN));
+    BOOST_CHECK_EQUAL(reason, "bad-zs-double-spend");
+    BOOST_CHECK(sidechain::StoreHash(store) == applied);
+
+    // A bundle anchored at a root the tree had: taken.
+    const CMutableTransaction anchored{ShieldingTx(500, TEST_DOMAIN, 33, state.Tree().Root())};
+    reason.clear();
+    BOOST_CHECK_MESSAGE(state.CheckState(CTransaction{anchored}, reason), reason);
+    BOOST_CHECK_MESSAGE(state.ApplyTx(CTransaction{anchored}, reason, TEST_DOMAIN), reason);
+    BOOST_CHECK_EQUAL(state.Pool(), 1500);
+
+    // The proof is the last check of ApplyTx, before the pool: a bundle of another chain fails there.
+    reason.clear();
+    BOOST_CHECK(!state.ApplyTx(CTransaction{ShieldingTx(1000, OTHER_DOMAIN, 34)}, reason, TEST_DOMAIN));
+    BOOST_CHECK_EQUAL(reason, "bad-zs-proof");
+    // Out of the pool, more than it holds.
+    reason.clear();
+    BOOST_CHECK(!state.CheckState(CTransaction{WithValueBalance(ShieldingTx(1000, TEST_DOMAIN, 35), 1501)}, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-zs-pool-negative");
+    // As much as it holds: the pool may be emptied.
+    reason.clear();
+    BOOST_CHECK_MESSAGE(state.CheckState(CTransaction{WithValueBalance(ShieldingTx(1000, TEST_DOMAIN, 35), 1500)}, reason), reason);
+}
+
+BOOST_AUTO_TEST_CASE(shielded_rules_of_a_block)
+{
+    // State::ConnectBlock: the coinbase may not carry a bundle; each transaction is checked, in a
+    // batch first; the block's final root is an anchor of the next.
+    Consensus::SidechainParams params;
+    params.enabled = true;
+    params.slot = 6;
+    const SighashDomain domain{SighashDomainOf(params, Params().GetConsensus().hashGenesisBlock)};
+    sidechain::Mainchain mainchain;
+    for (uint8_t h{0}; h < 3; ++h) {
+        sidechain::MainBlock main;
+        main.hash = uint256{static_cast<uint8_t>(h + 1)};
+        main.prev_hash = mainchain.TipHash();
+        BOOST_REQUIRE(mainchain.Append(main));
+    }
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay chain{empty};
+    CMutableTransaction coinbase;
+    coinbase.vin.emplace_back(COutPoint{});
+    coinbase.vin[0].scriptSig = CScript{} << 1 << OP_0;
+    coinbase.vout.emplace_back(0, CScript{} << OP_TRUE);
+    const auto connect{[&](std::vector<CTransactionRef> txs, sidechain::StoreOverlay& out) {
+        CBlock block;
+        block.vtx = std::move(txs);
+        block.hashMerkleRoot = BlockMerkleRoot(block);
+        const sidechain::Mainchain::AssumeCommitted assumed{mainchain, 2};
+        sidechain::State state{out};
+        CAmount minted;
+        std::string reason;
+        return state.ConnectBlock(block, 1, params, mainchain, minted, reason) ? std::string{} : reason;
+    }};
+    const auto shield_a{MakeTransactionRef(ShieldingTx(1000, domain, 41))};
+    const auto shield_b{MakeTransactionRef(ShieldingTx(2000, domain, 42))};
+
+    // A coinbase with a marker, valid or not.
+    CMutableTransaction marked_coinbase{coinbase};
+    marked_coinbase.vout.push_back(shield_a->vout[0]);
+    {
+        sidechain::StoreOverlay block{static_cast<const sidechain::StoreView&>(chain)};
+        BOOST_CHECK_EQUAL(connect({MakeTransactionRef(marked_coinbase)}, block), "bad-zs-coinbase");
+    }
+    // An invalid proof among valid ones: the batch fails, the transaction is found.
+    {
+        sidechain::StoreOverlay block{static_cast<const sidechain::StoreView&>(chain)};
+        BOOST_CHECK_EQUAL(connect({MakeTransactionRef(coinbase), shield_a, MakeTransactionRef(ShieldingTx(3000, OTHER_DOMAIN, 43)), shield_b}, block), "bad-zs-proof");
+    }
+    // The same notes spent twice in one block (the same transaction twice, which CheckBlock refuses
+    // before; the state refuses it too).
+    {
+        sidechain::StoreOverlay block{static_cast<const sidechain::StoreView&>(chain)};
+        BOOST_CHECK_EQUAL(connect({MakeTransactionRef(coinbase), shield_a, shield_a}, block), "bad-zs-double-spend");
+    }
+    // Valid: the pool and the anchors move.
+    uint256 root;
+    {
+        sidechain::StoreOverlay block{static_cast<const sidechain::StoreView&>(chain)};
+        BOOST_CHECK_EQUAL(connect({MakeTransactionRef(coinbase), shield_a, shield_b}, block), "");
+        const ShieldedState after{block};
+        BOOST_CHECK_EQUAL(after.Pool(), 3000);
+        BOOST_CHECK_EQUAL(after.Tree().Size(), 4U);
+        root = after.Tree().Root();
+        BOOST_CHECK(after.IsAnchor(root));
+        BOOST_CHECK_EQUAL(after.AnchorCount(), 2U);
+        block.MergeInto(chain);
+    }
+    // The next block: the same transaction again spends spent nullifiers.
+    {
+        sidechain::StoreOverlay block{static_cast<const sidechain::StoreView&>(chain)};
+        BOOST_CHECK_EQUAL(connect({MakeTransactionRef(coinbase), shield_a}, block), "bad-zs-double-spend");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(no_transparent_inputs_flag)
+{
+    // Written with the flag of no inputs (2) only when there is a marker; read back the same.
+    CMutableTransaction mtx;
+    mtx.version = 2;
+    mtx.vout.emplace_back(0, ShieldedMarkerScript(std::vector<uint8_t>(10, 7)));
+    DataStream s{};
+    s << TX_WITH_WITNESS(mtx);
+    const std::vector<std::byte> bytes(s.begin(), s.end());
+    BOOST_CHECK_EQUAL(std::to_integer<int>(bytes[4]), 0);
+    BOOST_CHECK_EQUAL(std::to_integer<int>(bytes[5]), 2);
+    // Without witnesses, the old format: an empty vin is not followed by flags.
+    DataStream legacy{};
+    legacy << TX_NO_WITNESS(mtx);
+    BOOST_CHECK_EQUAL(std::to_integer<int>(legacy[4]), 0);
+    BOOST_CHECK_EQUAL(std::to_integer<int>(legacy[5]), 1);
+    BOOST_CHECK_EQUAL(legacy.size() + 2, bytes.size());
+
+    const auto read{[](std::vector<std::byte> b) -> std::string {
+        DataStream in{b};
+        CMutableTransaction out;
+        try {
+            in >> TX_WITH_WITNESS(out);
+        } catch (const std::ios_base::failure& e) {
+            return e.what();
+        }
+        return "";
+    }};
+    BOOST_CHECK_EQUAL(read(bytes), "");
+    // An input after the flag of none: refused.
+    CMutableTransaction with_input{mtx};
+    with_input.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 0});
+    DataStream normal{};
+    normal << TX_NO_WITNESS(with_input);
+    std::vector<std::byte> forged{bytes.begin(), bytes.begin() + 6};
+    forged.insert(forged.end(), normal.begin() + 4, normal.end());
+    BOOST_CHECK(read(forged).find("Unknown transaction optional data") != std::string::npos);
+    // The flags of witnesses and of no inputs together: no witness to read, so a superfluous record.
+    std::vector<std::byte> both{bytes};
+    both[5] = std::byte{3};
+    BOOST_CHECK(read(both).find("Superfluous witness record") != std::string::npos);
+    // An unknown flag.
+    std::vector<std::byte> unknown{bytes};
+    unknown[5] = std::byte{4};
+    BOOST_CHECK(read(unknown).find("Unknown transaction optional data") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
