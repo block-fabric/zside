@@ -696,6 +696,10 @@ class CTransaction:
     @property
     def wtxid(self):
         """Return wtxid (transaction hash with witness) as little-endian bytes."""
+        # Without witnesses it is the txid, as in the node: a shielded transaction without
+        # transparent inputs is written with the flag of no inputs (zSide), which no hash takes.
+        if self.wit.is_null():
+            return hash256(self.serialize_without_witness())
         return hash256(self.serialize_with_witness())
 
     @property
