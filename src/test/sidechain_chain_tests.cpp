@@ -49,6 +49,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -645,17 +646,17 @@ BOOST_FIXTURE_TEST_CASE(block_weight_limits, MainNetworkSetup)
 
 namespace {
 /** The parameters of a network as a release made from the template could have them: a first block of
- * its own (not the template's), and the mainchain block that activated the sidechain, or none (0). */
+ * its own (or the template's, own_genesis false), and the mainchain block that activated the sidechain,
+ * or none (0). */
 struct ReleaseParams : public CChainParams {
     ReleaseParams(const CChainParams& base, int main_activation_height, bool sidechain = true, bool own_genesis = true) : CChainParams{base}
     {
         consensus.sidechain.enabled = sidechain;
         consensus.sidechain.main_activation_height = main_activation_height;
-        if (own_genesis) {
-            CMutableTransaction coinbase{*genesis.vtx[0]};
-            coinbase.vin[0].scriptSig = CScript() << std::vector<unsigned char>{'A', ' ', 's', 'i', 'd', 'e', 'c', 'h', 'a', 'i', 'n'};
-            genesis.vtx[0] = MakeTransactionRef(std::move(coinbase));
-        }
+        const std::string_view text{own_genesis ? "A sidechain" : "Sidechain template, its own network"};
+        CMutableTransaction coinbase{*genesis.vtx[0]};
+        coinbase.vin[0].scriptSig = CScript() << std::vector<unsigned char>{text.begin(), text.end()};
+        genesis.vtx[0] = MakeTransactionRef(std::move(coinbase));
     }
 };
 } // namespace
