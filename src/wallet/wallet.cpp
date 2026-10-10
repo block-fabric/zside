@@ -2183,6 +2183,8 @@ std::set<Txid> CWallet::GetTxConflicts(const CWalletTx& wtx) const
 
     const Txid myHash{wtx.GetHash()};
     std::set<Txid> result{GetConflicts(myHash)};
+    // zSide: and those that spend a note it spends (they reveal the same nullifier).
+    for (const Txid& other : ShieldedConflicts(*this, *wtx.GetTx())) result.insert(other);
     result.erase(myHash);
     return result;
 }
