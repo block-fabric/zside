@@ -1191,6 +1191,153 @@ BOOST_FIXTURE_TEST_CASE(meltcast_stops_between_steps, ListCoinsTestingSetup)
     BOOST_CHECK_EQUAL(tried(), 1);
 }
 
+/** zSide: a block more, the wallet told of it (the wallets of these tests are not attached to the chain); its height. */
+static int NextBlock(TestChain100Setup& setup, CWallet& wallet, const CKey& key)
+{
+    setup.CreateAndProcessBlock({}, GetScriptForRawPubKey(key.GetPubKey()));
+    LOCK2(wallet.cs_wallet, ::cs_main);
+    const int height{setup.m_node.chainman->ActiveChain().Height()};
+    wallet.SetLastBlockProcessed(height, setup.m_node.chainman->ActiveChain().Tip()->GetBlockHash());
+    return height;
+}
+
+BOOST_FIXTURE_TEST_CASE(meltcast_locked_spent_cancelled, ListCoinsTestingSetup)
+{
+    // zSide: a melt waits while the wallet is locked; one whose coin was spent some other way is dropped;
+    // one cancelled while it was being made went, and is not kept.
+    using namespace meltcast;
+    AddTx(CRecipient{PKHash{coinbaseKey.GetPubKey()}, 10 * COIN, /*fSubtractFeeFromAmount=*/false});
+    const auto planned{ScheduleMelt(*wallet, /*spread=*/0)};
+    BOOST_REQUIRE(std::holds_alternative<std::vector<MeltCastJob>>(planned));
+    std::vector<MeltCastJob> melts{std::get<std::vector<MeltCastJob>>(planned)};
+    BOOST_REQUIRE_GE(melts.size(), 2U);
+    // Two of them, the first due first (steps go in the order of their ids).
+    for (size_t i{2}; i < melts.size(); ++i) BOOST_REQUIRE(CancelMeltCast(*wallet, melts[i].id));
+    melts.resize(2);
+    BOOST_REQUIRE(melts[0].id < melts[1].id);
+    const auto job{[&](uint64_t id) -> std::optional<MeltCastJob> {
+        LOCK(wallet->cs_wallet);
+        const auto it{wallet->m_shielded.jobs.find(id)};
+        if (it == wallet->m_shielded.jobs.end()) return std::nullopt;
+        return it->second;
+    }};
+
+    // Locked: each step due waits, and says why; nothing is made.
+    const SecureString passphrase{"melt"};
+    BOOST_REQUIRE(wallet->EncryptWallet(passphrase));
+    BOOST_REQUIRE(wallet->IsLocked());
+    int height{NextBlock(*this, *wallet, coinbaseKey)};
+    BOOST_CHECK_EQUAL(RunMeltCast(*wallet, {}), 0);
+    for (const MeltCastJob& melt : melts) {
+        BOOST_CHECK_EQUAL(job(melt.id)->error, "Waiting for the wallet to be unlocked");
+        BOOST_CHECK_EQUAL(job(melt.id)->tried, height);
+        BOOST_CHECK(!job(melt.id)->Sent());
+        BOOST_CHECK(WITH_LOCK(wallet->cs_wallet, return wallet->IsLockedCoin(melt.coin)));
+    }
+    // Tried once a block: not again at the same height.
+    BOOST_CHECK_EQUAL(RunMeltCast(*wallet, [] { BOOST_ERROR("no step is due"); return true; }), 0);
+    // Still locked at the next block: the same.
+    height = NextBlock(*this, *wallet, coinbaseKey);
+    BOOST_CHECK_EQUAL(RunMeltCast(*wallet, {}), 0);
+    BOOST_CHECK_EQUAL(job(melts[0].id)->error, "Waiting for the wallet to be unlocked");
+    BOOST_CHECK_EQUAL(job(melts[0].id)->tried, height);
+    BOOST_REQUIRE(wallet->Unlock(passphrase));
+
+    // The first coin, unlocked and spent by another payment: its step is dropped when it comes.
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_REQUIRE(wallet->UnlockCoin(melts[0].coin));
+    }
+    CCoinControl coin_control;
+    coin_control.m_allow_other_inputs = false;
+    coin_control.Select(melts[0].coin);
+    const auto spend{CreateTransaction(*wallet, {CRecipient{PKHash{coinbaseKey.GetPubKey()}, COIN, /*fSubtractFeeFromAmount=*/false}}, /*change_pos=*/std::nullopt, coin_control)};
+    BOOST_REQUIRE(spend);
+    BOOST_REQUIRE_EQUAL(spend->tx->vin.size(), 1U);
+    BOOST_REQUIRE(spend->tx->vin[0].prevout == melts[0].coin);
+    wallet->CommitTransaction(spend->tx);
+    BOOST_REQUIRE(WITH_LOCK(wallet->cs_wallet, return wallet->IsSpent(melts[0].coin)));
+    height = NextBlock(*this, *wallet, coinbaseKey);
+    int asked{0};
+    BOOST_CHECK_EQUAL(RunMeltCast(*wallet, [&] { return ++asked > 1; }), 0);
+    BOOST_CHECK(!job(melts[0].id));
+    // (The second waited for the next call.)
+    BOOST_CHECK_EQUAL(job(melts[1].id)->tried, height - 1);
+
+    // The second, cancelled while it was being made (when the wallet takes in its transaction): it went;
+    // the step is not kept, and its coin is no longer locked.
+    std::optional<Txid> made;
+    btcsignals::scoped_connection cancel{wallet->NotifyTransactionChanged.connect([&](const Txid& txid, ChangeType status) {
+        if (status != CT_NEW) return;
+        made = txid;
+        BOOST_CHECK(CancelMeltCast(*wallet, melts[1].id));
+    })};
+    BOOST_CHECK_EQUAL(RunMeltCast(*wallet, {}), 1);
+    cancel.disconnect();
+    BOOST_REQUIRE(made);
+    BOOST_CHECK(!job(melts[1].id));
+    LOCK(wallet->cs_wallet);
+    BOOST_CHECK(!wallet->IsLockedCoin(melts[1].coin));
+    const CWalletTx* wtx{wallet->GetWalletTx(*made)};
+    BOOST_REQUIRE(wtx);
+    BOOST_CHECK(!wtx->isAbandoned());
+    BOOST_REQUIRE_EQUAL(wtx->GetTx()->vin.size(), 1U);
+    BOOST_CHECK(wtx->GetTx()->vin[0].prevout == melts[1].coin);
+    BOOST_CHECK(zside::HasShieldedMarker(*wtx->GetTx()));
+    BOOST_CHECK(wallet->m_shielded.jobs.empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(meltcast_failed_step_tried_again, ListCoinsTestingSetup)
+{
+    // zSide: a step that cannot go keeps the reason, and is tried again: a cast at its bill's next
+    // window, at most once a block.
+    using namespace meltcast;
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_REQUIRE(SetupShieldedAccount(*wallet));
+    }
+    // A note of 1 for the account, waiting for a block: a cast may count on it, and cannot spend it yet.
+    const CTransactionRef paid{MakeTransactionRef(ShieldingTxTo(ShieldedKeyOf(8).first, *WITH_LOCK(wallet->cs_wallet, return ShieldedAddress(*wallet, 0)), COIN))};
+    BOOST_REQUIRE(WITH_LOCK(wallet->cs_wallet, return wallet->AddToWallet(paid, TxStateInMempool{})));
+    const auto cast{ScheduleCast(*wallet, BillAmount(1), /*spread=*/0)};
+    BOOST_REQUIRE(std::holds_alternative<std::vector<MeltCastJob>>(cast));
+    BOOST_REQUIRE_EQUAL(std::get<std::vector<MeltCastJob>>(cast).size(), 1U);
+    const MeltCastJob bill{std::get<std::vector<MeltCastJob>>(cast)[0]};
+    BOOST_REQUIRE_EQUAL(bill.bill, 1);
+    const auto job{[&] { return WITH_LOCK(wallet->cs_wallet, return wallet->m_shielded.jobs.at(bill.id)); }};
+    // Up to its window (on regtest a period of 12 blocks): nothing due.
+    int height{WITH_LOCK(wallet->cs_wallet, return wallet->GetLastBlockHeight())};
+    while (height + 1 < bill.due) {
+        height = NextBlock(*this, *wallet, coinbaseKey);
+        BOOST_CHECK_EQUAL(RunMeltCast(*wallet, [] { BOOST_ERROR("no step is due"); return true; }), 0);
+    }
+    BOOST_CHECK_EQUAL(job().tried, -1);
+    BOOST_CHECK(job().error.empty());
+    // In its window: tried, and the reason kept.
+    height = NextBlock(*this, *wallet, coinbaseKey);
+    BOOST_REQUIRE(InCastWindow(bill.bill, height));
+    BOOST_CHECK_EQUAL(RunMeltCast(*wallet, {}), 0);
+    int tries{1};
+    BOOST_CHECK_EQUAL(job().tried, height);
+    BOOST_CHECK_MESSAGE(job().error.starts_with("Not enough shielded funds in blocks yet: 0.00 available, 1.00 waiting for a block"), job().error);
+    BOOST_CHECK(!job().Sent());
+    // Once a block.
+    BOOST_CHECK_EQUAL(RunMeltCast(*wallet, [] { BOOST_ERROR("no step is due"); return true; }), 0);
+    // Out of its window: not tried, the reason kept.
+    while (InCastWindow(bill.bill, height + 1)) {
+        height = NextBlock(*this, *wallet, coinbaseKey);
+        BOOST_CHECK_EQUAL(RunMeltCast(*wallet, {}), 0);
+        BOOST_CHECK_EQUAL(job().tried, height);
+        ++tries;
+    }
+    height = NextBlock(*this, *wallet, coinbaseKey);
+    BOOST_CHECK_EQUAL(RunMeltCast(*wallet, [] { BOOST_ERROR("no step is due"); return true; }), 0);
+    BOOST_CHECK_EQUAL(job().tried, height - 1);
+    BOOST_CHECK(!job().error.empty());
+    // Each try took a new address of the wallet for the bill.
+    BOOST_CHECK_EQUAL(WITH_LOCK(wallet->cs_wallet, return wallet->ListAddrBookAddresses(CWallet::AddrBookFilter{.m_op_label = std::string{"cast"}}).size()), static_cast<size_t>(tries));
+}
+
 BOOST_FIXTURE_TEST_CASE(shielded_keys_of_any_descriptor_of_the_wallet, ListCoinsTestingSetup)
 {
     // zSide: the account's keys are those of the descriptor it was made from, active or not: encryptwallet
@@ -1226,6 +1373,47 @@ BOOST_FIXTURE_TEST_CASE(shielded_keys_of_any_descriptor_of_the_wallet, ListCoins
     }
     const auto result{SendShielded(*wallet, {recipient})};
     BOOST_CHECK_EQUAL(std::get<std::string>(result), "No descriptor of the wallet holds the keys of its shielded account: import the one the account was made from to spend its notes");
+}
+
+BOOST_FIXTURE_TEST_CASE(shielded_account_records_on_load, TestingSetup)
+{
+    // zSide: the account a wallet loads: its viewing key, and the version of its keys (none written: 1,
+    // set up before version 2); the key of version 1 it also watches, with keys of version 2 only. Keys
+    // of a version this release does not know: the wallet is too new.
+    const OrchardFvk fvk{ShieldedKeyOf(10).first};
+    const OrchardFvk legacy{ShieldedKeyOf(11).first};
+    const auto load{[&](std::optional<int> version) {
+        std::unique_ptr<WalletDatabase> database{CreateMockableWalletDatabase()};
+        {
+            WalletBatch batch{*database};
+            BOOST_REQUIRE(batch.WriteOrchardViewingKey(std::vector<unsigned char>(fvk.begin(), fvk.end())));
+            BOOST_REQUIRE(batch.WriteOrchardLegacyViewingKey(std::vector<unsigned char>(legacy.begin(), legacy.end())));
+            if (version) BOOST_REQUIRE(batch.WriteOrchardKeyVersion(*version));
+        }
+        auto wallet{std::make_shared<CWallet>(m_node.chain.get(), "", std::move(database))};
+        bilingual_str error;
+        std::vector<bilingual_str> warnings;
+        const DBErrors result{wallet->PopulateWalletFromDB(error, warnings)};
+        return std::make_pair(result, wallet);
+    }};
+    for (const std::optional<int> version : {std::optional<int>{}, std::optional<int>{KEY_ANY_CHAIN}}) {
+        const auto [result, wallet]{load(version)};
+        BOOST_CHECK_EQUAL(result, DBErrors::LOAD_OK);
+        LOCK(wallet->cs_wallet);
+        BOOST_CHECK(wallet->m_shielded.fvk == fvk);
+        BOOST_CHECK_EQUAL(wallet->m_shielded.key_version, KEY_ANY_CHAIN);
+        BOOST_CHECK(!wallet->m_shielded.legacy_fvk);
+    }
+    {
+        const auto [result, wallet]{load(KEY_THIS_CHAIN)};
+        BOOST_CHECK_EQUAL(result, DBErrors::LOAD_OK);
+        LOCK(wallet->cs_wallet);
+        BOOST_CHECK_EQUAL(wallet->m_shielded.key_version, KEY_THIS_CHAIN);
+        BOOST_CHECK(wallet->m_shielded.legacy_fvk == legacy);
+    }
+    for (const int version : {0, 3, -1}) {
+        BOOST_CHECK_EQUAL(load(version).first, DBErrors::TOO_NEW);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(shielded_addresses_and_memos)

@@ -2,14 +2,20 @@
 # Copyright (c) 2026 The Chains developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test the shielded pool where feature_zside.py and feature_zside_rules.py do not: a wallet whose active
-descriptor changed or that was encrypted after its shielded account was set up, and the orchard index
-after an unclean shutdown that followed the removal of a block."""
+"""Test the shielded pool where feature_zside.py and feature_zside_rules.py do not: shielding to another
+wallet's address, getblockstats of shielded transactions, a fee bump of an unshielding, shielded
+transactions in a package, a wallet whose active descriptor changed or that was encrypted after its
+shielded account was set up, what happens to a fee bump while it is proved, and the orchard index after an
+unclean shutdown that followed the removal of a block."""
 
 from decimal import Decimal
+import threading
+import time
 
 from feature_sidechain import ACTIVATION_PERIOD, SLOT, SidechainTest
-from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error
+from test_framework.authproxy import AuthServiceProxy, JSONRPCException
+from test_framework.messages import COIN
+from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error, get_auth_cookie, rpc_port
 
 
 class ZSideEdgesTest(SidechainTest):
@@ -33,6 +39,11 @@ class ZSideEdgesTest(SidechainTest):
         assert_equal(node.getbestblockhash(), block["hash"])
         return block["hash"]
 
+    def wallet_proxy(self, node, wallet):
+        """A connection of its own to a wallet of the node, for a call made in another thread."""
+        user, password = get_auth_cookie(node.datadir_path, node.chain)
+        return AuthServiceProxy(f"http://{user}:{password}@127.0.0.1:{rpc_port(node.index)}/wallet/{wallet}", timeout=600)
+
     def run_sidechain_test(self):
         main = self.main
         side, other = self.nodes
@@ -53,9 +64,107 @@ class ZSideEdgesTest(SidechainTest):
         assert_equal(side.getshieldedbalance()["available"], 5)
         assert_equal(other.getshieldedbalance()["available"], 2)
 
+        self.run_shield_to_test()
+        self.run_blockstats_test()
+        self.run_bump_unshield_test()
+        self.run_package_test()
         self.run_descriptor_test()
         self.run_encrypt_test()
+        self.run_bump_race_test()
         self.run_index_crash_test()
+
+    def run_shield_to_test(self):
+        side, other = self.nodes
+        self.log.info("Shield transparent coins to another wallet's shielded address")
+        to = other.getshieldedaddress(True)
+        before = other.getshieldedbalance()["available"]
+        mine_before = side.getshieldedbalance()["available"]
+        txid = side.shieldcoins(Decimal("0.3"), to, "shielded for you")["txid"]
+        assert_greater_than(len(side.getrawtransaction(txid, True)["vin"]), 0)
+        self.sync_mempools()
+        assert_equal(other.getshieldedbalance()["pending"], Decimal("0.3"))
+        self.mine_txs()
+        assert_equal(other.getshieldedbalance()["available"], before + Decimal("0.3"))
+        note = [n for n in other.listshieldednotes() if n["txid"] == txid]
+        assert_equal(len(note), 1)
+        assert_equal(note[0]["amount"], Decimal("0.3"))
+        assert_equal(note[0]["memo"], "shielded for you")
+        assert_equal(note[0]["change"], False)
+        # Nothing of it is the sender's.
+        assert all(n["txid"] != txid for n in side.listshieldednotes(True))
+        assert_equal(side.getshieldedbalance()["available"], mine_before)
+        self.check_in_sync()
+
+    def run_blockstats_test(self):
+        side, other = self.nodes
+        self.log.info("getblockstats: what a transaction takes out of the shielded pool counts as its input")
+        shield = side.shieldcoins(Decimal("0.2"))["txid"]
+        pay = side.sendshielded({other.getshieldedaddress(): Decimal("0.1")})["txid"]
+        unshield = other.sendshielded({side.getnewaddress(): Decimal("0.1")})["txid"]
+        self.sync_mempools()
+        fees = [int(side.getmempoolentry(t)["fees"]["base"] * COIN) for t in (shield, pay, unshield)]
+        assert_equal(side.getrawtransaction(pay, True)["vin"], [])
+        assert_equal(side.getrawtransaction(unshield, True)["vin"], [])
+        block = self.mine_txs()
+        assert_equal(set(side.getblock(block)["tx"][1:]), {shield, pay, unshield})
+        stats = side.getblockstats(block, ["txs", "totalfee", "minfee", "maxfee", "medianfee"])
+        assert_equal(stats["txs"], 4)
+        assert_equal(stats["totalfee"], sum(fees))
+        assert_equal(stats["minfee"], min(fees))
+        assert_equal(stats["maxfee"], max(fees))
+        assert_equal(stats["medianfee"], sorted(fees)[1])
+        self.check_in_sync()
+
+    def run_bump_unshield_test(self):
+        side, other = self.nodes
+        self.log.info("A fee bump of an unshielding pays the same transparent output")
+        to = other.getnewaddress()
+        txid = side.sendshielded({to: Decimal("0.25")})["txid"]
+        self.sync_mempools()
+        res = side.bumpshieldedfee(txid)
+        assert_greater_than(res["fee"], res["origfee"])
+        bumped = side.getrawtransaction(res["txid"], True)
+        assert_equal(bumped["vin"], [])
+        paid = [o for o in bumped["vout"] if o["value"] > 0]
+        assert_equal(len(paid), 1)
+        assert_equal(paid[0]["scriptPubKey"]["address"], to)
+        assert_equal(paid[0]["value"], Decimal("0.25"))
+        self.sync_mempools()
+        assert txid not in other.getrawmempool()
+        self.mine_txs()
+        assert_equal(side.gettransaction(res["txid"])["confirmations"], 1)
+        assert_equal(other.getreceivedbyaddress(to), Decimal("0.25"))
+        self.check_in_sync()
+
+    def run_package_test(self):
+        side, other = self.nodes
+        self.log.info("A shielded transaction in a package is refused before the mempool checks it (they would not see the others)")
+        txid = side.sendshielded({other.getshieldedaddress(): Decimal("0.05")})["txid"]
+        old = side.gettransaction(txid)["hex"]
+        side.bumpshieldedfee(txid)
+        # The old one reveals the nullifiers of the one in the mempool: alone, a replacement that pays too little.
+        alone = side.testmempoolaccept([old])[0]
+        assert_equal(alone["allowed"], False)
+        assert alone["reject-reason"].startswith("insufficient fee"), alone
+        # In a package, with an unrelated transaction: the package is refused before the mempool's
+        # replacement rules (which refuse replacements) see it. Without transparent inputs, a transaction
+        # is consistent with no package.
+        # (A shielding, with transparent inputs, for below.)
+        shield = side.gettransaction(side.shieldcoins(Decimal("0.01"))["txid"])["hex"]
+        coin = max(side.listunspent(), key=lambda u: u["amount"])
+        unrelated = side.signrawtransactionwithwallet(side.createrawtransaction(
+            [{"txid": coin["txid"], "vout": coin["vout"]}], {side.getnewaddress(): coin["amount"] - Decimal("0.001")}))["hex"]
+        assert_equal(side.testmempoolaccept([unrelated])[0]["allowed"], True)
+        for package in ([old, unrelated], [unrelated, old]):
+            results = side.testmempoolaccept(package)
+            assert_equal([r["package-error"] for r in results], ["conflict-in-package"] * 2)
+        # With transparent inputs, a shielded transaction is refused in a package all the same: the
+        # nullifiers of a package are not checked against each other.
+        for package in ([shield, unrelated], [unrelated, shield]):
+            results = side.testmempoolaccept(package)
+            assert_equal([r["package-error"] for r in results], ["package-drivechain-tx"] * 2)
+        self.mine_txs()
+        self.check_in_sync()
 
     def run_descriptor_test(self):
         side, other = self.nodes
@@ -120,6 +229,70 @@ class ZSideEdgesTest(SidechainTest):
         assert_equal(later.getreceivedbyaddress(unshield["address"]), Decimal("0.1"))
         later.walletlock()
         other.unloadwallet("later")
+        self.check_in_sync()
+
+    def run_bump_race_test(self):
+        side, other = self.nodes
+        self.log.info("While a fee bump is proved: its notes are held from other payments, and if the transaction it replaces is mined meanwhile, it is not sent")
+        other.createwallet("racer")
+        racer = other.get_wallet_rpc("racer")
+        # Twenty notes, deep enough to be spent first; one more, newer. A bump of a payment of the twenty
+        # proves more than twenty actions, for seconds, and takes the newer note for its higher fee.
+        for _ in range(2):
+            side.sendshielded({racer.getshieldedaddress(True): Decimal("0.01") for _ in range(10)})
+            self.mine_txs()
+        self.mine_txs()
+        self.mine_txs()
+        side.sendshielded({racer.getshieldedaddress(True): Decimal("0.05")})
+        self.mine_txs()
+        assert_equal(racer.getshieldedbalance(), {"available": Decimal("0.25"), "pending": 0, "notes": 21})
+        # The twenty, no change.
+        fee = Decimal("0.001")
+        to = side.getshieldedaddress()
+        txid = racer.sendshielded({to: Decimal("0.2") - fee}, None, fee)["txid"]
+        assert_equal(racer.getshieldedbalance(), {"available": Decimal("0.05"), "pending": 0, "notes": 1})
+        self.sync_mempools()
+        unheld = "Not enough shielded funds: 0.05 available, 1.00"
+        assert_raises_rpc_error(-4, unheld, racer.sendshielded, {to: 1})
+
+        results = []
+
+        def bump():
+            try:
+                results.append(self.wallet_proxy(other, "racer").bumpshieldedfee(txid))
+            except JSONRPCException as e:
+                results.append(e.error)
+
+        thread = threading.Thread(target=bump)
+        started = time.time()
+        thread.start()
+        # The bump holds the notes while it is proved: a payment that needs them says so.
+        held = "Not enough shielded funds: 0.05 available, part of it held by a payment being made; 1.00"
+        while True:
+            try:
+                racer.sendshielded({to: 1})
+                raise AssertionError("paid with no funds")
+            except JSONRPCException as e:
+                assert_equal(e.error["code"], -4)
+                if e.error["message"].startswith(held):
+                    break
+                assert e.error["message"].startswith(unheld), e.error
+            assert thread.is_alive(), results
+            time.sleep(0.05)
+        # Meanwhile the transaction it replaces is mined, and the wallet hears of it.
+        self.bmm(node=other)
+        other.syncwithvalidationinterfacequeue()
+        assert_equal(racer.gettransaction(txid)["confirmations"], 1)
+        assert thread.is_alive(), "the bump was proved before the block came: too fast for this test"
+        thread.join()
+        self.log.info(f"The bump took {time.time() - started:.1f}s")
+        assert_equal(results, [{"code": -4, "message": "The transaction it replaces is no longer waiting for a block"}])
+        assert_equal(racer.gettransaction(txid)["confirmations"], 1)
+        assert "replaced_by_txid" not in racer.gettransaction(txid)
+        assert_equal(racer.getshieldedbalance(), {"available": Decimal("0.05"), "pending": 0, "notes": 1})
+        # Nothing held any more.
+        assert_raises_rpc_error(-4, unheld, racer.sendshielded, {to: 1})
+        other.unloadwallet("racer")
         self.check_in_sync()
 
     def run_index_crash_test(self):
