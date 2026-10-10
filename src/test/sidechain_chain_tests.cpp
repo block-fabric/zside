@@ -675,6 +675,16 @@ BOOST_FIXTURE_TEST_CASE(release_names_the_activation_of_its_slot, BasicTestingSe
         ASSERT_DEBUG_LOG(slot + " but not the height of the block that activated the sidechain there (SidechainParams::main_activation_height): set it once the slot activates.");
         BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*network, 0}));
     }
+    // This chain's own networks: the test network names the block that activated its slot; the main
+    // network and signet do not yet.
+    {
+        ASSERT_DEBUG_LOG(slot + " but not the height of the block that activated the sidechain there (SidechainParams::main_activation_height): it must not run on the main network.");
+        BOOST_CHECK(!CheckSidechainActivation(*main));
+    }
+    {
+        ASSERT_DEBUG_LOG(slot + " but not the height of the block that activated the sidechain there (SidechainParams::main_activation_height): set it once the slot activates.");
+        BOOST_CHECK(CheckSidechainActivation(*CChainParams::SigNet()));
+    }
     // Nothing to say: the height named; regtest (its slot is an option); not a sidechain; the
     // template's own networks, which no slot activated.
     auto quiet{DebugLogHelper{"This release names slot", [](const std::string* line) {
@@ -686,9 +696,7 @@ BOOST_FIXTURE_TEST_CASE(release_names_the_activation_of_its_slot, BasicTestingSe
     BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*CChainParams::RegTest(), 0}));
     BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*main, 0, /*sidechain=*/false}));
     BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*main, 0, /*sidechain=*/true, /*own_genesis=*/false}));
-    BOOST_CHECK(CheckSidechainActivation(*main));
     BOOST_CHECK(CheckSidechainActivation(*CChainParams::TestNet()));
-    BOOST_CHECK(CheckSidechainActivation(*CChainParams::SigNet()));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
