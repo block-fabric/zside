@@ -2490,11 +2490,11 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
             drivechain::SidechainDB rebuilt;
             const CBlockIndex* genesis{pindex->GetAncestor(0)};
             rebuilt.SetBlockHash(genesis->GetBlockHash());
-            if (!RollForwardSidechainDB(rebuilt, genesis, pindex->pprev, pindex->pprev->nHeight - DRIVECHAIN_UNDO_DEPTH)) {
+            if (auto result{RollForwardSidechainDB(rebuilt, genesis, pindex->pprev, pindex->pprev->nHeight - DRIVECHAIN_UNDO_DEPTH)}; !result) {
                 if (m_chainman.m_interrupt) {
                     LogInfo("DisconnectBlock(): deriving the sidechain database was interrupted");
                 } else {
-                    LogError("DisconnectBlock(): failure deriving the sidechain database\n");
+                    LogError("DisconnectBlock(): failure deriving the sidechain database: %s\n", util::ErrorString(result).original);
                 }
                 return DISCONNECT_FAILED;
             }

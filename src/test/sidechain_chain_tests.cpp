@@ -14,6 +14,8 @@
 #include <consensus/amount.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
+#include <chainparams.h>
+#include <init.h>
 #include <drivechain/db.h>
 #include <interfaces/mining.h>
 #include <key.h>
@@ -392,6 +394,47 @@ BOOST_AUTO_TEST_CASE(assembly_leaves_out_refund_of_paid_withdrawal)
     BOOST_CHECK_EQUAL(again.m_state.GetRejectReason(), "bad-sc-refund-unknown");
 }
 
+BOOST_AUTO_TEST_CASE(assembly_keeps_what_does_not_depend_on_a_dropped_transaction)
+{
+    // Leaving a transaction out (and what spends it) leaves the others in, with their fees in the
+    // coinbase: a refund the mainchain made unknown goes, an unrelated payment stays.
+    COutPoint coin, other_coin;
+    const CTxOut spent{Fund(10 * COIN, coin)};
+    const CTxOut other_spent{Fund(5 * COIN, other_coin)};
+    const CMutableTransaction withdrawal{Withdraw(coin, spent, 2 * COIN)};
+    BOOST_REQUIRE(Accept(withdrawal).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_REQUIRE(InBlock(Mine(), withdrawal));
+    const COutPoint outpoint{withdrawal.GetHash(), 0};
+    const CMutableTransaction refund{Refund(outpoint, withdrawal)};
+    const CMutableTransaction child{Child(refund)};
+    // A payment with a fee of its own, unlike the others' (so that the coinbase tells whose it took).
+    const CMutableTransaction payment{Spend(other_coin, other_spent, {CTxOut{other_spent.nValue - 3 * TX_FEE, script}})};
+    BOOST_REQUIRE(Accept(refund).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_REQUIRE(Accept(child).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_REQUIRE(Accept(payment).m_result_type == MempoolAcceptResult::ResultType::VALID);
+
+    Main([&](sidechain::MainBlock& b) {
+        sidechain::MainDeposit change;
+        change.destination = drivechain::WITHDRAWAL_RETURN_DEST;
+        change.bundle = uint256{0xb1};
+        change.payouts.emplace_back(2 * COIN - MAIN_FEE, script);
+        b.deposits.push_back(change);
+    });
+    const CBlock block{[&] {
+        ASSERT_DEBUG_LOG("which breaks the sidechain rules in this block (bad-sc-refund-unknown)");
+        return Mine();
+    }()};
+    BOOST_CHECK(!InBlock(block, refund));
+    BOOST_CHECK(!InBlock(block, child));
+    BOOST_CHECK(InBlock(block, payment));
+    BOOST_CHECK_EQUAL(block.vtx.size(), 2U);
+    // The fee of the payment alone.
+    BOOST_CHECK_EQUAL(block.vtx[0]->vout[0].nValue, 3 * TX_FEE);
+    BOOST_CHECK(!InMempool(payment));
+    BOOST_CHECK(!InMempool(refund));
+    BOOST_CHECK(!InMempool(child));
+}
+
 BOOST_AUTO_TEST_CASE(assembly_bundle_goes_before_overdue_refund)
 {
     // A bundle waits for refunds of its withdrawals in the mempool while they are recent. Once one has
@@ -598,6 +641,53 @@ BOOST_FIXTURE_TEST_CASE(block_weight_limits, MainNetworkSetup)
     BOOST_CHECK_EQUAL(with(2), "bad-blk-tx-weight");
     BOOST_CHECK_EQUAL(with(2, 1'000'000), "bad-blk-weight");
     BOOST_CHECK_EQUAL(with(3), "bad-blk-length");
+}
+
+namespace {
+/** The parameters of a network as a release made from the template could have them: a first block of
+ * its own (not the template's), and the mainchain block that activated the sidechain, or none (0). */
+struct ReleaseParams : public CChainParams {
+    ReleaseParams(const CChainParams& base, int main_activation_height, bool sidechain = true, bool own_genesis = true) : CChainParams{base}
+    {
+        consensus.sidechain.enabled = sidechain;
+        consensus.sidechain.main_activation_height = main_activation_height;
+        if (own_genesis) {
+            CMutableTransaction coinbase{*genesis.vtx[0]};
+            coinbase.vin[0].scriptSig = CScript() << std::vector<unsigned char>{'A', ' ', 's', 'i', 'd', 'e', 'c', 'h', 'a', 'i', 'n'};
+            genesis.vtx[0] = MakeTransactionRef(std::move(coinbase));
+        }
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(release_names_the_activation_of_its_slot, BasicTestingSetup)
+{
+    // A sidechain made from the template that does not say which mainchain block activated it: it does
+    // not run on the main network; on a test network or signet it says so in the log.
+    const auto main{CChainParams::Main()};
+    const std::string slot{strprintf("This release names slot %u of the mainchain", main->GetConsensus().sidechain.slot)};
+    {
+        ASSERT_DEBUG_LOG(slot + " but not the height of the block that activated the sidechain there (SidechainParams::main_activation_height): it must not run on the main network.");
+        BOOST_CHECK(!CheckSidechainActivation(ReleaseParams{*main, 0}));
+    }
+    for (const auto& network : {CChainParams::TestNet(), CChainParams::SigNet()}) {
+        ASSERT_DEBUG_LOG(slot + " but not the height of the block that activated the sidechain there (SidechainParams::main_activation_height): set it once the slot activates.");
+        BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*network, 0}));
+    }
+    // Nothing to say: the height named; regtest (its slot is an option); not a sidechain; the
+    // template's own networks, which no slot activated.
+    auto quiet{DebugLogHelper{"This release names slot", [](const std::string* line) {
+                                  BOOST_CHECK_MESSAGE(!line, "unexpected log line: " + (line ? *line : std::string{}));
+                                  return false;
+                              }}};
+    BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*main, 900}));
+    BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*CChainParams::TestNet(), 900}));
+    BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*CChainParams::RegTest(), 0}));
+    BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*main, 0, /*sidechain=*/false}));
+    BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*main, 0, /*sidechain=*/true, /*own_genesis=*/false}));
+    BOOST_CHECK(CheckSidechainActivation(*main));
+    BOOST_CHECK(CheckSidechainActivation(*CChainParams::TestNet()));
+    BOOST_CHECK(CheckSidechainActivation(*CChainParams::SigNet()));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

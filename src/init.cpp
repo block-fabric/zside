@@ -964,6 +964,35 @@ bool AppInitBasicSetup(const ArgsManager& args, std::atomic<int>& exit_status)
     return true;
 }
 
+bool CheckSidechainActivation(const CChainParams& chainparams)
+{
+    // A sidechain has to name the mainchain block that activated it in its slot
+    // (SidechainParams::main_activation_height), whatever the slot, slot 0 included. Without it, the
+    // deposits the mainchain made to whatever held the slot before are credited on this chain, and a
+    // node that first meets the mainchain after a replacement follows the wrong sidechain. On the main
+    // network that is a release that must not run; a test network or signet is launched before its slot
+    // activates, so it is logged as a warning instead. Regtest sets its slot with -sidechainslot, and needs
+    // nothing more. The template's own networks, which no slot activated, are left out: their first
+    // block says so, and a sidechain made from the template has a first block of its own.
+    const auto is_template_chain{[&] {
+        static constexpr std::string_view tag{"Sidechain template, "};
+        const CScript& script{chainparams.GenesisBlock().vtx[0]->vin[0].scriptSig};
+        return std::search(script.begin(), script.end(), tag.begin(), tag.end()) != script.end();
+    }};
+    if (const Consensus::SidechainParams& side{chainparams.GetConsensus().sidechain};
+        side.enabled && side.main_activation_height == 0 && chainparams.GetChainType() != ChainType::REGTEST && !is_template_chain()) {
+        if (chainparams.GetChainType() == ChainType::MAIN) {
+            return InitError(Untranslated(strprintf("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
+                                                    "(SidechainParams::main_activation_height): it must not run on the main network.", side.slot)));
+        }
+        // Only logged: a warning at init is a modal dialog in the GUI, which holds the start of a
+        // test network node until it is clicked away, for something its user can do nothing about.
+        LogWarning("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
+                   "(SidechainParams::main_activation_height): set it once the slot activates.", side.slot);
+    }
+    return true;
+}
+
 bool AppInitParameterInteraction(const ArgsManager& args)
 {
     const CChainParams& chainparams = Params();
@@ -1232,32 +1261,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         }
     }
 
-    // A sidechain has to name the mainchain block that activated it in its slot
-    // (SidechainParams::main_activation_height), whatever the slot, slot 0 included. Without it, the
-    // deposits the mainchain made to whatever held the slot before are credited on this chain, and a
-    // node that first meets the mainchain after a replacement follows the wrong sidechain. On the main
-    // network that is a release that must not run; a test network or signet is launched before its slot
-    // activates, so it is logged as a warning instead. Regtest sets its slot with -sidechainslot, and needs
-    // nothing more. The template's own networks, which no slot activated, are left out: their first
-    // block says so, and a sidechain made from the template has a first block of its own. Checked
-    // last, once the options are all read: the unit tests that run on the main network go on with a
-    // set-up node (logging, its categories and levels) although the node refuses to start there.
-    const auto is_template_chain{[&] {
-        static constexpr std::string_view tag{"Sidechain template, "};
-        const CScript& script{chainparams.GenesisBlock().vtx[0]->vin[0].scriptSig};
-        return std::search(script.begin(), script.end(), tag.begin(), tag.end()) != script.end();
-    }};
-    if (const Consensus::SidechainParams& side{chainparams.GetConsensus().sidechain};
-        side.enabled && side.main_activation_height == 0 && chainparams.GetChainType() != ChainType::REGTEST && !is_template_chain()) {
-        if (chainparams.GetChainType() == ChainType::MAIN) {
-            return InitError(Untranslated(strprintf("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
-                                                    "(SidechainParams::main_activation_height): it must not run on the main network.", side.slot)));
-        }
-        // Only logged: a warning at init is a modal dialog in the GUI, which holds the start of a
-        // test network node until it is clicked away, for something its user can do nothing about.
-        LogWarning("This release names slot %u of the mainchain but not the height of the block that activated the sidechain there "
-                   "(SidechainParams::main_activation_height): set it once the slot activates.", side.slot);
-    }
+    // Checked last, once the options are all read: the unit tests that run on the main network go on
+    // with a set-up node (logging, its categories and levels) although the node refuses to start there.
+    if (!CheckSidechainActivation(chainparams)) return false;
 
     return true;
 }

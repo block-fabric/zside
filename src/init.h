@@ -48,6 +48,15 @@ bool AppInitBasicSetup(const ArgsManager& args, std::atomic<int>& exit_status);
  * @pre Parameters should be parsed and config file should be read, AppInitBasicSetup should have been called.
  */
 bool AppInitParameterInteraction(const ArgsManager& args);
+
+class CChainParams;
+/**
+ * A sidechain release has to name the mainchain block that activated the sidechain in its slot
+ * (SidechainParams::main_activation_height). Part of AppInitParameterInteraction.
+ * @return false, after InitError, on the main network without it; on a test network or signet
+ *         without it, true after a warning in the log
+ */
+bool CheckSidechainActivation(const CChainParams& chainparams);
 /**
  * Initialization sanity checks.
  * @note This can be done before daemonization. Do not call Shutdown() if this function fails.

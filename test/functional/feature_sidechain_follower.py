@@ -12,12 +12,14 @@ node can take back, commitments to blocks nobody has, another sidechain in the s
 
 import json
 import re
+from decimal import Decimal
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from test_framework.descriptors import descsum_create
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, rpc_port
+from test_framework.util import assert_equal, assert_raises_rpc_error, rpc_port
 
 SLOT = 3
 
@@ -93,6 +95,9 @@ class Mainchain:
                 return dict(self.sidechain, slot=SLOT), None
             if method == "vouchwithdrawalbundle":
                 return None, None
+            if method == "createbmmrequest":
+                # A request made, said in a way no real node says it: the block it follows is no hash.
+                return {"txid": "11" * 32, "prevblockhash": "not a hash"}, None
             return None, {"code": -32601, "message": "Method not found"}
 
 
@@ -243,6 +248,12 @@ class SidechainFollowerTest(BitcoinTestFramework):
         assert_equal(node.syncmainchain(True), 13)
         assert_equal(node.getmainchaininfo()["bestblockhash"], block_hash(13, 3))
         self.on_record(13)
+
+        self.log.info("A commitment request the mainchain node answers with junk: an error, and no block waits for it")
+        address = node.deriveaddresses(descsum_create(f"raw(0014{'11' * 20})"))[0]
+        assert_raises_rpc_error(-1, "the mainchain node sent something that is not a hash", node.requestbmmblock, address, Decimal("0.0001"))
+        assert_equal(main.calls.get("createbmmrequest"), 1)
+        assert_equal(node.getblockcount(), 0)
 
         self.log.info("Another sidechain in the slot: the node stops rather than follow it")
         with main.lock:

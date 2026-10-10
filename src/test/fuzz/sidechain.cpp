@@ -138,7 +138,21 @@ FUZZ_TARGET(sidechain_state, .init = initialize_sidechain)
             const bool supported{std::any_of(last.pending.begin(), last.pending.end(), [&](const sidechain::MainPendingBundle& b) {
                 return b.score >= params.pending_min_score && (!ours || b.hash != ours->hash);
             })};
-            assert(main_pending == supported);
+            // Or the one bundle that leads the slot (no tie), not this chain's own, with a score up by
+            // PENDING_TREND_MIN_RISE over the last PENDING_TREND_BLOCKS mainchain blocks (from 1 if
+            // it was not pending then), whatever its score.
+            bool rising{false};
+            if (const auto top{std::max_element(last.pending.begin(), last.pending.end(), [](const auto& a, const auto& b) { return a.score < b.score; })};
+                top != last.pending.end() && std::count_if(last.pending.begin(), last.pending.end(), [&](const auto& b) { return b.score == top->score; }) == 1 &&
+                (!ours || top->hash != ours->hash)) {
+                uint32_t then{1};
+                const auto earlier{*mainchain.GetBlock(std::max(state.MainHeight() - sidechain::PENDING_TREND_BLOCKS, 0))};
+                for (const auto& b : earlier.pending) {
+                    if (b.hash == top->hash) then = b.score;
+                }
+                rising = top->score >= then + sidechain::PENDING_TREND_MIN_RISE;
+            }
+            assert(main_pending == (supported || rising));
             // A bundle left pending is one the mainchain proposed in time, or that is still in time.
             if (ours && state.BundleMainHeight() >= 0 && state.MainHeight() - state.BundleMainHeight() >= params.unproposed_expiry_blocks) {
                 assert(mainchain.ProposedBetween(ours->hash, state.BundleMainHeight(), state.MainHeight()));

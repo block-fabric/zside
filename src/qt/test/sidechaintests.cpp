@@ -253,8 +253,8 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     QCOMPARE(mining.findChild<QLabel*>("miningStatus")->text(), QString("Mining, threads: 1"));
     QVERIFY(mining.findChild<QPushButton*>("miningStop")->isEnabled());
     QTRY_VERIFY_WITH_TIMEOUT(WITH_LOCK(::cs_main, return test.m_node.chainman->ActiveChain().Height()) >= tip->nHeight + 2, 30000);
-    mining.refresh();
-    QVERIFY(mining.findChild<QLabel*>("miningFound")->text().toInt() >= 2);
+    // The miner counts a block once ProcessNewBlock returns, a moment after the chain shows it.
+    QTRY_VERIFY_WITH_TIMEOUT((mining.refresh(), mining.findChild<QLabel*>("miningFound")->text().toInt() >= 2), 10000);
     SaveScreenshot(mining, "mining");
     mining.findChild<QPushButton*>("miningStop")->click();
     QCOMPARE(mining.findChild<QLabel*>("miningStatus")->text(), QString("Not mining"));
