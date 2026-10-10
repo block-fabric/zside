@@ -47,6 +47,8 @@ struct BlockKey {
 Mainchain::Mainchain(const std::optional<DBParams>& db_params)
 {
     if (!db_params) return;
+    // Nothing else can see the record yet, but its members are guarded by the mutex all the same.
+    LOCK(m_mutex);
     m_db = std::make_unique<CDBWrapper>(*db_params);
     const std::unique_ptr<CDBIterator> it{m_db->NewIterator()};
     if (uint32_t version{0}; !m_db->Read(DB_VERSION, version) || version < RECORD_VERSION) {
