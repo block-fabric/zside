@@ -15,6 +15,7 @@
 #include <validation.h>
 
 #include <QAction>
+#include <QActionGroup>
 #include <QLineEdit>
 #include <QRegularExpression>
 #include <QScopedPointer>
@@ -76,6 +77,26 @@ void AppTests::appTests()
 void AppTests::guiTests(BitcoinGUI* window)
 {
     HandleCallback callback{"guiTests", *this};
+    // zSide: the Private action shows the shielded page (enabled here by hand, with its group of tabs,
+    // as a loaded wallet would: none is).
+    QAction* shielded{nullptr};
+    for (QAction* a : window->findChildren<QAction*>()) {
+        if (a->text() == "&Private" && a->isCheckable()) {
+            shielded = a;
+            break;
+        }
+    }
+    QVERIFY(shielded);
+    QActionGroup* tabs{shielded->actionGroup()};
+    QVERIFY(tabs);
+    const bool tabs_enabled{tabs->isEnabled()};
+    tabs->setEnabled(true);
+    shielded->setEnabled(true);
+    QVERIFY(shielded->isEnabled());
+    shielded->trigger();
+    QVERIFY(shielded->isChecked());
+    shielded->setEnabled(false);
+    tabs->setEnabled(tabs_enabled);
     connect(window, &BitcoinGUI::consoleShown, this, &AppTests::consoleTests);
     expectCallback("consoleTests");
     QAction* action = window->findChild<QAction*>("openRPCConsoleAction");

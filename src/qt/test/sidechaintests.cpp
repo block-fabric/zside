@@ -32,7 +32,9 @@
 #include <qt/sidechainpage.h>
 #include <qt/theme.h>
 #include <qt/timestampdialog.h>
+#include <qt/walletframe.h>
 #include <qt/walletmodel.h>
+#include <qt/walletview.h>
 #include <rpc/server.h>
 #include <script/descriptor.h>
 #include <script/script.h>
@@ -47,6 +49,7 @@
 #include <wallet/wallet.h>
 
 #include <QApplication>
+#include <QClipboard>
 #include <QFontDatabase>
 #include <QCheckBox>
 #include <QCryptographicHash>
@@ -106,12 +109,24 @@ QStringList WithMessageBoxes(QMessageBox::StandardButton button, const std::func
     return texts;
 }
 
-/** Mine a block with the transactions in the mempool. */
+/** Mine a block with the transactions in the mempool, parents before children. */
 void MineBlock(TestChain100Setup& test)
 {
+    std::vector<CTransactionRef> left;
+    for (const auto& info : test.m_node.mempool->infoAll()) left.push_back(info.tx);
     std::vector<CMutableTransaction> txs;
-    for (const auto& info : test.m_node.mempool->infoAll()) txs.emplace_back(*info.tx);
-    test.CreateAndProcessBlock(txs, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    while (!left.empty()) {
+        const auto ready{std::find_if(left.begin(), left.end(), [&](const CTransactionRef& tx) {
+            return std::none_of(tx->vin.begin(), tx->vin.end(), [&](const CTxIn& in) {
+                return std::any_of(left.begin(), left.end(), [&](const CTransactionRef& parent) { return parent->GetHash() == in.prevout.hash; });
+            });
+        })};
+        QVERIFY(ready != left.end());
+        txs.emplace_back(**ready);
+        left.erase(ready);
+    }
+    const CBlock block{test.CreateAndProcessBlock(txs, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()))};
+    QCOMPARE(WITH_LOCK(::cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash()), block.GetHash());
 }
 
 void SaveScreenshot(QWidget& widget, const QString& name)
@@ -460,14 +475,242 @@ void TestShieldedPage(TestChain100Setup& test, ClientModel& client_model)
     QCOMPARE(history->item(0, 4)->text(), QString("waiting"));
     SaveScreenshot(page, "shielded-page");
 
-    // In a block. The test chain is no sidechain, which has no shielded pool: the note is not
-    // counted as available here (feature_zside.py covers that). The page shows what the wallet says.
+    // In a block. The test chain is no sidechain, which has no shielded pool (feature_zside.py covers
+    // one). The page shows what the wallet says.
     MineBlock(test);
     const auto balance{call("getshieldedbalance", UniValue{UniValue::VARR})};
     QVERIFY(balance);
     tabs->setCurrentIndex(0);
     QTRY_COMPARE_WITH_TIMEOUT(available->text(), QString::fromStdString((*balance)["available"].getValStr()) + " CHN", 30000);
     SaveScreenshot(page, "shielded-balance");
+    DrainNodeRpc();
+}
+
+/** The button with this text among the children of `root`. */
+QPushButton* ButtonOf(QWidget& root, const QString& text)
+{
+    for (auto* button : root.findChildren<QPushButton*>()) {
+        if (button->text() == text) return button;
+    }
+    return nullptr;
+}
+
+/**
+ * Every control of the shielded page, on a chain without -orchardindex (no note can be spent):
+ * the address buttons, the checks before each call, the confirmations (declined and accepted), the
+ * errors the wallet gives back, the melt/cast plan and its cancelling, the hints as amounts are typed.
+ */
+void TestShieldedControls(TestChain100Setup& test, ClientModel& client_model)
+{
+    const NodeRpc::WalletNameFn wallet_name{[] { return std::optional<QString>{QString{}}; }};
+    const auto call{[&](const std::string& method, const UniValue& params) {
+        QString error;
+        const auto result{NodeRpc::Call(&client_model, method, params, error, QString{})};
+        if (!result) qWarning("%s: %s", method.c_str(), qPrintable(error));
+        return result;
+    }};
+    ShieldedPage page(wallet_name);
+    page.resize(1000, 700);
+    page.setClientModel(&client_model);
+    page.show();
+    auto* address{page.findChild<QLineEdit*>("address")};
+    auto* status{page.findChild<QLabel*>("shieldedStatus")};
+    auto* tabs{page.findChild<QTabWidget*>()};
+    QVERIFY(address && status && tabs);
+    QTRY_VERIFY_WITH_TIMEOUT(!address->text().isEmpty(), 30000);
+    DrainNodeRpc();
+    const auto status_becomes{[&](const QString& text) { QTRY_COMPARE_WITH_TIMEOUT(status->text(), text, 60000); }};
+
+    // Receive: copy the address; a new one of the same account.
+    QApplication::clipboard()->clear();
+    ButtonOf(page, "Copy")->click();
+    QCOMPARE(QApplication::clipboard()->text(), address->text());
+    QCOMPARE(status->text(), QString("The address is copied."));
+    const QString first{address->text()};
+    ButtonOf(page, "New address")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(address->text() != first, 30000);
+    QVERIFY(address->text().startsWith("rzo1"));
+
+    // Pay: an address and an amount first; the hint follows the kind of address.
+    QWidget* pay_tab{tabs->widget(1)};
+    tabs->setCurrentWidget(pay_tab);
+    auto* send{ButtonOf(*pay_tab, "Pay")};
+    QLineEdit* send_to{nullptr};
+    QLineEdit* send_amount{nullptr};
+    for (auto* edit : pay_tab->findChildren<QLineEdit*>()) {
+        if (edit->placeholderText().startsWith("A shielded address")) send_to = edit;
+        if (edit->placeholderText() == "Amount in CHN") send_amount = edit;
+    }
+    auto* memo{pay_tab->findChild<QPlainTextEdit*>()};
+    QLabel* hint{nullptr};
+    for (auto* label : pay_tab->findChildren<QLabel*>()) {
+        if (label->text().startsWith("Private:")) hint = label;
+    }
+    QVERIFY(send && send_to && send_amount && memo && hint);
+    send->click();
+    QCOMPARE(status->text(), QString("Give an address and an amount."));
+    const QString transparent_address{QString::fromStdString(call("getnewaddress", UniValue{UniValue::VARR})->get_str())};
+    send_to->setText(transparent_address);
+    QVERIFY(hint->text().startsWith("To a transparent address: this unshields."));
+    QVERIFY(!memo->isEnabled());
+    send_to->setText(first);
+    QVERIFY(hint->text().startsWith("Private:"));
+    QVERIFY(memo->isEnabled());
+    send_amount->setText("0.5");
+    memo->setPlainText(QString(513, 'x'));
+    send->click();
+    QCOMPARE(status->text(), QString("The memo is longer than 512 bytes."));
+    memo->setPlainText("for the test");
+    // Declined: nothing is sent.
+    QCOMPARE(WithMessageBoxes(QMessageBox::No, [&] { send->click(); }), QStringList{"Pay 0.5 CHN privately to " + first + "?"});
+    QCOMPARE(status->text(), QString("The memo is longer than 512 bytes."));
+    // Accepted: the wallet has the note shielded above, but the node keeps no tree to spend it with
+    // (no -orchardindex here), and says so.
+    const QString no_index{"The node cannot find the notes in its tree yet: its -orchardindex is off, or not caught up with the last blocks (try again in a moment)"};
+    QCOMPARE(WithMessageBoxes(QMessageBox::Yes, [&] { send->click(); }).size(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(send->isEnabled(), 60000);
+    status_becomes(no_index);
+    QCOMPARE(send_amount->text(), QString("0.5"));
+    send_to->setText(transparent_address);
+    const QStringList unshielding{WithMessageBoxes(QMessageBox::No, [&] { send->click(); })};
+    QCOMPARE(unshielding.size(), 1);
+    QVERIFY2(unshielding[0].startsWith("Unshield 0.5 CHN to the transparent address " + transparent_address + "?"), qPrintable(unshielding[0]));
+
+    // Shield and unshield.
+    QWidget* move_tab{tabs->widget(2)};
+    tabs->setCurrentWidget(move_tab);
+    QPushButton* shield{ButtonOf(*move_tab, "Shield")};
+    QPushButton* unshield{ButtonOf(*move_tab, "Unshield")};
+    QVERIFY(shield && unshield);
+    QWidget* shield_card{shield->parentWidget()};
+    QWidget* unshield_card{unshield->parentWidget()};
+    QPushButton* shield_all{ButtonOf(*shield_card, "All")};
+    QPushButton* unshield_all{ButtonOf(*unshield_card, "All")};
+    QLineEdit* shield_amount{shield_card->findChild<QLineEdit*>()};
+    QLineEdit* unshield_amount{nullptr};
+    QLineEdit* unshield_to{nullptr};
+    for (auto* edit : unshield_card->findChildren<QLineEdit*>()) {
+        if (edit->placeholderText() == "Amount in CHN") unshield_amount = edit;
+        if (edit->placeholderText().startsWith("To a transparent address")) unshield_to = edit;
+    }
+    QVERIFY(shield_all && unshield_all && shield_amount && unshield_amount && unshield_to);
+    shield_amount->clear();
+    shield->click();
+    QCOMPARE(status->text(), QString("Give an amount."));
+    // All: the transparent balance less a little for the fee.
+    shield_all->click();
+    const double balance{call("getbalance", UniValue{UniValue::VARR})->get_real()};
+    QTRY_COMPARE_WITH_TIMEOUT(shield_amount->text(), QString::number(balance - 0.001, 'f', 8), 30000);
+    QCOMPARE(WithMessageBoxes(QMessageBox::No, [&] { shield->click(); }).size(), 1);
+    shield_amount->clear();
+    unshield_amount->clear();
+    unshield->click();
+    QCOMPARE(status->text(), QString("Give an amount."));
+    // All: what is available in blocks, the fee taken out of it.
+    unshield_all->click();
+    const auto shielded{call("getshieldedbalance", UniValue{UniValue::VARR})};
+    QTRY_COMPARE_WITH_TIMEOUT(unshield_amount->text(), QString::fromStdString((*shielded)["available"].getValStr()), 30000);
+    const QStringList asked{WithMessageBoxes(QMessageBox::Yes, [&] { unshield->click(); })};
+    QCOMPARE(asked.size(), 1);
+    QVERIFY2(asked[0].contains("the whole shielded balance in blocks (less the fee)") && asked[0].contains("a new address of this wallet"), qPrintable(asked[0]));
+    QTRY_VERIFY_WITH_TIMEOUT(unshield->isEnabled(), 60000);
+    status_becomes(no_index);
+    // Typed by hand, the amount is no longer all of it; to a shielded address, refused.
+    unshield_amount->clear();
+    QTest::keyClicks(unshield_amount, "0.5");
+    unshield_to->setText(first);
+    unshield->click();
+    QCOMPARE(status->text(), QString("That is a shielded address: pay it privately in the Pay tab."));
+    unshield_to->setText(transparent_address);
+    const QStringList asked_amount{WithMessageBoxes(QMessageBox::Yes, [&] { unshield->click(); })};
+    QCOMPARE(asked_amount.size(), 1);
+    QVERIFY2(asked_amount[0].startsWith("Move 0.5 CHN out of the shielded balance to " + transparent_address), qPrintable(asked_amount[0]));
+    QTRY_VERIFY_WITH_TIMEOUT(unshield->isEnabled(), 60000);
+    status_becomes(no_index);
+
+    // Melt and cast.
+    QWidget* meltcast_tab{tabs->widget(3)};
+    tabs->setCurrentWidget(meltcast_tab);
+    QPushButton* melt{ButtonOf(*meltcast_tab, "Melt my transparent coins")};
+    QPushButton* cast{ButtonOf(*meltcast_tab, "Cast")};
+    QPushButton* cancel{ButtonOf(*meltcast_tab, "Cancel the selected step")};
+    QPushButton* cancel_all{ButtonOf(*meltcast_tab, "Cancel all")};
+    auto* cast_amount{meltcast_tab->findChild<QLineEdit*>()};
+    auto* plan{meltcast_tab->findChild<QTableWidget*>()};
+    QLabel* bills{nullptr};
+    for (auto* label : meltcast_tab->findChildren<QLabel*>()) {
+        if (label->text().startsWith("Bills:")) bills = label;
+    }
+    QVERIFY(melt && cast && cancel && cancel_all && cast_amount && plan && bills);
+    QTRY_COMPARE_WITH_TIMEOUT(plan->item(0, 3) ? plan->item(0, 3)->text() : QString{}, QString("Nothing planned."), 30000);
+    // The bills an amount comes out as, as it is typed.
+    cast_amount->setText("0.03");
+    QCOMPARE(bills->text(), QString("Comes out as 2 bill(s): 0.02 + 0.01 CHN, plus the fees, out of the shielded balance."));
+    cast_amount->setText("0.035");
+    QCOMPARE(bills->text(), QString("Comes out as 2 bill(s): 0.02 + 0.01 CHN; 0.005 CHN stays shielded, plus the fees, out of the shielded balance."));
+    cast_amount->setText("30000");
+    QCOMPARE(bills->text(), QString("At most 20971.51 CHN at a time."));
+    cast_amount->setText("0.001");
+    QVERIFY(bills->text().startsWith("Bills: 0.01, 0.02, 0.04"));
+    cast->click();
+    QCOMPARE(status->text(), QString("Give an amount of 0.01 CHN at least."));
+    cast_amount->setText("100");
+    QCOMPARE(WithMessageBoxes(QMessageBox::Yes, [&] { cast->click(); }).size(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().startsWith("Not enough in the shielded account"), 60000);
+    // Two coins in a block, for a plan of two steps at least.
+    const auto split{call("sendtoaddress", NodeRpc::Args({transparent_address.toStdString(), 1}))};
+    QVERIFY(split);
+    MineBlock(test);
+    // Nothing selected: nothing to cancel.
+    cancel->click();
+    QCOMPARE(status->text(), QString("Select a step that has not gone yet."));
+    // Melt: declined, then done; the plan lists every coin, still to go.
+    QCOMPARE(WithMessageBoxes(QMessageBox::No, [&] { melt->click(); }).size(), 1);
+    QCOMPARE(WithMessageBoxes(QMessageBox::Yes, [&] { melt->click(); }).size(), 1);
+    QTRY_VERIFY2_WITH_TIMEOUT(status->text().endsWith("coin(s) will be melted over the next blocks."), qPrintable(status->text()), 60000);
+    const int planned{static_cast<int>(call("listmeltcast", UniValue{UniValue::VARR})->size())};
+    QVERIFY(planned >= 2);
+    QCOMPARE(status->text(), QString("%1 coin(s) will be melted over the next blocks.").arg(planned));
+    QTRY_COMPARE_WITH_TIMEOUT(plan->rowCount(), planned, 30000);
+    QVERIFY(plan->item(0, 0) && plan->item(0, 0)->text() == "Melt" && !plan->item(0, 0)->data(Qt::UserRole).isNull());
+    QCOMPARE(plan->item(0, 2)->text(), QString("planned"));
+    // One cancelled, selected first; then all the others.
+    plan->setCurrentCell(0, 0);
+    cancel->click();
+    status_becomes("The step is cancelled.");
+    QCOMPARE(static_cast<int>(call("listmeltcast", UniValue{UniValue::VARR})->size()), planned - 1);
+    plan->clearFocus();
+    QTRY_COMPARE_WITH_TIMEOUT(plan->rowCount(), planned - 1, 30000);
+    QCOMPARE(WithMessageBoxes(QMessageBox::Yes, [&] { cancel_all->click(); }).size(), 1);
+    status_becomes(QString("%1 step(s) cancelled.").arg(planned - 1));
+    QTRY_COMPARE_WITH_TIMEOUT(plan->item(0, 3) ? plan->item(0, 3)->text() : QString{}, QString("Nothing planned."), 30000);
+    QCOMPARE(call("listlockunspent", UniValue{UniValue::VARR})->size(), size_t{0});
+
+    // The notes, when their tab is shown.
+    auto* notes{qobject_cast<QTableWidget*>(tabs->widget(5))};
+    QVERIFY(notes);
+    tabs->setCurrentWidget(notes);
+    const auto listed{call("listshieldednotes", NodeRpc::Args({false}))};
+    QTRY_COMPARE_WITH_TIMEOUT(notes->rowCount(), static_cast<int>(listed->size()), 30000);
+    DrainNodeRpc();
+}
+
+/** The wallet's views show the shielded page when asked (the Private action of the window). */
+void TestShieldedNavigation(WalletModel& wallet_model, ClientModel& client_model, const PlatformStyle* platform_style)
+{
+    WalletFrame frame(platform_style, nullptr);
+    frame.setClientModel(&client_model);
+    auto* view{new WalletView(&wallet_model, platform_style, &frame)};
+    QVERIFY(frame.addView(view));
+    frame.setCurrentWallet(&wallet_model);
+    frame.show();
+    QVERIFY(!qobject_cast<ShieldedPage*>(view->currentWidget()));
+    frame.gotoShieldedPage();
+    auto* page{qobject_cast<ShieldedPage*>(view->currentWidget())};
+    QVERIFY(page);
+    // Shown, the page asks the wallet of its view for its address.
+    auto* address{page->findChild<QLineEdit*>("address")};
+    QTRY_VERIFY_WITH_TIMEOUT(address->text().startsWith("rzo1"), 30000);
     DrainNodeRpc();
 }
 
@@ -505,6 +748,8 @@ void TestSidechainPage(interfaces::Node& node)
         QCOMPARE(result.status, CWallet::ScanResult::SUCCESS);
     }
     wallet->SetBroadcastTransactions(true);
+    // The wallet follows the blocks the tests mine.
+    wallet->m_chain_notifications_handler = wallet->chain().handleNotifications(wallet);
     // There is no fee estimate on the test chain.
     wallet->m_min_fee = CFeeRate{10000};
     wallet->m_fallback_fee = CFeeRate{10000};
@@ -531,6 +776,8 @@ void TestSidechainPage(interfaces::Node& node)
 
     TestTools(test, client_model);
     TestShieldedPage(test, client_model);
+    TestShieldedControls(test, client_model);
+    TestShieldedNavigation(wallet_model, client_model, platform_style.get());
 
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }
