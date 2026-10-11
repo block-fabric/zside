@@ -5,6 +5,7 @@
 #ifndef BITCOIN_POLICY_FEES_MEMPOOL_ESTIMATOR_H
 #define BITCOIN_POLICY_FEES_MEMPOOL_ESTIMATOR_H
 
+#include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <sync.h>
 #include <threadsafety.h>
@@ -103,8 +104,9 @@ public:
      * chunks cannot cover the corresponding fraction of a block.
      *
      * @param[in] chunk_feerates Block template chunk fee rates sorted by descending mining score.
+     * @param[in] total_weight   The weight of the transactions of a full block of the chain.
      */
-    static Percentiles CalculateMaxWeightPercentiles(std::span<const FeePerVSize> chunk_feerates);
+    static Percentiles CalculateMaxWeightPercentiles(std::span<const FeePerVSize> chunk_feerates, int64_t total_weight = DEFAULT_BLOCK_MAX_WEIGHT);
     util::Expected<FeeRateEstimation, FeeRateEstimationError> EstimateFeeRate(bool conservative) const
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
     unsigned int MaximumTarget() const

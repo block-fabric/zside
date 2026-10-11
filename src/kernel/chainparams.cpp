@@ -164,8 +164,9 @@ public:
         consensus.nPowTargetTimespan = 2016 * consensus.nPowTargetSpacing; // only sizes version bits periods; difficulty uses aserti3
         consensus.asert_half_life = 2 * 60 * 60; // two hours, i.e. 120 blocks
         consensus.asert_anchor_height = 2016; // blocks before it are mined at the proof of work limit
-        // Blocks of up to six million weight units, four of them for transactions
-        // and the rest for the coinbase with its drivechain messages and payouts.
+        // A sidechain's blocks: up to six million weight units, four of them for
+        // transactions and the rest for the coinbase with its payouts. Larger than
+        // the mainchain's (800,000), most activity being on the sidechains.
         consensus.max_block_weight = 6'000'000;
         consensus.max_block_tx_weight = 4'000'000;
         consensus.coinbase_maturity = 360; // six hours
@@ -268,8 +269,9 @@ public:
         consensus.nPowTargetTimespan = 2016 * consensus.nPowTargetSpacing; // only sizes version bits periods; difficulty uses aserti3
         consensus.asert_half_life = 2 * 60 * 60; // two hours, i.e. 120 blocks
         consensus.asert_anchor_height = 2016; // blocks before it are mined at the proof of work limit
-        // Blocks of up to six million weight units, four of them for transactions
-        // and the rest for the coinbase with its drivechain messages and payouts.
+        // A sidechain's blocks: up to six million weight units, four of them for
+        // transactions and the rest for the coinbase with its payouts. Larger than
+        // the mainchain's (800,000), most activity being on the sidechains.
         consensus.max_block_weight = 6'000'000;
         consensus.max_block_tx_weight = 4'000'000;
         consensus.coinbase_maturity = 360; // six hours
