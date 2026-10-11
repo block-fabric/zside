@@ -7,6 +7,7 @@
 
 #include <consensus/amount.h>
 #include <primitives/transaction.h>
+#include <serialize.h>
 #include <support/allocators/secure.h>
 #include <uint256.h>
 #include <wallet/meltcast.h>
@@ -39,6 +40,16 @@ class CChainParams;
  * an import. Set up after the wallet scanned blocks without it, it has the wallet scan them again,
  * from the wallet's birth (ShieldedRescan): a transaction that only pays the account, with no
  * transparent output of the wallet, was not kept then.
+ *
+ * The chain keys of version 2 are made for is kept with them. A wallet kept across a reset of its
+ * network (a new genesis block, the same data directory), or loaded with another slot, holds an
+ * account it cannot spend from here: its keys of this chain are others. Once that is known (at
+ * once, from the chain kept; for an account set up before the chain was kept, once the wallet is
+ * unlocked and no descriptor makes the key for this chain), the account is retired: its viewing
+ * key is still watched, nothing is paid into it again, and a new account is set up. The keys of
+ * a retired account are derived again for the chain it was made for (kept, or found among the
+ * chains the network ran on and the slots), so that its notes are spent; one whose chain is not
+ * found is watch-only.
  */
 namespace wallet {
 class CWallet;
@@ -61,6 +72,8 @@ struct ShieldedNote {
     bool internal{false};
     //! To a key of version 1 that an account of version 2 watches (ShieldedAccount::legacy_fvk).
     bool legacy{false};
+    //! To the key of a retired account: its index in ShieldedAccount::retired; -1 for none.
+    int retired{-1};
     uint256 nullifier;
     uint256 cmx;
     CAmount value{0};
@@ -75,6 +88,28 @@ struct ShieldedPayment {
     OrchardMemo memo{};
 };
 
+/** The derivations of the account's keys: of the descriptor's extended key alone, or of the chain too. */
+inline constexpr int KEY_ANY_CHAIN{1};
+inline constexpr int KEY_THIS_CHAIN{2};
+
+/** The chain keys of version 2 are made for: its genesis block and slot. */
+struct KeyChain {
+    uint256 genesis;
+    uint32_t slot{0};
+    friend bool operator==(const KeyChain&, const KeyChain&) = default;
+    SERIALIZE_METHODS(KeyChain, obj) { READWRITE(obj.genesis, obj.slot); }
+};
+
+/** The viewing key of an account the wallet set up for another chain (or of the key of version 1 it watched): watched, never paid again. */
+struct RetiredKey {
+    OrchardFvk fvk{};
+    int version{KEY_THIS_CHAIN};
+    //! Version 2: the chain its keys were made for, if known: then its notes can be spent (it is derived again).
+    std::optional<KeyChain> chain;
+    //! Whether the wallet can make its spending key: of version 1, or of a known chain.
+    bool Spendable() const { return version == KEY_ANY_CHAIN || chain.has_value(); }
+};
+
 /** The shielded account of a wallet, as the wallet holds it. */
 struct ShieldedAccount {
     //! The viewing key of the account: its addresses, its change, what it pays (kept in the database).
@@ -83,6 +118,11 @@ struct ShieldedAccount {
     int key_version{1};
     //! Version 2: the viewing key of version 1 of the same descriptor, watched for the notes paid to it.
     std::optional<OrchardFvk> legacy_fvk;
+    //! Version 2: the chain its keys were made for (kept in the database). None: set up before the
+    //! chain was kept; it is checked once the wallet is unlocked (SetupShieldedAccount).
+    std::optional<KeyChain> chain;
+    //! The keys of accounts set up for another chain, watched (kept in the database).
+    std::vector<RetiredKey> retired;
     //! The notes the wallet received, by nullifier.
     std::map<uint256, ShieldedNote> notes;
     //! What the wallet's transactions spent: nullifier -> the transactions that reveal it.
@@ -113,9 +153,8 @@ std::string MemoText(const OrchardMemo& memo);
 /** A memo from text (at most 512 bytes); the "no memo" memo (0xF6) for empty text. */
 std::optional<OrchardMemo> MemoFromText(const std::string& text);
 
-/** The derivations of the account's keys: of the descriptor's extended key alone, or of the chain too. */
-inline constexpr int KEY_ANY_CHAIN{1};
-inline constexpr int KEY_THIS_CHAIN{2};
+/** The chain of the node, that keys of version 2 are made for (on regtest, -zsidekeyslot may say another slot, for tests). */
+KeyChain ThisKeyChain();
 /** A spending key of the wallet's shielded account, of a version: nullopt if the wallet is locked or has no private keys. */
 std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet, int version);
 /** The same, for the chain of `genesis` and `slot` (version 2; version 1 ignores them). */
@@ -127,13 +166,39 @@ std::optional<ShieldedKey> ShieldedSpendingKey(const CWallet& wallet, int versio
  * is locked.
  */
 std::optional<ShieldedKey> AccountSpendingKey(const CWallet& wallet, int version, const OrchardFvk& fvk);
-/** The viewing keys the account watches, the account's own first; with whether it is the one of version 1 it also watches. */
-std::vector<std::pair<const OrchardFvk*, bool>> ShieldedViewingKeys(const ShieldedAccount& account);
+/** The same, of keys made for `chain` (version 2). */
+std::optional<ShieldedKey> AccountSpendingKey(const CWallet& wallet, int version, const OrchardFvk& fvk, const KeyChain& chain);
+/**
+ * The chain a viewing key of version 2 of the wallet was made for, among this one and those its
+ * network ran on before a reset, each with any slot: nullopt if none (or the wallet is locked).
+ */
+std::optional<KeyChain> FindKeyChain(const CWallet& wallet, const OrchardFvk& fvk);
+/** A viewing key the account watches. */
+struct WatchedKey {
+    const OrchardFvk* fvk;
+    //! The key of version 1 the account also watches.
+    bool legacy{false};
+    //! The key of a retired account: its index in ShieldedAccount::retired; -1 for none.
+    int retired{-1};
+};
+/** The viewing keys the account watches, the account's own first, then the key of version 1, then those of retired accounts. */
+std::vector<WatchedKey> ShieldedViewingKeys(const ShieldedAccount& account);
+/** Whether the account is set up, and known to be of this chain: its addresses can be handed out. */
+bool ShieldedAccountOfThisChain(const ShieldedAccount& account);
+/**
+ * Why the wallet must not pay a shielded address: one of its own keys it cannot spend with (of a
+ * retired account, or of no descriptor it holds). Nullopt if it may (another's address included).
+ * The wallet unlocked.
+ */
+std::optional<std::string> UnspendableOwnAddress(const CWallet& wallet, const OrchardAddress& to);
 /** What an address is to the account: 1 one of its own, 2 its change, 0 another's (zo_address_scope, for each key it watches). */
 int ShieldedAddressScope(const ShieldedAccount& account, const OrchardAddress& address);
 /**
  * Make the viewing key known (from the spending key) and keep it, if it is not yet. If the wallet
- * scanned blocks already, it notes they are to be scanned again (ShieldedRescan).
+ * scanned blocks already, it notes they are to be scanned again (ShieldedRescan). An account of
+ * another chain is retired first, and a new one set up.
+ * @return whether the account is set up and of this chain; false if the wallet is locked (or has no
+ *         private keys) and it is not, or it cannot tell yet
  */
 bool SetupShieldedAccount(CWallet& wallet);
 /** Scan the blocks again that the wallet scanned before its shielded account was set up, if any (the wallet not locked by the caller). */
@@ -169,7 +234,11 @@ struct ShieldedBalance {
     //! In notes waiting for a block (change and incoming), not spent.
     CAmount pending{0};
     int notes{0};
+    //! In notes of retired accounts whose keys the wallet cannot make, not spent (in neither of the above).
+    CAmount watch_only{0};
 };
+/** Whether the wallet can spend a note: not one of a retired account whose keys it cannot make. */
+bool ShieldedNoteSpendable(const ShieldedAccount& account, const ShieldedNote& note);
 ShieldedBalance GetShieldedBalance(const CWallet& wallet);
 
 /** A payment to make: to a shielded address (with a memo) or to a transparent script. */

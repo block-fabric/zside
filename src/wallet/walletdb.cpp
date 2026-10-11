@@ -66,6 +66,8 @@ const std::string MELTCAST{"zsjob"};
 const std::string ORCHARDRESCAN{"zsrescan"};
 const std::string ORCHARDKEYVERSION{"zskeyver"};
 const std::string ORCHARDLEGACYFVK{"zsfvk1"};
+const std::string ORCHARDKEYCHAIN{"zskeychain"};
+const std::string ORCHARDRETIRED{"zsretired"};
 const std::unordered_set<std::string> LEGACY_TYPES{CRYPTED_KEY, CSCRIPT, DEFAULTKEY, HDCHAIN, KEYMETA, KEY, OLD_KEY, POOL, WATCHMETA, WATCHS};
 } // namespace DBKeys
 
@@ -1195,7 +1197,36 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
                 std::copy(legacy.begin(), legacy.end(), key.begin());
                 pwallet->m_shielded.legacy_fvk = key;
             }
+            // The chain its keys were made for: none written, set up before it was kept (checked once unlocked).
+            if (std::pair<uint256, uint32_t> chain; version == KEY_THIS_CHAIN && m_batch->Read(DBKeys::ORCHARDKEYCHAIN, chain)) {
+                pwallet->m_shielded.chain = KeyChain{chain.first, chain.second};
+            }
         }
+        // zSide: the keys of accounts set up for another chain, still watched.
+        LoadResult retired_res = LoadRecords(pwallet, *m_batch, DBKeys::ORCHARDRETIRED,
+            [] (CWallet* pwallet, DataStream& key, DataStream& value, std::string& err) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet) {
+            std::vector<unsigned char> fvk;
+            key >> fvk;
+            int version;
+            bool has_chain;
+            KeyChain chain;
+            value >> version >> has_chain >> chain.genesis >> chain.slot;
+            if (fvk.size() != zside::FVK_SIZE) {
+                err = "Error reading wallet database: a retired shielded key of the wrong size";
+                return DBErrors::CORRUPT;
+            }
+            if (version != KEY_ANY_CHAIN && version != KEY_THIS_CHAIN) {
+                pwallet->WalletLogPrintf("Error: a retired shielded account has keys of an unknown version (%d)\n", version);
+                return DBErrors::TOO_NEW;
+            }
+            RetiredKey retired;
+            std::copy(fvk.begin(), fvk.end(), retired.fvk.begin());
+            retired.version = version;
+            if (has_chain) retired.chain = chain;
+            pwallet->m_shielded.retired.push_back(retired);
+            return DBErrors::LOAD_OK;
+        });
+        result = std::max(result, retired_res.m_result);
         if (int height; m_batch->Read(DBKeys::ORCHARDRESCAN, height)) pwallet->m_shielded.rescan_from = height;
         // zSide: the melt/cast plan.
         LoadResult meltcast_res = LoadRecords(pwallet, *m_batch, DBKeys::MELTCAST,

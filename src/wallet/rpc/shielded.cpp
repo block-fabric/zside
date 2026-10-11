@@ -34,7 +34,8 @@ std::shared_ptr<CWallet> ReadyWallet(const JSONRPCRequest& request, bool unlocke
     if (unlocked) EnsureWalletIsUnlocked(*pwallet);
     {
         LOCK(pwallet->cs_wallet);
-        if (!SetupShieldedAccount(*pwallet) && !pwallet->m_shielded.fvk) {
+        // A locked wallet still reads what its keys see (those of a retired account included).
+        if (!SetupShieldedAccount(*pwallet) && ShieldedViewingKeys(pwallet->m_shielded).empty()) {
             throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "The shielded account is not set up yet: unlock the wallet once (walletpassphrase)");
         }
     }
@@ -121,6 +122,10 @@ RPCMethod getshieldedaddress()
     const auto pwallet{ReadyWallet(request, /*unlocked=*/false, /*rescan=*/false)};
     if (!pwallet) return UniValue::VNULL;
     LOCK(pwallet->cs_wallet);
+    // Not one of an account that may be of another chain (set up before the chain was kept with its keys): checked once unlocked.
+    if (!ShieldedAccountOfThisChain(pwallet->m_shielded)) {
+        throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "The shielded account is to be checked against this chain first: unlock the wallet once (walletpassphrase)");
+    }
     // Diversified addresses: any index gives an address of the account; random ones cannot be linked.
     const uint64_t index{!request.params[0].isNull() && request.params[0].get_bool() ? FastRandomContext{}.rand64() : 0};
     const auto address{ShieldedAddress(*pwallet, index)};
@@ -141,6 +146,7 @@ RPCMethod getshieldedbalance()
             {RPCResult::Type::STR_AMOUNT, "available", "In notes in blocks: what can be spent"},
             {RPCResult::Type::STR_AMOUNT, "pending", "In notes waiting for a block"},
             {RPCResult::Type::NUM, "notes", "How many notes"},
+            {RPCResult::Type::STR_AMOUNT, "watchonly", /*optional=*/true, "In notes of an account the wallet set up for another chain whose keys it cannot make (not in the above): watched, not spendable"},
             {RPCResult::Type::NUM, "rescanning_from", /*optional=*/true, "The account was set up after the wallet scanned blocks without it: those from this height "
                                                                          "are being scanned again, in the background, and what they paid it is not counted yet"},
         }},
@@ -155,6 +161,7 @@ RPCMethod getshieldedbalance()
     result.pushKV("available", ValueFromAmount(balance.available));
     result.pushKV("pending", ValueFromAmount(balance.pending));
     result.pushKV("notes", balance.notes);
+    if (balance.watch_only > 0) result.pushKV("watchonly", ValueFromAmount(balance.watch_only));
     if (pwallet->m_shielded.rescan_from) result.pushKV("rescanning_from", *pwallet->m_shielded.rescan_from);
     return result;
 },
@@ -178,6 +185,8 @@ RPCMethod listshieldednotes()
             {RPCResult::Type::BOOL, "change", "Whether it is change"},
             {RPCResult::Type::NUM, "confirmations", ""},
             {RPCResult::Type::STR_HEX, "spent_by", /*optional=*/true, "The transaction that spends it"},
+            {RPCResult::Type::BOOL, "retired", /*optional=*/true, "Of an account the wallet set up for another chain (true if so)"},
+            {RPCResult::Type::BOOL, "watchonly", /*optional=*/true, "The wallet cannot make its key: it cannot be spent (true if so)"},
         }}}},
         RPCExamples{HelpExampleCli("listshieldednotes", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -197,6 +206,8 @@ RPCMethod listshieldednotes()
         obj.pushKV("change", s.note->internal);
         obj.pushKV("confirmations", s.confirmations);
         if (s.spent_by) obj.pushKV("spent_by", s.spent_by->GetHex());
+        if (s.note->retired >= 0) obj.pushKV("retired", true);
+        if (!ShieldedNoteSpendable(pwallet->m_shielded, *s.note)) obj.pushKV("watchonly", true);
         result.push_back(std::move(obj));
     }
     return result;

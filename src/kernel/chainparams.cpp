@@ -75,6 +75,21 @@ static CBlock CreateGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits
     return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
 }
 
+/** The first block of a sidechain: its text, its time, and the first nonce that meets its (trivial) target. */
+static CBlock CreateSidechainGenesisBlock(const char* genesis_message, uint32_t genesis_time)
+{
+    CBlock genesis{CreateGenesisBlock(genesis_message, CScript() << OP_RETURN, genesis_time, /*nNonce=*/0, 0x207fffff, 1, 0)};
+    arith_uint256 target;
+    target.SetCompact(genesis.nBits);
+    while (UintToArith256(genesis.GetHash()) > target) ++genesis.nNonce;
+    return genesis;
+}
+
+uint256 SidechainGenesisHash(const char* genesis_message, uint32_t genesis_time)
+{
+    return CreateSidechainGenesisBlock(genesis_message, genesis_time).GetHash();
+}
+
 void CChainParams::MakeSidechain(const SidechainIdentity& identity)
 {
     consensus.sidechain.enabled = true;
@@ -100,10 +115,7 @@ void CChainParams::MakeSidechain(const SidechainIdentity& identity)
     bech32_hrp = identity.bech32_hrp;
 
     // The first block. It creates no coins: all coins come from the mainchain.
-    genesis = CreateGenesisBlock(identity.genesis_message, CScript() << OP_RETURN, identity.genesis_time, /*nNonce=*/0, 0x207fffff, 1, 0);
-    arith_uint256 target;
-    target.SetCompact(genesis.nBits);
-    while (UintToArith256(genesis.GetHash()) > target) ++genesis.nNonce;
+    genesis = CreateSidechainGenesisBlock(identity.genesis_message, identity.genesis_time);
     consensus.hashGenesisBlock = genesis.GetHash();
 
     vFixedSeeds.clear();

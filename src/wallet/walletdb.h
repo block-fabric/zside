@@ -15,7 +15,9 @@
 #include <wallet/walletutil.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 #include <unordered_set>
 #include <vector>
 
@@ -93,6 +95,8 @@ extern const std::string MELTCAST;
 extern const std::string ORCHARDRESCAN;
 extern const std::string ORCHARDKEYVERSION;
 extern const std::string ORCHARDLEGACYFVK;
+extern const std::string ORCHARDKEYCHAIN;
+extern const std::string ORCHARDRETIRED;
 
 // Keys in this set pertain only to legacy wallets and are removed during migration to descriptors.
 extern const std::unordered_set<std::string> LEGACY_TYPES;
@@ -297,6 +301,18 @@ public:
     //! zSide: the version of its keys' derivation (none: 1), and with version 2 the viewing key of version 1 it watches too.
     bool WriteOrchardKeyVersion(int version) { return WriteIC(DBKeys::ORCHARDKEYVERSION, version); }
     bool WriteOrchardLegacyViewingKey(const std::vector<unsigned char>& fvk) { return WriteIC(DBKeys::ORCHARDLEGACYFVK, fvk); }
+    //! zSide: with version 2, the chain its keys were made for: its genesis block and slot.
+    bool WriteOrchardKeyChain(const uint256& genesis, uint32_t slot) { return WriteIC(DBKeys::ORCHARDKEYCHAIN, std::make_pair(genesis, slot)); }
+    //! zSide: forget the account (retired: its key is kept with WriteOrchardRetired).
+    bool EraseOrchardAccount()
+    {
+        return EraseIC(DBKeys::ORCHARDFVK) && EraseIC(DBKeys::ORCHARDKEYVERSION) && EraseIC(DBKeys::ORCHARDLEGACYFVK) && EraseIC(DBKeys::ORCHARDKEYCHAIN);
+    }
+    //! zSide: the viewing key of a retired account, the version of its keys, and the chain they were made for if known (genesis, slot).
+    bool WriteOrchardRetired(const std::vector<unsigned char>& fvk, int version, const std::optional<std::pair<uint256, uint32_t>>& chain)
+    {
+        return WriteIC(std::make_pair(DBKeys::ORCHARDRETIRED, fvk), std::make_pair(version, std::make_pair(chain.has_value(), chain.value_or(std::pair<uint256, uint32_t>{}))));
+    }
     //! zSide: the height the wallet is to scan again from, for the shielded account (wallet/shielded.h).
     bool WriteOrchardRescan(int height) { return WriteIC(DBKeys::ORCHARDRESCAN, height); }
     bool EraseOrchardRescan() { return EraseIC(DBKeys::ORCHARDRESCAN); }

@@ -6,7 +6,7 @@
 wallet's address, getblockstats of shielded transactions, a fee bump of an unshielding, shielded
 transactions in a package, a wallet whose active descriptor changed or that was encrypted after its
 shielded account was set up, what happens to a fee bump while it is proved, and the orchard index after an
-unclean shutdown that followed the removal of a block."""
+unclean shutdown that followed the removal of a block; an account kept from another chain."""
 
 from decimal import Decimal
 import threading
@@ -72,6 +72,7 @@ class ZSideEdgesTest(SidechainTest):
         self.run_encrypt_test()
         self.run_bump_race_test()
         self.run_index_crash_test()
+        self.run_other_chain_test()
 
     def run_shield_to_test(self):
         side, other = self.nodes
@@ -338,6 +339,56 @@ class ZSideEdgesTest(SidechainTest):
         assert_equal((info["index"]["notes"], info["index"]["root"]), (info["notes"], info["root"]))
         self.check_in_sync()
 
+    def run_other_chain_test(self):
+        side, other = self.nodes
+        self.log.info("An account kept from another chain (a reset of the network, another slot) is retired: its notes are spent, nothing is paid into it again")
+        # A wallet set up on another chain (the option stands in for it: keys made for another slot).
+        self.restart_node(1, extra_args=self.extra_args[1] + [f"-zsidekeyslot={SLOT + 1}"])
+        self.connect_nodes(0, 1)
+        other.createwallet("moved")
+        moved = other.get_wallet_rpc("moved")
+        old_address = moved.getshieldedaddress()
+        side.sendshielded({old_address: Decimal("0.3")}, "to the account of the other chain")
+        self.mine_txs()
+        assert_equal(moved.getshieldedbalance()["available"], Decimal("0.3"))
+        # This chain: the account is retired on load, and a new one set up.
+        self.restart_node(1)
+        self.connect_nodes(0, 1)
+        with other.assert_debug_log(expected_msgs=["zSide: the shielded account was set up for another chain"]):
+            other.loadwallet("moved")
+        moved = other.get_wallet_rpc("moved")
+        new_address = moved.getshieldedaddress()
+        assert new_address != old_address
+        assert_equal(moved.getshieldedbalance()["available"], Decimal("0.3"))
+        notes = moved.listshieldednotes()
+        assert_equal(len(notes), 1)
+        assert_equal(notes[0]["retired"], True)
+        assert "watchonly" not in notes[0]
+        # Nothing is paid into it again: not shielded, not paid from the account.
+        assert_raises_rpc_error(-4, "set up for another chain", moved.shieldcoins, 1, old_address)
+        assert_raises_rpc_error(-4, "set up for another chain", moved.sendshielded, {old_address: Decimal("0.1")})
+        # The default shielding goes to the new account.
+        # (Paid out of the first wallet's shielded account: its transparent coins are left as they are.)
+        side.unshieldcoins(1, moved.getnewaddress())
+        self.mine_txs()
+        moved.shieldcoins(Decimal("0.5"))
+        self.mine_txs()
+        assert_equal(moved.getshieldedbalance()["available"], Decimal("0.8"))
+        # Its note is spent (its keys made again for its chain): the coins are recovered.
+        res = moved.unshieldcoins("all")
+        self.mine_txs()
+        assert_equal(moved.gettransaction(res["txid"])["confirmations"], 1)
+        assert_equal(moved.getshieldedbalance()["available"], 0)
+        # The retired account is kept across a restart, as it is.
+        self.restart_node(1)
+        self.connect_nodes(0, 1)
+        with other.assert_debug_log(expected_msgs=[], unexpected_msgs=["zSide: the shielded account was set up for another chain"]):
+            other.loadwallet("moved")
+        moved = other.get_wallet_rpc("moved")
+        assert_equal(moved.getshieldedaddress(), new_address)
+        assert_raises_rpc_error(-4, "set up for another chain", moved.shieldcoins, 1, old_address)
+        other.unloadwallet("moved")
+        self.check_in_sync()
 
 if __name__ == "__main__":
     ZSideEdgesTest(__file__).main()

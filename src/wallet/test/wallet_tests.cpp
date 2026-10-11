@@ -18,6 +18,7 @@
 #include <util/strencodings.h>
 #include <drivechain/sidechain.h>
 #include <interfaces/chain.h>
+#include <kernel/chainparams.h>
 #include <key_io.h>
 #include <node/blockstorage.h>
 #include <node/types.h>
@@ -1414,6 +1415,277 @@ BOOST_FIXTURE_TEST_CASE(shielded_account_records_on_load, TestingSetup)
     for (const int version : {0, 3, -1}) {
         BOOST_CHECK_EQUAL(load(version).first, DBErrors::TOO_NEW);
     }
+}
+
+/** zSide: the viewing key of a spending key. */
+static OrchardFvk FvkOf(const std::optional<ShieldedKey>& sk)
+{
+    BOOST_REQUIRE(sk);
+    OrchardFvk fvk;
+    BOOST_REQUIRE_EQUAL(zo_full_viewing_key(sk->data(), fvk.data()), ZO_OK);
+    return fvk;
+}
+
+/** zSide: the default address of a viewing key. */
+static OrchardAddress AddressOf(const OrchardFvk& fvk)
+{
+    OrchardAddress address;
+    BOOST_REQUIRE_EQUAL(zo_address(fvk.data(), 0, false, address.data()), ZO_OK);
+    return address;
+}
+
+BOOST_FIXTURE_TEST_CASE(shielded_account_of_another_chain_is_retired, ListCoinsTestingSetup)
+{
+    // zSide: an account whose keys were made for another chain (a wallet kept across a reset of the
+    // network, or loaded with another slot) cannot be spent from here with the keys of this chain. It is
+    // retired: watched still, its notes spent with its keys made again for its chain, nothing paid into
+    // it again; a new account of this chain is set up.
+    AddTx(CRecipient{PKHash{coinbaseKey.GetPubKey()}, 10 * COIN, /*fSubtractFeeFromAmount=*/false});
+    const KeyChain here{ThisKeyChain()};
+    const KeyChain there{here.genesis, here.slot + 1};
+    OrchardFvk ours, theirs;
+    OrchardAddress old_address;
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_REQUIRE(SetupShieldedAccount(*wallet));
+        BOOST_CHECK(wallet->m_shielded.chain == here);
+        BOOST_CHECK(ShieldedAccountOfThisChain(wallet->m_shielded));
+        ours = *wallet->m_shielded.fvk;
+        // The account as the wallet set it up on the other chain.
+        theirs = FvkOf(ShieldedSpendingKey(*wallet, KEY_THIS_CHAIN, there.genesis, there.slot));
+        BOOST_REQUIRE(theirs != ours);
+        wallet->m_shielded.fvk = theirs;
+        wallet->m_shielded.chain = there;
+        BOOST_CHECK(!ShieldedAccountOfThisChain(wallet->m_shielded));
+        old_address = AddressOf(theirs);
+        // Paid there (or here, before the fix, from its old address).
+        const CTransactionRef paid{MakeTransactionRef(ShieldingTxTo(ShieldedKeyOf(4).first, old_address, COIN))};
+        BOOST_REQUIRE(wallet->AddToWallet(paid, TxStateInMempool{}));
+        BOOST_REQUIRE_EQUAL(ShieldedNotes(*wallet).size(), 1U);
+        BOOST_CHECK_EQUAL(ShieldedNotes(*wallet)[0].note->retired, -1);
+
+        // Set up: retired, a new account of this chain.
+        BOOST_REQUIRE(SetupShieldedAccount(*wallet));
+        const ShieldedAccount& account{wallet->m_shielded};
+        BOOST_CHECK(account.fvk == ours);
+        BOOST_CHECK(account.chain == here);
+        BOOST_REQUIRE_EQUAL(account.retired.size(), 2U);
+        BOOST_CHECK(account.retired[0].fvk == theirs);
+        BOOST_CHECK(account.retired[0].chain == there);
+        BOOST_CHECK(account.retired[0].Spendable());
+        // Its key of version 1, the same as the new account's: watched once, as the account's.
+        BOOST_CHECK(account.retired[1].fvk == *account.legacy_fvk);
+        BOOST_CHECK_EQUAL(ShieldedViewingKeys(account).size(), 3U);
+        // Its note is still the wallet's, spent with its keys made for its chain.
+        const auto notes{ShieldedNotes(*wallet)};
+        BOOST_REQUIRE_EQUAL(notes.size(), 1U);
+        BOOST_CHECK_EQUAL(notes[0].note->retired, 0);
+        BOOST_CHECK(ShieldedNoteSpendable(account, *notes[0].note));
+        BOOST_CHECK_EQUAL(GetShieldedBalance(*wallet).pending, COIN);
+        BOOST_CHECK_EQUAL(GetShieldedBalance(*wallet).watch_only, 0);
+        BOOST_CHECK(FvkOf(AccountSpendingKey(*wallet, KEY_THIS_CHAIN, theirs, there)) == theirs);
+        BOOST_CHECK(!AccountSpendingKey(*wallet, KEY_THIS_CHAIN, theirs));
+        // Its address is its own, and not to be paid any more; the new one is.
+        BOOST_CHECK_EQUAL(ShieldedAddressScope(account, old_address), 1);
+        BOOST_CHECK(*ShieldedAddress(*wallet, 0) != old_address);
+        BOOST_CHECK(UnspendableOwnAddress(*wallet, old_address)->starts_with("The address is of a shielded account the wallet set up for another chain"));
+        BOOST_CHECK(!UnspendableOwnAddress(*wallet, *ShieldedAddress(*wallet, 0)));
+        BOOST_CHECK(!UnspendableOwnAddress(*wallet, ShieldedKeyOf(4).second));
+        // Again: nothing more.
+        BOOST_REQUIRE(SetupShieldedAccount(*wallet));
+        BOOST_CHECK_EQUAL(wallet->m_shielded.retired.size(), 2U);
+    }
+    // Shielding into it is refused: shieldcoins, the Qt Shield button (shieldcoins) and a melt (ShieldCoin).
+    const auto shielded{ShieldCoins(*wallet, COIN, old_address, *MemoFromText(""))};
+    BOOST_CHECK(std::get<std::string>(shielded).starts_with("The address is of a shielded account the wallet set up for another chain"));
+    const COutPoint coin{WITH_LOCK(wallet->cs_wallet, return AvailableCoins(*wallet).All().at(0).outpoint)};
+    const auto melted{ShieldCoin(*wallet, coin, old_address)};
+    BOOST_CHECK(std::get<std::string>(melted).starts_with("The address is of a shielded account the wallet set up for another chain"));
+    // Paying it from the account too.
+    ShieldedRecipient to_old;
+    to_old.shielded = old_address;
+    to_old.amount = COIN / 10;
+    to_old.memo = *MemoFromText("");
+    BOOST_CHECK(std::get<std::string>(SendShielded(*wallet, {to_old})).starts_with("The address is of a shielded account the wallet set up for another chain"));
+}
+
+BOOST_FIXTURE_TEST_CASE(shielded_account_without_its_chain_checked_once_unlocked, ListCoinsTestingSetup)
+{
+    // zSide: an account set up before the chain was kept with its keys is checked once the wallet can
+    // make its keys: one of this chain gets its chain kept; one of another chain is retired, its chain
+    // found (another slot) and its notes spent; one whose chain is not found is retired watch-only.
+    const KeyChain here{ThisKeyChain()};
+    const auto unchecked{[&](const OrchardFvk& fvk) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+        wallet->m_shielded.fvk = fvk;
+        wallet->m_shielded.key_version = KEY_THIS_CHAIN;
+        wallet->m_shielded.chain.reset();
+        wallet->m_shielded.retired.clear();
+        BOOST_CHECK(!ShieldedAccountOfThisChain(wallet->m_shielded));
+    }};
+    LOCK(wallet->cs_wallet);
+    const OrchardFvk ours{FvkOf(ShieldedSpendingKey(*wallet, KEY_THIS_CHAIN))};
+
+    // Of this chain: kept, and its chain written.
+    unchecked(ours);
+    BOOST_REQUIRE(SetupShieldedAccount(*wallet));
+    BOOST_CHECK(wallet->m_shielded.fvk == ours);
+    BOOST_CHECK(wallet->m_shielded.chain == here);
+    BOOST_CHECK(wallet->m_shielded.retired.empty());
+    BOOST_CHECK(ShieldedAccountOfThisChain(wallet->m_shielded));
+
+    // Of another slot: retired, its chain found.
+    const KeyChain there{here.genesis, (here.slot + 7) % 256};
+    const OrchardFvk other_slot{FvkOf(ShieldedSpendingKey(*wallet, KEY_THIS_CHAIN, there.genesis, there.slot))};
+    unchecked(other_slot);
+    BOOST_CHECK(FindKeyChain(*wallet, other_slot) == there);
+    BOOST_REQUIRE(wallet->AddToWallet(MakeTransactionRef(ShieldingTxTo(ShieldedKeyOf(4).first, AddressOf(other_slot), COIN)), TxStateInMempool{}));
+    BOOST_REQUIRE(SetupShieldedAccount(*wallet));
+    BOOST_CHECK(wallet->m_shielded.fvk == ours);
+    BOOST_REQUIRE_GE(wallet->m_shielded.retired.size(), 1U);
+    BOOST_CHECK(wallet->m_shielded.retired[0].fvk == other_slot);
+    BOOST_CHECK(wallet->m_shielded.retired[0].chain == there);
+    BOOST_CHECK_EQUAL(GetShieldedBalance(*wallet).pending, COIN);
+    BOOST_CHECK_EQUAL(GetShieldedBalance(*wallet).watch_only, 0);
+
+    // Of no chain the wallet finds (or of a descriptor it lacks): retired, watched only.
+    const auto [foreign, foreign_address]{ShieldedKeyOf(12)};
+    unchecked(foreign);
+    BOOST_CHECK(!FindKeyChain(*wallet, foreign));
+    BOOST_REQUIRE(wallet->AddToWallet(MakeTransactionRef(ShieldingTxTo(ShieldedKeyOf(4).first, foreign_address, 2 * COIN)), TxStateInMempool{}));
+    BOOST_REQUIRE(SetupShieldedAccount(*wallet));
+    BOOST_CHECK(wallet->m_shielded.fvk == ours);
+    BOOST_REQUIRE_GE(wallet->m_shielded.retired.size(), 1U);
+    BOOST_CHECK(wallet->m_shielded.retired[0].fvk == foreign);
+    BOOST_CHECK(!wallet->m_shielded.retired[0].chain);
+    BOOST_CHECK(!wallet->m_shielded.retired[0].Spendable());
+    const ShieldedBalance balance{GetShieldedBalance(*wallet)};
+    BOOST_CHECK_EQUAL(balance.watch_only, 2 * COIN);
+    BOOST_CHECK_EQUAL(balance.notes, 0);
+    BOOST_CHECK(UnspendableOwnAddress(*wallet, foreign_address));
+}
+
+BOOST_FIXTURE_TEST_CASE(shielded_account_checked_when_unlocked, ListCoinsTestingSetup)
+{
+    // zSide: a locked wallet cannot tell whether an account set up before the chain was kept is of this
+    // chain: it hands out none of its addresses until unlocked; one known to be of another chain is
+    // retired at once, without the keys, and the new one set up once unlocked.
+    const SecureString passphrase{"check"};
+    OrchardFvk theirs;
+    {
+        LOCK(wallet->cs_wallet);
+        theirs = FvkOf(ShieldedSpendingKey(*wallet, KEY_THIS_CHAIN, ThisKeyChain().genesis, ThisKeyChain().slot + 3));
+    }
+    BOOST_REQUIRE(wallet->EncryptWallet(passphrase));
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_REQUIRE(wallet->IsLocked());
+        wallet->m_shielded = ShieldedAccount{};
+        wallet->m_shielded.fvk = theirs;
+        wallet->m_shielded.key_version = KEY_THIS_CHAIN;
+        BOOST_CHECK(!SetupShieldedAccount(*wallet));
+        BOOST_CHECK(wallet->m_shielded.fvk == theirs);
+        BOOST_CHECK(!ShieldedAccountOfThisChain(wallet->m_shielded));
+    }
+    // Unlocking checks it (the descriptor that made it is no longer active: encryptwallet made new ones).
+    BOOST_REQUIRE(wallet->Unlock(passphrase));
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_CHECK(ShieldedAccountOfThisChain(wallet->m_shielded));
+        BOOST_CHECK(wallet->m_shielded.fvk != theirs);
+        BOOST_REQUIRE(!wallet->m_shielded.retired.empty());
+        BOOST_CHECK(wallet->m_shielded.retired[0].fvk == theirs);
+        BOOST_CHECK(wallet->m_shielded.retired[0].chain == (KeyChain{ThisKeyChain().genesis, ThisKeyChain().slot + 3}));
+    }
+    BOOST_REQUIRE(wallet->Lock());
+    {
+        // Of a chain known to be another: retired while locked; no account until unlocked.
+        LOCK(wallet->cs_wallet);
+        const OrchardFvk current{*wallet->m_shielded.fvk};
+        wallet->m_shielded.chain = KeyChain{uint256::ONE, 0};
+        BOOST_CHECK(!SetupShieldedAccount(*wallet));
+        BOOST_CHECK(!wallet->m_shielded.fvk);
+        BOOST_CHECK(std::any_of(wallet->m_shielded.retired.begin(), wallet->m_shielded.retired.end(), [&](const RetiredKey& r) { return r.fvk == current && r.chain == KeyChain{uint256::ONE, 0}; }));
+    }
+    BOOST_REQUIRE(wallet->Unlock(passphrase));
+    LOCK(wallet->cs_wallet);
+    BOOST_CHECK(ShieldedAccountOfThisChain(wallet->m_shielded));
+}
+
+BOOST_FIXTURE_TEST_CASE(shielded_account_not_paid_without_its_keys, ListCoinsTestingSetup)
+{
+    // zSide: the wallet does not shield into an address of its account whose keys none of its descriptors make.
+    AddTx(CRecipient{PKHash{coinbaseKey.GetPubKey()}, 10 * COIN, /*fSubtractFeeFromAmount=*/false});
+    const auto [foreign, foreign_address]{ShieldedKeyOf(13)};
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_REQUIRE(SetupShieldedAccount(*wallet));
+        BOOST_CHECK(!UnspendableOwnAddress(*wallet, *ShieldedAddress(*wallet, 0)));
+        wallet->m_shielded.fvk = foreign;
+        BOOST_CHECK(UnspendableOwnAddress(*wallet, foreign_address));
+    }
+    const std::string error{"No descriptor of the wallet holds the keys of this address of its shielded account: what it is paid could not be spent"};
+    BOOST_CHECK_EQUAL(std::get<std::string>(ShieldCoins(*wallet, COIN, foreign_address, *MemoFromText(""))), error);
+    const COutPoint coin{WITH_LOCK(wallet->cs_wallet, return AvailableCoins(*wallet).All().at(0).outpoint)};
+    BOOST_CHECK_EQUAL(std::get<std::string>(ShieldCoin(*wallet, coin, foreign_address)), error);
+    // Another's address is paid as before (only the wallet's own unspendable keys are refused).
+    LOCK(wallet->cs_wallet);
+    BOOST_CHECK(!UnspendableOwnAddress(*wallet, ShieldedKeyOf(14).second));
+}
+
+BOOST_FIXTURE_TEST_CASE(shielded_account_chain_records_on_load, TestingSetup)
+{
+    // zSide: the chain of the account's keys and the retired keys are kept; an account kept for another
+    // chain is retired on load, without its keys.
+    const OrchardFvk fvk{ShieldedKeyOf(15).first};
+    const OrchardFvk old{ShieldedKeyOf(16).first};
+    const KeyChain here{ThisKeyChain()};
+    const auto load{[&](const KeyChain& chain) {
+        std::unique_ptr<WalletDatabase> database{CreateMockableWalletDatabase()};
+        {
+            WalletBatch batch{*database};
+            BOOST_REQUIRE(batch.WriteOrchardViewingKey(std::vector<unsigned char>(fvk.begin(), fvk.end())));
+            BOOST_REQUIRE(batch.WriteOrchardKeyVersion(KEY_THIS_CHAIN));
+            BOOST_REQUIRE(batch.WriteOrchardKeyChain(chain.genesis, chain.slot));
+            BOOST_REQUIRE(batch.WriteOrchardRetired(std::vector<unsigned char>(old.begin(), old.end()), KEY_THIS_CHAIN, std::make_pair(uint256::ONE, uint32_t{9})));
+        }
+        auto wallet{std::make_shared<CWallet>(m_node.chain.get(), "", std::move(database))};
+        bilingual_str error;
+        std::vector<bilingual_str> warnings;
+        BOOST_CHECK_EQUAL(wallet->PopulateWalletFromDB(error, warnings), DBErrors::LOAD_OK);
+        return wallet;
+    }};
+    {
+        const auto wallet{load(here)};
+        LOCK(wallet->cs_wallet);
+        BOOST_CHECK(wallet->m_shielded.fvk == fvk);
+        BOOST_CHECK(wallet->m_shielded.chain == here);
+        BOOST_REQUIRE_EQUAL(wallet->m_shielded.retired.size(), 1U);
+        BOOST_CHECK(wallet->m_shielded.retired[0].fvk == old);
+        BOOST_CHECK(wallet->m_shielded.retired[0].chain == (KeyChain{uint256::ONE, 9}));
+        BOOST_CHECK(ShieldedAccountOfThisChain(wallet->m_shielded));
+    }
+    {
+        const auto wallet{load({uint256::ONE, here.slot})};
+        LOCK(wallet->cs_wallet);
+        BOOST_CHECK(!ShieldedAccountOfThisChain(wallet->m_shielded));
+        // No keys: retired, and no new account yet.
+        BOOST_CHECK(!SetupShieldedAccount(*wallet));
+        BOOST_CHECK(!wallet->m_shielded.fvk);
+        BOOST_REQUIRE_EQUAL(wallet->m_shielded.retired.size(), 2U);
+        BOOST_CHECK(wallet->m_shielded.retired[1].fvk == fvk);
+        BOOST_CHECK(wallet->m_shielded.retired[1].chain == (KeyChain{uint256::ONE, here.slot}));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(shielded_keys_of_the_test_network_before_its_reset)
+{
+    // zSide: the first block of a sidechain, made again from its text and time: that of the test network
+    // now, and the one it had before its reset of 2026-10-08, whose keys a wallet kept across it has.
+    const auto test{CreateChainParams(ArgsManager{}, ChainType::TESTNET)};
+    BOOST_CHECK(SidechainGenesisHash("zSide testnet", 1791513282) == test->GetConsensus().hashGenesisBlock);
+    BOOST_CHECK(SidechainGenesisHash("zSide testnet", 1791302400) == uint256{"44cf5414f37f1adda63098ed74fbb189fe7a8224bea6a521d407a88be4e129db"});
+    const auto signet{CreateChainParams(ArgsManager{}, ChainType::SIGNET)};
+    BOOST_CHECK(SidechainGenesisHash("zSide signet", 1791302400) == signet->GetConsensus().hashGenesisBlock);
 }
 
 BOOST_AUTO_TEST_CASE(shielded_addresses_and_memos)

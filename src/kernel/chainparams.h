@@ -225,4 +225,7 @@ protected:
 
 std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& pchMessageStart);
 
+/** The hash of the first block of a sidechain with this text and time (CChainParams::MakeSidechain): of a network as it is, or as it was before a reset. */
+uint256 SidechainGenesisHash(const char* genesis_message, uint32_t genesis_time);
+
 #endif // BITCOIN_KERNEL_CHAINPARAMS_H
