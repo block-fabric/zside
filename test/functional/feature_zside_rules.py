@@ -397,6 +397,10 @@ class ZSideRulesTest(SidechainTest):
             self.restart_node(0, extra_args=self.extra_args[0] + [option])
             self.wait_until(lambda: side.getbestblockhash() == tip)
             self.wait_until(lambda: side.getshieldedinfo()["index"]["synced"])
+            # The blocks connected again are still in the validation queue: the index rewinds to each
+            # and takes it in again (-reindex-chainstate, the index ahead), so its tree is that of the tip
+            # once the queue is through.
+            side.syncwithvalidationinterfacequeue()
             assert_equal(side.getshieldedinfo(), info)
             assert_equal(side.getshieldedbalance(), balance)
             assert_equal(side.listshieldednotes(True), notes)
