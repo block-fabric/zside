@@ -133,6 +133,9 @@ protected:
     /// commit more index state.
     virtual bool CustomCommit(CDBBatch& batch) { return true; }
 
+    /// Called by Commit once the batch CustomCommit filled is written to disk (the write did not throw).
+    virtual void CustomCommitted() {}
+
     /// Rewind index by one block during a chain reorg.
     [[nodiscard]] virtual bool CustomRemove(const interfaces::BlockInfo& block) { return true; }
 

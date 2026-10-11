@@ -28,7 +28,7 @@ inline constexpr bool DEFAULT_ORCHARDINDEX{true};
  * prove its notes are in it (consensus keeps only the right edge). A note is found by its
  * commitment. The tree is that of the chain up to the block the index has reached.
  */
-class OrchardIndex final : public BaseIndex
+class OrchardIndex : public BaseIndex
 {
 protected:
     class DB;
@@ -46,6 +46,7 @@ protected:
     bool CustomAppend(const interfaces::BlockInfo& block) override;
     bool CustomRemove(const interfaces::BlockInfo& block) override;
     bool CustomCommit(CDBBatch& batch) override;
+    void CustomCommitted() override;
     BaseIndex::DB& GetDB() const override;
 
     std::optional<OrchardWitness> FindNoteLocked(const uint256& cmx, uint64_t size) const;

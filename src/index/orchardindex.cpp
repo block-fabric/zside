@@ -46,6 +46,15 @@ class OrchardIndex::DB : public BaseIndex::DB
     std::map<uint256, uint64_t> m_positions;
     //! A block -> the size of the tree before it; nullopt: its record erased.
     std::map<uint256, std::optional<uint64_t>> m_blocks;
+    //! What a commit put in its batch, until the batch is written (CustomCommitted): read meanwhile,
+    //! below what was written since, so that a reader never sees the tree on disk of the commit
+    //! before. Kept if the write fails, and written again with the next commit.
+    struct Changes {
+        std::optional<uint64_t> size;
+        std::map<NodeKey, uint256> nodes;
+        std::map<uint256, uint64_t> positions;
+        std::map<uint256, std::optional<uint64_t>> blocks;
+    } m_committing;
 
 public:
     explicit DB(size_t n_cache_size, bool f_memory, bool f_wipe)
@@ -56,6 +65,7 @@ public:
     uint64_t Size() const
     {
         if (m_size) return *m_size;
+        if (m_committing.size) return *m_committing.size;
         uint64_t size{0};
         Read(DB_SIZE, size);
         return size;
@@ -67,6 +77,7 @@ public:
     std::optional<uint64_t> BlockStart(const uint256& hash) const
     {
         if (const auto it{m_blocks.find(hash)}; it != m_blocks.end()) return it->second;
+        if (const auto it{m_committing.blocks.find(hash)}; it != m_committing.blocks.end()) return it->second;
         uint64_t before;
         if (!Read(std::make_pair(DB_BLOCK, hash), before)) return std::nullopt;
         return before;
@@ -78,6 +89,7 @@ public:
     std::optional<uint64_t> Position(const uint256& cmx) const
     {
         if (const auto it{m_positions.find(cmx)}; it != m_positions.end()) return it->second;
+        if (const auto it{m_committing.positions.find(cmx)}; it != m_committing.positions.end()) return it->second;
         uint64_t position;
         if (!Read(std::make_pair(DB_POSITION, cmx), position)) return std::nullopt;
         return position;
@@ -92,6 +104,7 @@ public:
         const NodeKey key{static_cast<uint8_t>(level), index};
         if (const auto it{pending.find(key)}; it != pending.end()) return it->second;
         if (const auto it{m_nodes.find(key)}; it != m_nodes.end()) return it->second;
+        if (const auto it{m_committing.nodes.find(key)}; it != m_committing.nodes.end()) return it->second;
         uint256 node;
         if (!Read(std::make_pair(DB_NODE, key), node)) return zside::EmptyRoot(level);
         return node;
@@ -129,24 +142,34 @@ public:
         for (const auto& [key, node] : pending) m_nodes[key] = node;
     }
 
-    /** Everything written since the last commit, into the batch that commits the best block. */
+    /**
+     * Everything written since the last commit, into the batch that commits the best block (with what
+     * a commit before failed to write). It is read from m_committing until the batch is written.
+     */
     void Commit(CDBBatch& batch)
     {
-        for (const auto& [key, node] : m_nodes) batch.Write(std::make_pair(DB_NODE, key), node);
-        for (const auto& [cmx, position] : m_positions) batch.Write(std::make_pair(DB_POSITION, cmx), position);
-        for (const auto& [hash, before] : m_blocks) {
+        for (auto& [key, node] : m_nodes) m_committing.nodes.insert_or_assign(key, node);
+        for (auto& [cmx, position] : m_positions) m_committing.positions.insert_or_assign(cmx, position);
+        for (auto& [hash, before] : m_blocks) m_committing.blocks.insert_or_assign(hash, before);
+        if (m_size) m_committing.size = m_size;
+        m_nodes.clear();
+        m_positions.clear();
+        m_blocks.clear();
+        m_size.reset();
+        for (const auto& [key, node] : m_committing.nodes) batch.Write(std::make_pair(DB_NODE, key), node);
+        for (const auto& [cmx, position] : m_committing.positions) batch.Write(std::make_pair(DB_POSITION, cmx), position);
+        for (const auto& [hash, before] : m_committing.blocks) {
             if (before) {
                 batch.Write(std::make_pair(DB_BLOCK, hash), *before);
             } else {
                 batch.Erase(std::make_pair(DB_BLOCK, hash));
             }
         }
-        if (m_size) batch.Write(DB_SIZE, *m_size);
-        m_nodes.clear();
-        m_positions.clear();
-        m_blocks.clear();
-        m_size.reset();
+        if (m_committing.size) batch.Write(DB_SIZE, *m_committing.size);
     }
+
+    /** The batch of the last commit is written: what it holds is read from disk now. */
+    void Committed() { m_committing = {}; }
 };
 
 OrchardIndex::OrchardIndex(std::unique_ptr<interfaces::Chain> chain, size_t n_cache_size, bool f_memory, bool f_wipe)
@@ -219,6 +242,12 @@ bool OrchardIndex::CustomCommit(CDBBatch& batch)
     LOCK(m_db->m_mutex);
     m_db->Commit(batch);
     return true;
+}
+
+void OrchardIndex::CustomCommitted()
+{
+    LOCK(m_db->m_mutex);
+    m_db->Committed();
 }
 
 std::optional<OrchardIndex::Witnesses> OrchardIndex::FindNotes(const std::vector<uint256>& cmxs, const std::optional<uint256>& next_block) const

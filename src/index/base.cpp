@@ -301,6 +301,7 @@ void BaseIndex::Commit()
         if (ok) {
             GetDB().WriteBestBlock(batch, GetLocator(*m_chain, m_best_block_index.load()->GetBlockHash()));
             GetDB().WriteBatch(batch);
+            CustomCommitted();
         }
     }
     if (!ok) {

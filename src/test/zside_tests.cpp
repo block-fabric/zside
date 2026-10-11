@@ -560,6 +560,74 @@ BOOST_FIXTURE_TEST_CASE(witnesses_never_wait_on_the_scheduler, TestChain100Setup
 }
 
 
+/** The orchard index, its steps called one by one: a commit is seen between the batch being filled and written. */
+class SteppedOrchardIndex : public OrchardIndex
+{
+public:
+    using OrchardIndex::OrchardIndex;
+    using OrchardIndex::CustomAppend;
+    using OrchardIndex::CustomCommit;
+    using OrchardIndex::CustomCommitted;
+    using OrchardIndex::GetDB;
+};
+
+BOOST_FIXTURE_TEST_CASE(orchard_index_readers_see_the_tree_being_committed, TestingSetup)
+{
+    // A commit puts the tree in a batch, which BaseIndex writes after: in between, readers (a payment
+    // on an RPC thread, while the scheduler's thread commits) see the tree as it is, not the one on disk
+    // of the commit before. A batch that is not written is written with the next commit.
+    SteppedOrchardIndex index{interfaces::MakeChain(m_node), 1_MiB, /*f_memory=*/true};
+    const auto take_in{[&](uint8_t seed) {
+        CBlock block;
+        block.nNonce = seed;
+        block.vtx.push_back(MakeTransactionRef(ShieldingTx(1000, TEST_DOMAIN, seed)));
+        const uint256 hash{block.GetHash()};
+        interfaces::BlockInfo info{hash};
+        info.data = &block;
+        BOOST_REQUIRE(index.CustomAppend(info));
+        std::string error;
+        return Bundle::FromTx(*block.vtx[0], error)->Commitments();
+    }};
+    const auto first{take_in(1)};
+    const auto tree{index.Tree()};
+    BOOST_CHECK_EQUAL(tree.first, first.size());
+    BOOST_REQUIRE(index.FindNotes(first));
+
+    // Committed into a batch not written yet.
+    CDBBatch batch{index.GetDB()};
+    BOOST_REQUIRE(index.CustomCommit(batch));
+    BOOST_CHECK(index.Tree() == tree);
+    BOOST_CHECK(index.FindNotes(first));
+    // A block taken in meanwhile: on top of it.
+    const auto second{take_in(2)};
+    const auto grown{index.Tree()};
+    BOOST_CHECK_EQUAL(grown.first, first.size() + second.size());
+    BOOST_CHECK(index.FindNotes(first));
+    BOOST_CHECK(index.FindNotes(second));
+    // Written: the same, read from disk.
+    index.GetDB().WriteBatch(batch);
+    index.CustomCommitted();
+    BOOST_CHECK(index.Tree() == grown);
+    BOOST_CHECK(index.FindNotes(first));
+    BOOST_CHECK(index.FindNotes(second));
+
+    // A batch never written (the write failed): still read, and written with the next commit.
+    const auto third{take_in(3)};
+    const auto last{index.Tree()};
+    BOOST_CHECK_EQUAL(last.first, grown.first + third.size());
+    CDBBatch lost{index.GetDB()};
+    BOOST_REQUIRE(index.CustomCommit(lost));
+    BOOST_CHECK(index.Tree() == last);
+    BOOST_CHECK(index.FindNotes(third));
+    CDBBatch next{index.GetDB()};
+    BOOST_REQUIRE(index.CustomCommit(next));
+    index.GetDB().WriteBatch(next);
+    index.CustomCommitted();
+    BOOST_CHECK(index.Tree() == last);
+    BOOST_CHECK(index.FindNotes(first));
+    BOOST_CHECK(index.FindNotes(third));
+}
+
 BOOST_AUTO_TEST_CASE(every_reject_reason_of_a_shielded_tx)
 {
     // One transaction per reason CheckShieldedTx gives, each with the exact reason; the valid one passes.
