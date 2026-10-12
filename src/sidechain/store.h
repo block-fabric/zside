@@ -10,6 +10,7 @@
 #include <streams.h>
 #include <uint256.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <ios>
@@ -97,6 +98,12 @@ public:
      * holds, not to the entries. nullptr if this view cannot make one.
      */
     virtual std::unique_ptr<StoreView> Snapshot() const { return nullptr; }
+    /**
+     * A number that changes (and never comes back) whenever what this view reads may have changed:
+     * two snapshots made at the same version read the same entries. nullopt if this view does not
+     * keep one.
+     */
+    virtual std::optional<uint64_t> Version() const { return std::nullopt; }
 };
 
 /** No entries: the base of a state that has none yet, and of tests. */
@@ -106,6 +113,7 @@ public:
     std::optional<StoreBytes> Get(std::span<const unsigned char>) const override { return std::nullopt; }
     std::optional<std::pair<StoreBytes, StoreBytes>> Next(std::span<const unsigned char>, std::span<const unsigned char>) const override { return std::nullopt; }
     std::unique_ptr<StoreView> Snapshot() const override { return std::make_unique<EmptyStore>(); }
+    std::optional<uint64_t> Version() const override { return 0; }
 };
 
 /**
@@ -126,6 +134,8 @@ public:
     std::optional<StoreBytes> Get(std::span<const unsigned char> key) const override;
     std::optional<std::pair<StoreBytes, StoreBytes>> Next(std::span<const unsigned char> from, std::span<const unsigned char> prefix) const override;
     std::unique_ptr<StoreView> Snapshot() const override;
+    //! Moves on with every Reset and Wipe, which whoever writes the database calls.
+    std::optional<uint64_t> Version() const override { return m_version.load(); }
     /** Put the changes in a batch. */
     void Write(CDBBatch& batch, const std::map<StoreBytes, std::optional<StoreBytes>>& changes) const;
     /** Erase every entry (a state started over), in batches of about `batch_bytes`; synced at the end. */
@@ -147,6 +157,7 @@ private:
     const bool m_pinned{false};
     mutable std::mutex m_cursor_mutex;
     mutable std::unique_ptr<Cursor> m_cursor;
+    mutable std::atomic<uint64_t> m_version{0};
 };
 
 /** Changes over another view, kept apart from it until merged into it or dropped. */
@@ -161,6 +172,14 @@ public:
     std::optional<std::pair<StoreBytes, StoreBytes>> Next(std::span<const unsigned char> from, std::span<const unsigned char> prefix) const override;
     /** A copy of the changes over a snapshot of the base. */
     std::unique_ptr<StoreView> Snapshot() const override;
+    /**
+     * A snapshot shared by everyone who asks while it is in use and neither this overlay nor its
+     * base changed: readers of the same state at the same time (RPC calls, say) cost one copy of the
+     * changes between them, not one each. Nothing is kept once they are done. nullptr if no snapshot
+     * can be made. Called under the lock that guards this overlay, as Snapshot.
+     */
+    std::shared_ptr<const StoreView> SharedSnapshot() const;
+    std::optional<uint64_t> Version() const override;
 
     void Put(std::span<const unsigned char> key, StoreBytes value);
     void Erase(std::span<const unsigned char> key);
@@ -174,6 +193,7 @@ public:
     void MergeInto(StoreOverlay& parent);
     void Clear()
     {
+        ++m_version;
         m_changes.clear();
         m_undo.entries.clear();
         m_noted.clear();
@@ -194,6 +214,12 @@ private:
     StoreUndo m_undo;
     std::set<StoreBytes> m_noted;
     size_t m_bytes{0};
+    //! Moves on with every change.
+    uint64_t m_version{0};
+    //! The last shared snapshot, while anyone still holds it, and the version it is of.
+    mutable std::mutex m_shared_mutex;
+    mutable std::weak_ptr<const StoreView> m_shared;
+    mutable std::optional<uint64_t> m_shared_version;
 };
 
 /**

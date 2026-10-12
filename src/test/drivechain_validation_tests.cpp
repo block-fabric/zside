@@ -548,6 +548,24 @@ BOOST_AUTO_TEST_CASE(invalid_active_block_is_taken_back_at_startup)
     }
 }
 
+BOOST_AUTO_TEST_CASE(rolled_back_transactions_already_in_the_mempool_stay)
+{
+    // A transaction of a block taken back at startup that is in the mempool already (a wallet that
+    // loaded meanwhile resubmitted it), and one that spends it: offered again, neither is evicted.
+    Chainstate& chainstate{ActiveChainstate()};
+    const CMutableTransaction parent{CreateValidMempoolTransaction(m_coinbase_txns[0], 0, 0, coinbaseKey, coinbase_script, 49 * COIN, /*submit=*/true)};
+    const CTransactionRef parent_ref{MakeTransactionRef(parent)};
+    const CMutableTransaction child{CreateValidMempoolTransaction(parent_ref, 0, 0, coinbaseKey, coinbase_script, 48 * COIN, /*submit=*/true)};
+    BOOST_REQUIRE(m_node.mempool->exists(parent.GetHash()) && m_node.mempool->exists(child.GetHash()));
+    WITH_LOCK(::cs_main, chainstate.m_rolled_back_txs.push_back(parent_ref));
+    {
+        ASSERT_DEBUG_LOG("1 of the 1 transactions of the blocks taken back at startup returned to the mempool");
+        chainstate.ReaddRolledBackTransactions();
+    }
+    BOOST_CHECK(m_node.mempool->exists(parent.GetHash()));
+    BOOST_CHECK(m_node.mempool->exists(child.GetHash()));
+}
+
 BOOST_AUTO_TEST_CASE(roll_forward_reports_the_block_that_breaks_the_rules)
 {
     // Brought forward by a caller that does not ask which block failed: the error names it.

@@ -312,6 +312,65 @@ BOOST_AUTO_TEST_CASE(snapshots_do_not_change)
     BOOST_CHECK(empty.Snapshot() && All(*empty.Snapshot()).empty());
 }
 
+BOOST_AUTO_TEST_CASE(shared_snapshots)
+{
+    // Readers of the same state at the same time share one snapshot (one copy of the changes); a
+    // change to the overlay or to the database under it makes the next one anew; none is kept once
+    // its readers are done.
+    CDBWrapper db{DBParams{.path = m_args.GetDataDirBase() / "store6", .cache_bytes = 1 << 20, .memory_only = true}};
+    DbStore store{db, B({'T', 0})};
+    StoreOverlay cache{store};
+    cache.Put(B({1, 1}), B({1}));
+
+    auto first{cache.SharedSnapshot()};
+    BOOST_REQUIRE(first);
+    BOOST_CHECK(cache.SharedSnapshot() == first);
+    const std::weak_ptr<const StoreView> seen{first};
+
+    // Changed in the overlay: a new one, which reads the change; the old one reads what it did.
+    cache.Put(B({1, 2}), B({2}));
+    auto second{cache.SharedSnapshot()};
+    BOOST_CHECK(second != first);
+    BOOST_CHECK(second->Get(B({1, 2})) == B({2}));
+    BOOST_CHECK(!first->Get(B({1, 2})));
+    BOOST_CHECK(cache.SharedSnapshot() == second);
+
+    // Flushed to the database: the overlay is cleared, and the database changed.
+    CDBBatch flush{db};
+    store.Write(flush, cache.Changes());
+    db.WriteBatch(flush);
+    store.Reset();
+    auto third{cache.SharedSnapshot()};
+    BOOST_CHECK(third != second);
+    cache.Clear();
+    auto fourth{cache.SharedSnapshot()};
+    BOOST_CHECK(fourth != third);
+    BOOST_CHECK(All(*fourth) == All(*second));
+
+    // Written in the database alone (the overlay unchanged): a new one too.
+    CDBBatch more{db};
+    store.Write(more, {{B({3, 3}), B({3})}});
+    db.WriteBatch(more);
+    auto fifth{cache.SharedSnapshot()};
+    BOOST_CHECK(fifth != fourth);
+    BOOST_CHECK(fifth->Get(B({3, 3})) == B({3}));
+    store.Wipe();
+    BOOST_CHECK(cache.SharedSnapshot() != fifth);
+
+    // Nothing kept by the overlay once the readers let go.
+    first.reset();
+    BOOST_CHECK(seen.expired());
+
+    // Over a view that keeps no version: never shared, as it cannot tell a change.
+    struct Unversioned : EmptyStore {
+        std::optional<uint64_t> Version() const override { return std::nullopt; }
+    } unversioned;
+    StoreOverlay over{unversioned};
+    const auto a{over.SharedSnapshot()};
+    BOOST_REQUIRE(a);
+    BOOST_CHECK(over.SharedSnapshot() != a);
+}
+
 BOOST_AUTO_TEST_CASE(hash_with_entries)
 {
     EmptyStore empty;

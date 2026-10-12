@@ -111,6 +111,11 @@ std::string RefundMessage(const COutPoint& withdrawal)
     return strprintf("Refund withdrawal %s:%u", withdrawal.hash.GetHex(), withdrawal.n);
 }
 
+bool CheckedAgainstMempool(const CTransaction& tx)
+{
+    return std::any_of(tx.vout.begin(), tx.vout.end(), [](const CTxOut& out) { return ParseRefundScript(out.scriptPubKey).has_value(); });
+}
+
 CScript BundleCommitScript(const uint256& hash)
 {
     return Tagged(BUNDLE_COMMIT_TAG, hash);

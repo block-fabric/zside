@@ -169,6 +169,7 @@ void DbStore::Reset() const
 {
     // A snapshot's iterator is what it is a snapshot of; nothing writes through it.
     if (m_pinned) return;
+    ++m_version;
     std::lock_guard lock{m_cursor_mutex};
     m_cursor.reset();
 }

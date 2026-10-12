@@ -3,11 +3,13 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <addresstype.h>
+#include <chainparams.h>
 #include <core_io.h>
 #include <drivechain/sidechain.h>
 #include <key_io.h>
 #include <rpc/util.h>
 #include <sidechain/state.h>
+#include <util/moneystr.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
 #include <wallet/coincontrol.h>
@@ -108,6 +110,11 @@ RPCMethod createwithdrawal()
     const auto main_script{pwallet->chain().getMainchainScript(request.params[0].get_str())};
     if (!main_script) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, util::ErrorString(main_script).original);
     if (main_script->size() > sidechain::MAX_MAIN_SCRIPT_SIZE) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The script of this mainchain address is too long for a withdrawal");
+    // Checked here, not left to the mempool: with -walletbroadcast=0 the wallet keeps the transaction
+    // without offering it, and one that no block can take would hold its inputs until abandoned.
+    if (const CAmount min_withdrawal{Params().GetConsensus().sidechain.min_withdrawal}; amount < min_withdrawal) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The amount is below the minimum withdrawal of %s %s", FormatMoney(min_withdrawal), CURRENCY_UNIT));
+    }
 
     EnsureWalletIsUnlocked(*pwallet);
 

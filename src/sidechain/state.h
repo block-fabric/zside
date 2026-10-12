@@ -266,6 +266,15 @@ std::optional<RefundRequest> ParseRefundScript(const CScript& script);
 /** The message the refund key signs to take a withdrawal back. */
 std::string RefundMessage(const COutPoint& withdrawal);
 
+/**
+ * Whether the mempool checks of the transaction look at what the mempool holds of the sidechain
+ * state: a refund request (one per withdrawal in the mempool), and whatever else a sidechain built
+ * on this one keeps there (add it here). Such a transaction is never accepted as part of a package,
+ * whose members are checked before any of them is in the mempool and would not see each other: it
+ * comes on its own, paying its own way.
+ */
+bool CheckedAgainstMempool(const CTransaction& tx);
+
 /** Coinbase output committing to a withdrawal bundle: BUNDLE_COMMIT_TAG | bundle hash */
 CScript BundleCommitScript(const uint256& hash);
 std::optional<uint256> ParseBundleCommitScript(const CScript& script);

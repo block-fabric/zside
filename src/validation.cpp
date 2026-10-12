@@ -1638,12 +1638,16 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactionsInternal(con
     if (!IsWellFormedPackage(txns, package_state)) return PackageMempoolAcceptResult(package_state, {});
 
     // The drivechain checks of the mempool (one BMM request per sidechain, deposits that chain on the
-    // treasury output) look at the mempool as it is: a package member would not see the others. Such
-    // transactions come one at a time, each paying its own way.
+    // treasury output) and those of the sidechain rules (one refund per withdrawal, and what a
+    // sidechain built on this one adds: sidechain::CheckedAgainstMempool) look at the mempool as it
+    // is: a package member would not see the others. Such transactions come one at a time, each
+    // paying its own way.
     if (txns.size() > 1) {
+        const bool on_sidechain{m_active_chainstate.m_chainman.GetConsensus().sidechain.enabled};
         for (const CTransactionRef& tx : txns) {
             // Shielded transactions too: the nullifiers of a package are not checked against each other.
             const bool drivechain_tx{drivechain::GetBmmRequest(*tx).has_value() || zside::HasShieldedMarker(*tx) ||
+                                     (on_sidechain && sidechain::CheckedAgainstMempool(*tx)) ||
                                      std::any_of(tx->vout.begin(), tx->vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); })};
             if (drivechain_tx) {
                 package_state.Invalid(PackageValidationResult::PCKG_POLICY, "package-drivechain-tx");
@@ -5444,12 +5448,16 @@ void Chainstate::ReaddRolledBackTransactions()
     LOCK(m_mempool->cs);
     // In the order of DisconnectedBlockTransactions (AddTransactionsFromBlock takes a block's
     // transactions last first): MaybeUpdateMempoolForReorg adds the earliest confirmed first.
+    // Those already there (a wallet loaded meanwhile resubmits its own) are left alone: offered
+    // again they would fail, and MaybeUpdateMempoolForReorg removes what fails, with what spends it.
+    std::vector<CTransactionRef> missing;
+    std::copy_if(txs.rbegin(), txs.rend(), std::back_inserter(missing), [&](const CTransactionRef& tx) { return !m_mempool->exists(tx->GetHash()); });
     DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_BYTES};
-    (void)disconnectpool.AddTransactionsFromBlock({txs.rbegin(), txs.rend()});
-    const size_t before{m_mempool->size()};
+    (void)disconnectpool.AddTransactionsFromBlock(missing);
     // Those in a block connected since (another branch), or that no longer pass, are left out.
     MaybeUpdateMempoolForReorg(disconnectpool, /*fAddToMempool=*/true);
-    LogInfo("%u of the %u transactions of the blocks taken back at startup returned to the mempool", m_mempool->size() - before, txs.size());
+    const size_t in_mempool{size_t(std::count_if(txs.begin(), txs.end(), [&](const CTransactionRef& tx) { return m_mempool->exists(tx->GetHash()); }))};
+    LogInfo("%u of the %u transactions of the blocks taken back at startup returned to the mempool", in_mempool, txs.size());
 }
 
 bool Chainstate::PrepareDrivechainDB(const CBlockIndex* rebuild_from, bilingual_str& error)
@@ -5620,17 +5628,26 @@ util::Result<void> Chainstate::LoadDrivechainState()
         LogWarning("Block %s at height %d does not fit the record of the mainchain as it is; the chain goes back to height %d, to be checked again",
                    stopped->GetBlockHash().ToString(), stopped->nHeight, parent->nHeight);
         CCoinsViewCache view{&CoinsTip()};
+        // Their transactions are offered to the mempool again (ReaddRolledBackTransactions), as after
+        // RollBackFromInvalidBlock: the blocks may never connect again.
+        DisconnectedBlockTransactions disconnected{MAX_DISCONNECTED_TX_POOL_BYTES};
         for (const CBlockIndex* block_index{tip}; block_index != parent; block_index = block_index->pprev) {
             CBlock block;
             if (!m_blockman.ReadBlock(block, *block_index)) {
+                disconnected.clear();
                 return util::Error{strprintf(_("Failed to read block %s. Restart with -reindex."), block_index->GetBlockHash().ToString())};
             }
             // The coins only: the sidechain database never got to this block.
             if (DisconnectBlock(block, block_index, view) != DISCONNECT_OK) {
+                disconnected.clear();
                 return util::Error{strprintf(_("Failed to take block %s back. Restart with -reindex-chainstate."), block_index->GetBlockHash().ToString())};
             }
+            (void)disconnected.AddTransactionsFromBlock(block.vtx);
         }
         view.Flush(/*reallocate_cache=*/false);
+        for (CTransactionRef& tx : disconnected.take()) {
+            if (!tx->IsCoinBase()) m_rolled_back_txs.push_back(std::move(tx));
+        }
         m_chain.SetTip(*const_cast<CBlockIndex*>(parent));
         m_scdb = std::move(scdb);
         WriteDrivechainState();

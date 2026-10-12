@@ -341,14 +341,18 @@ class SidechainRecordTest(BitcoinTestFramework):
         manual = self.mine()
         node.invalidateblock(manual)
         # Not the same block again: one with a transaction.
-        node.sendtoaddress(node.getnewaddress(), 1)
+        sent = node.sendtoaddress(node.getnewaddress(), 1)
         tip = self.mine()
+        assert sent in node.getblock(tip)["tx"]
         parent = node.getblockheader(tip)["previousblockhash"]
         self.change_unacted(self.reorg(main.height(), count=2, branch=5))
         self.stop_node(0)
+        # The transactions of the block taken back go to the mempool again.
         with node.assert_debug_log(["blocks found invalid under the former drivechain parameters are judged again",
-                                    f"Block {tip} at height", "does not fit the record of the mainchain as it is; the chain goes back to height"]):
+                                    f"Block {tip} at height", "does not fit the record of the mainchain as it is; the chain goes back to height",
+                                    "1 of the 1 transactions of the blocks taken back at startup returned to the mempool"], timeout=30):
             self.start_node(0, extra_args=self.extra_args[0] + ["-testdrivechainparam=activation_period@21"])
+            self.wait_until(lambda: sent in node.getrawmempool())
         assert_equal(node.getbestblockhash(), parent)
         assert_equal(self.status(manual), "invalid")
         main.fail_from = None

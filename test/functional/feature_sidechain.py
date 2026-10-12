@@ -238,7 +238,7 @@ class SidechainTest(BitcoinTestFramework):
         self.log.info("Withdraw to the mainchain")
         payout_address = main.getnewaddress()
         assert_raises_rpc_error(-5, "Not an address of the mainchain", side.createwithdrawal, "nonsense", 1)
-        assert_raises_rpc_error(-4, "below the minimum", side.createwithdrawal, payout_address, Decimal("0.00000100"))
+        assert_raises_rpc_error(-8, "below the minimum withdrawal of 0.0001 ", side.createwithdrawal, payout_address, Decimal("0.00009999"))
         assert_equal(side.getwithdrawalbundle(), {"status": "none", "waiting": 0})
         withdrawal = side.createwithdrawal(payout_address, 3, Decimal("0.01"))
         small = other.createwithdrawal(payout_address, 1, Decimal("0.002"))
@@ -369,10 +369,16 @@ class SidechainTest(BitcoinTestFramework):
         assert_equal((side.listwithdrawals(), side.getwithdrawalbundle(), side.gettxoutsetinfo()["total_amount"]), (expected[0], expected[1], expected[3]))
         assert_equal(side.getsidechainstate(), state)
         # Only the coins rebuilt, from genesis: the sidechain state with them, not read from the old tip.
-        self.restart_node(0, extra_args=self.extra_args[0] + ["-reindex-chainstate"])
+        self.restart_node(0, extra_args=self.extra_args[0] + ["-reindex-chainstate", "-walletbroadcast=0"])
         self.wait_until(lambda: side.getbestblockhash() == expected[2])
         assert_equal((side.listwithdrawals(), side.getwithdrawalbundle(), side.gettxoutsetinfo()["total_amount"]), (expected[0], expected[1], expected[3]))
         assert_equal(side.getsidechainstate(), state)
+        # A withdrawal below the minimum is refused by the wallet itself, even one it would not broadcast:
+        # kept, no block could take it, and its inputs would stay spent until it was abandoned.
+        transactions = len(side.listtransactions("*", 1000))
+        assert_raises_rpc_error(-8, "below the minimum withdrawal", side.createwithdrawal, main.getnewaddress(), Decimal("0.00009999"))
+        assert_equal(len(side.listtransactions("*", 1000)), transactions)
+        self.restart_node(0)
 
         self.log.info("A node that was away catches up, with the mainchain and with this chain")
         self.stop_node(1)

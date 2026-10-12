@@ -199,20 +199,20 @@ struct SidechainChainSetup : public TestingSetup {
     }
 
     /** A refund request for `withdrawal`, spending the change of `funding` (output 1). */
-    CMutableTransaction Refund(const COutPoint& withdrawal, const CMutableTransaction& funding, const CKey* signer = nullptr)
+    CMutableTransaction Refund(const COutPoint& withdrawal, const CMutableTransaction& funding, const CKey* signer = nullptr, CAmount fee = TX_FEE)
     {
         sidechain::RefundRequest request;
         request.withdrawal = withdrawal;
         BOOST_REQUIRE((signer ? *signer : key).SignCompact(MessageHash(sidechain::RefundMessage(withdrawal)), request.signature));
         const CTxOut& change{funding.vout[1]};
-        return Spend(COutPoint{funding.GetHash(), 1}, change, {CTxOut{0, sidechain::RefundScript(request)}, CTxOut{change.nValue - TX_FEE, script}});
+        return Spend(COutPoint{funding.GetHash(), 1}, change, {CTxOut{0, sidechain::RefundScript(request)}, CTxOut{change.nValue - fee, script}});
     }
 
     /** A transaction spending output 1 of `parent`. */
-    CMutableTransaction Child(const CMutableTransaction& parent)
+    CMutableTransaction Child(const CMutableTransaction& parent, CAmount fee = TX_FEE)
     {
         const CTxOut& spent{parent.vout[1]};
-        return Spend(COutPoint{parent.GetHash(), 1}, spent, {CTxOut{0, CScript() << OP_RETURN}, CTxOut{spent.nValue - TX_FEE, script}});
+        return Spend(COutPoint{parent.GetHash(), 1}, spent, {CTxOut{0, CScript() << OP_RETURN}, CTxOut{spent.nValue - fee, script}});
     }
 
     bool InBlock(const CBlock& block, const CMutableTransaction& tx)
@@ -697,6 +697,45 @@ BOOST_FIXTURE_TEST_CASE(release_names_the_activation_of_its_slot, BasicTestingSe
     BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*main, 0, /*sidechain=*/false}));
     BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*main, 0, /*sidechain=*/true, /*own_genesis=*/false}));
     BOOST_CHECK(CheckSidechainActivation(*CChainParams::TestNet()));
+}
+
+BOOST_AUTO_TEST_CASE(refunds_are_not_accepted_in_packages)
+{
+    // The members of a package are checked before any of them is in the mempool: two refund requests
+    // for one withdrawal, the second spending the first and paying for both, would both pass
+    // sc-refund-in-mempool. A refund request comes on its own.
+    COutPoint coin;
+    const CTxOut spent{Fund(10 * COIN, coin)};
+    const CMutableTransaction withdrawal{Withdraw(coin, spent, 2 * COIN)};
+    BOOST_REQUIRE(Accept(withdrawal).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_REQUIRE(InBlock(Mine(), withdrawal));
+    const COutPoint outpoint{withdrawal.GetHash(), 0};
+    // Without a fee: it can only come in with a child that pays for it.
+    const CMutableTransaction refund{Refund(outpoint, withdrawal, /*signer=*/nullptr, /*fee=*/0)};
+    BOOST_REQUIRE_EQUAL(Accept(refund, /*test_accept=*/true).m_state.GetResult(), TxValidationResult::TX_RECONSIDERABLE);
+    const CMutableTransaction again{Refund(outpoint, refund, /*signer=*/nullptr, /*fee=*/10 * TX_FEE)};
+    const CMutableTransaction child{Child(refund, /*fee=*/10 * TX_FEE)};
+    for (const auto& package : {Package{MakeTransactionRef(refund), MakeTransactionRef(again)}, Package{MakeTransactionRef(refund), MakeTransactionRef(child)}}) {
+        for (const bool test_accept : {true, false}) {
+            const auto result{WITH_LOCK(::cs_main, return ProcessNewPackage(Chain(), *m_node.mempool, package, test_accept, /*client_maxfeerate=*/{}))};
+            BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "package-drivechain-tx");
+            BOOST_CHECK(!InMempool(refund));
+            BOOST_CHECK(!InMempool(again));
+            BOOST_CHECK(!InMempool(child));
+        }
+    }
+    // One at a time, with fees of their own: the first goes in and the second is refused.
+    const CMutableTransaction paying{Refund(outpoint, withdrawal)};
+    BOOST_CHECK(Accept(paying).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_CHECK_EQUAL(Accept(Refund(outpoint, paying), /*test_accept=*/true).m_state.GetRejectReason(), "sc-refund-in-mempool");
+    // A package of transactions that touch no sidechain state is accepted as before.
+    COutPoint other;
+    const CTxOut other_spent{Fund(5 * COIN, other)};
+    const CMutableTransaction parent{Spend(other, other_spent, {CTxOut{COIN, script}, CTxOut{other_spent.nValue - COIN, script}})};
+    const CMutableTransaction pays_for_it{Child(parent, /*fee=*/10 * TX_FEE)};
+    const auto plain{WITH_LOCK(::cs_main, return ProcessNewPackage(Chain(), *m_node.mempool, Package{MakeTransactionRef(parent), MakeTransactionRef(pays_for_it)}, /*test_accept=*/false, /*client_maxfeerate=*/{}))};
+    BOOST_CHECK_MESSAGE(plain.m_state.IsValid(), plain.m_state.ToString());
+    BOOST_CHECK(InMempool(parent) && InMempool(pays_for_it));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

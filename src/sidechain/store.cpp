@@ -92,6 +92,28 @@ std::unique_ptr<StoreView> StoreOverlay::Snapshot() const
     return snapshot;
 }
 
+std::optional<uint64_t> StoreOverlay::Version() const
+{
+    const auto base{m_base->Version()};
+    if (!base) return std::nullopt;
+    // Both only go up: the sum moves whenever either does.
+    return *base + m_version;
+}
+
+std::shared_ptr<const StoreView> StoreOverlay::SharedSnapshot() const
+{
+    const auto version{Version()};
+    std::lock_guard lock{m_shared_mutex};
+    if (version && version == m_shared_version) {
+        if (auto shared{m_shared.lock()}) return shared;
+    }
+    std::shared_ptr<const StoreView> shared{Snapshot()};
+    if (!shared) return nullptr;
+    m_shared = shared;
+    m_shared_version = version;
+    return shared;
+}
+
 void StoreOverlay::Note(std::span<const unsigned char> key)
 {
     if (!m_journal) return;
@@ -103,6 +125,7 @@ void StoreOverlay::Note(std::span<const unsigned char> key)
 void StoreOverlay::Set(std::span<const unsigned char> key, std::optional<StoreBytes> value)
 {
     Note(key);
+    ++m_version;
     // A map node, the key, the value: not exact, a bound to flush by. A value replaced no longer counts.
     const size_t size{value ? value->size() : 0};
     StoreBytes k(key.begin(), key.end());

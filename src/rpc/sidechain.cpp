@@ -40,9 +40,11 @@ Follower& EnsureFollower(const NodeContext& node)
  * The sidechain state as of the tip, taken under cs_main and read without it: the RPCs that read
  * all of it do not hold block validation back for as long as they take. The copy is of the changes
  * not flushed yet; the database is read as it was when it was taken (sidechain::StoreView::Snapshot).
+ * Calls at the same time on the same state share one (sidechain::StoreOverlay::SharedSnapshot): the
+ * changes, up to SIDE_CACHE_MAX_BYTES, are not copied under cs_main once per call.
  */
 struct SideSnapshot {
-    std::unique_ptr<sidechain::StoreView> view;
+    std::shared_ptr<const sidechain::StoreView> view;
     uint256 tip;
     int height;
 
@@ -54,7 +56,7 @@ SideSnapshot TakeSideSnapshot(ChainstateManager& chainman)
     LOCK(::cs_main);
     Chainstate& chainstate{chainman.ActiveChainstate()};
     return SideSnapshot{
-        .view = Assert(chainstate.SideCache().Snapshot()),
+        .view = Assert(chainstate.SideCache().SharedSnapshot()),
         .tip = chainstate.m_chain.Tip()->GetBlockHash(),
         .height = chainstate.m_chain.Height(),
     };
