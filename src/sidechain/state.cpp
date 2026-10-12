@@ -11,6 +11,7 @@
 #include <drivechain/sidechain.h>
 #include <key_io.h>
 #include <pubkey.h>
+#include <sidechain/hooks.h>
 #include <sidechain/mainchain.h>
 #include <util/strencodings.h>
 
@@ -320,7 +321,8 @@ bool State::MainPendingNext(const Mainchain& mainchain, const Consensus::Sidecha
            mainchain.RisingLeader(mainchain.Height(), PENDING_TREND_BLOCKS, PENDING_TREND_MIN_RISE, ours);
 }
 
-std::optional<CMutableTransaction> State::NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals) const
+std::optional<CMutableTransaction> State::NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals,
+                                                     std::optional<int32_t> max_withdrawal_height) const
 {
     // A bundle of another branch pending on the mainchain does not hold a new one back: the mainchain
     // pays one bundle per slot and fails the others, and what the other pays is matched here
@@ -337,9 +339,12 @@ std::optional<CMutableTransaction> State::NextBundle(int height, const uint256& 
     while (chosen.size() < params.max_bundle_withdrawals) {
         const auto entry{m_view->Next(at, prefix)};
         if (!entry) break;
-        chosen.push_back(*Assert(GetWithdrawal(OutpointOf(entry->first))));
         at = entry->first;
         at.push_back(0);
+        Withdrawal withdrawal{*Assert(GetWithdrawal(OutpointOf(entry->first)))};
+        // A block may take only the withdrawals up to a height (none above it in the template).
+        if (max_withdrawal_height && withdrawal.height > *max_withdrawal_height) continue;
+        chosen.push_back(std::move(withdrawal));
     }
     if (chosen.empty()) return std::nullopt;
     if (withdrawals) {
@@ -366,10 +371,11 @@ std::optional<CMutableTransaction> State::BundleTx() const
     return BuildBundle(pointers, bundle->height, bundle->nonce);
 }
 
-bool State::StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, std::string& reject_reason)
+bool State::StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, std::string& reject_reason,
+                        std::optional<int32_t> max_withdrawal_height)
 {
     std::vector<COutPoint> withdrawals;
-    const auto bundle{NextBundle(height, prev, params, &withdrawals)};
+    const auto bundle{NextBundle(height, prev, params, &withdrawals, max_withdrawal_height)};
     if (!bundle) {
         reject_reason = "bad-sc-bundle-not-allowed";
         return false;
@@ -411,14 +417,14 @@ bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason
 }
 
 bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
-                    std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending)
+                    std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending, bool peg_step)
 {
     // All or nothing: on an overlay of its own, kept only if the transaction keeps the rules, so that
     // block assembly can leave a transaction out and go on, rather than start over.
     StoreOverlay tx_overlay{Writable(), /*journal=*/false};
     const size_t paid{payouts.size()};
     State tx_state{tx_overlay};
-    if (!tx_state.ApplyTxSteps(tx, height, params, payouts, reject_reason, main_pending)) {
+    if (!tx_state.ApplyTxSteps(tx, height, params, payouts, reject_reason, main_pending, peg_step)) {
         payouts.resize(paid);
         return false;
     }
@@ -427,7 +433,7 @@ bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::Sidecha
 }
 
 bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
-                         std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending)
+                         std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending, bool peg_step)
 {
     // The shielded pool goes last, once nothing else can fail; what it pays (nothing, so far)
     // would still come first.
@@ -448,6 +454,11 @@ bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::Si
             withdrawal->height = height;
             AddWithdrawal(*withdrawal);
         } else if (const auto refund{ParseRefundScript(out.scriptPubKey)}) {
+            // A sidechain may have refunds wait for a block that takes the peg actions (never so in the template).
+            if (!peg_step && Hooks().RefundsOnlyInPegSteps()) {
+                reject_reason = "bad-sc-refund-not-peg";
+                return false;
+            }
             if (!CheckRefund(*refund, reject_reason, main_pending)) return false;
             const Withdrawal withdrawal{*Assert(GetWithdrawal(refund->withdrawal))};
             refunds.emplace_back(withdrawal.Burned(), GetScriptForDestination(WitnessV0KeyHash{withdrawal.refund_keyhash}));
@@ -458,61 +469,33 @@ bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::Si
     zside::ShieldedState shielded{Writable()};
     if (!shielded.ApplyTx(tx, reject_reason, zside::SighashDomainOf(params, ::Params().GetConsensus().hashGenesisBlock))) return false;
     payouts.insert(payouts.end(), refunds.begin(), refunds.end());
-    return true;
+    // The rules of the sidechain's own (none in the template).
+    return Hooks().ApplyTx(*this, tx, height, peg_step, payouts, reject_reason);
 }
 
 bool State::ConnectBlock(const CBlock& block, int height, const Consensus::SidechainParams& params, const Mainchain& mainchain,
                          CAmount& minted, std::string& reject_reason)
 {
-    // The block follows the mainchain up to the block before the one that committed to it.
-    const auto bmm_height{mainchain.BmmHeight(block.GetHash())};
-    if (!bmm_height) {
-        reject_reason = "bmm-unknown";
-        return false;
-    }
+    // Where the block takes the peg actions: in the template, every block, as the mainchain was up to
+    // the block before the one that committed to it.
+    std::optional<PegStep> step;
+    if (!Hooks().GetPegStep(block, mainchain, step, reject_reason)) return false;
     std::vector<CTxOut> payouts, tx_payouts;
-    if (!ApplyMainEvents(*bmm_height - 1, mainchain, height, params, payouts, reject_reason)) return false;
-    const bool main_pending{MainPending(mainchain, params)};
-
-    // A new bundle takes the withdrawals that were waiting before this block.
-    std::optional<uint256> commitment;
-    for (const CTxOut& out : block.vtx[0]->vout) {
-        const auto hash{ParseBundleCommitScript(out.scriptPubKey)};
-        if (!hash) continue;
-        if (commitment) {
-            reject_reason = "bad-sc-bundle-multiple";
-            return false;
-        }
-        commitment = hash;
-    }
-    if (commitment) {
-        // A bundle the mainchain closed already, before this block was committed, would stay pending for
-        // ever. One proposed ahead and still pending is taken (refusing it would let whoever works the
-        // hash out keep this chain from ever committing to a bundle): its proposal counts (ApplyMainEvents).
-        if (const auto closed{mainchain.ClosedHeight(*commitment)}; closed && *closed < *bmm_height) {
-            reject_reason = "bad-sc-bundle-closed";
-            return false;
-        }
-        if (!StartBundle(*commitment, height, block.hashPrevBlock, params, reject_reason)) return false;
-    }
-
-    // The coinbase has no part in the shielded pool (its transactions are checked one by one below).
-    if (zside::HasShieldedMarker(*block.vtx[0])) {
-        reject_reason = "bad-zs-coinbase";
+    bool main_pending{false};
+    if (step) {
+        if (!Hooks().BeforePegStep(*this, block, height, *step, params, tx_payouts, reject_reason)) return false;
+        if (!ApplyPegStep(block, height, *step, params, mainchain, payouts, main_pending, reject_reason)) return false;
+    } else if (std::any_of(block.vtx[0]->vout.begin(), block.vtx[0]->vout.end(), [](const CTxOut& out) { return ParseBundleCommitScript(out.scriptPubKey).has_value(); })) {
+        // A bundle is started only with the peg actions.
+        reject_reason = "bad-sc-bundle-not-peg";
         return false;
     }
-    // The proofs of the block's bundles in one batch, which costs less than one by one (an invalid
-    // one is found below, by the transaction that has it).
-    (void)zside::VerifyBundles(std::span{block.vtx}.subspan(1), zside::SighashDomainOf(params, ::Params().GetConsensus().hashGenesisBlock));
-    for (size_t i{1}; i < block.vtx.size(); ++i) {
-        if (!ApplyTx(*block.vtx[i], height, params, tx_payouts, reject_reason, main_pending)) return false;
-    }
 
-    // The root the block leaves the shielded tree with is an anchor for the next blocks.
-    zside::ShieldedState{Writable()}.EndBlock();
+    if (!ApplyTxs(block, height, params, main_pending, step.has_value(), tx_payouts, reject_reason)) return false;
 
-    // The coinbase pays the deposits and the refunds, right after its first output, as many as a block can.
-    payouts = TakePayouts(std::move(payouts), std::move(tx_payouts));
+    // The coinbase pays the deposits and the refunds, right after its first output, as many as a block
+    // can; a block without the peg actions pays none, and what it gave rise to waits for one that has them.
+    payouts = TakePayouts(std::move(payouts), std::move(tx_payouts), step ? MAX_PAYOUTS_PER_BLOCK : 0);
     const std::vector<CTxOut>& coinbase{block.vtx[0]->vout};
     if (coinbase.size() < 1 + payouts.size()) {
         reject_reason = "bad-sc-payouts-missing";
@@ -530,6 +513,58 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
             return false;
         }
     }
+    return Hooks().AfterBlock(*this, block, height, step, minted, params, reject_reason);
+}
+
+bool State::ApplyPegStep(const CBlock& block, int height, const PegStep& step, const Consensus::SidechainParams& params, const Mainchain& mainchain,
+                         std::vector<CTxOut>& payouts, bool& main_pending, std::string& reject_reason)
+{
+    // The height the peg actions count as at: the block's, unless the step says otherwise (PegStep::peg_height).
+    const int peg_height{step.peg_height.value_or(height)};
+    if (!ApplyMainEvents(step.main_height, mainchain, peg_height, params, payouts, reject_reason)) return false;
+    main_pending = MainPending(mainchain, params);
+
+    // A new bundle takes the withdrawals that were waiting before this block.
+    std::optional<uint256> commitment;
+    for (const CTxOut& out : block.vtx[0]->vout) {
+        const auto hash{ParseBundleCommitScript(out.scriptPubKey)};
+        if (!hash) continue;
+        if (commitment) {
+            reject_reason = "bad-sc-bundle-multiple";
+            return false;
+        }
+        commitment = hash;
+    }
+    if (commitment) {
+        // A bundle the mainchain closed already, before this block was committed, would stay pending for
+        // ever. One proposed ahead and still pending is taken (refusing it would let whoever works the
+        // hash out keep this chain from ever committing to a bundle): its proposal counts (ApplyMainEvents).
+        if (const auto closed{mainchain.ClosedHeight(*commitment)}; closed && *closed <= step.main_height) {
+            reject_reason = "bad-sc-bundle-closed";
+            return false;
+        }
+        if (!StartBundle(*commitment, peg_height, step.nonce, params, reject_reason, step.max_withdrawal_height)) return false;
+    }
+    return true;
+}
+
+bool State::ApplyTxs(const CBlock& block, int height, const Consensus::SidechainParams& params, bool main_pending, bool peg_step,
+                     std::vector<CTxOut>& tx_payouts, std::string& reject_reason)
+{
+    // The coinbase has no part in the shielded pool (its transactions are checked one by one below).
+    if (zside::HasShieldedMarker(*block.vtx[0])) {
+        reject_reason = "bad-zs-coinbase";
+        return false;
+    }
+    // The proofs of the block's bundles in one batch, which costs less than one by one (an invalid
+    // one is found below, by the transaction that has it).
+    (void)zside::VerifyBundles(std::span{block.vtx}.subspan(1), zside::SighashDomainOf(params, ::Params().GetConsensus().hashGenesisBlock));
+    for (size_t i{1}; i < block.vtx.size(); ++i) {
+        if (!ApplyTx(*block.vtx[i], height, params, tx_payouts, reject_reason, main_pending, peg_step)) return false;
+    }
+
+    // The root the block leaves the shielded tree with is an anchor for the next blocks.
+    zside::ShieldedState{Writable()}.EndBlock();
     return true;
 }
 
@@ -546,7 +581,7 @@ bool RecordIndependent(const std::string& reject_reason)
     return independent.contains(reject_reason) || zside::TxOnlyReason(reject_reason);
 }
 
-std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx)
+std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, uint64_t max_payouts)
 {
     StoreOverlay& out{Writable()};
     // Each queue: what is owed goes at its end; what is paid comes from its front.
@@ -569,10 +604,10 @@ std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTx
     const uint64_t queued{push(QUEUE, QUEUE_ENDS, owed)};
     const uint64_t queued_tx{push(TX_QUEUE, TX_QUEUE_ENDS, owed_tx)};
     // Half each; what one queue leaves of its half, the other may take.
-    const uint64_t half{MAX_PAYOUTS_PER_BLOCK / 2};
+    const uint64_t half{max_payouts / 2};
     uint64_t count{std::min<uint64_t>(queued, half)};
-    uint64_t count_tx{std::min<uint64_t>(queued_tx, MAX_PAYOUTS_PER_BLOCK - half)};
-    const uint64_t left{MAX_PAYOUTS_PER_BLOCK - count - count_tx};
+    uint64_t count_tx{std::min<uint64_t>(queued_tx, max_payouts - half)};
+    const uint64_t left{max_payouts - count - count_tx};
     const uint64_t more{std::min<uint64_t>(queued - count, left)};
     count += more;
     count_tx += std::min<uint64_t>(queued_tx - count_tx, left - more);

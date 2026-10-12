@@ -10,12 +10,14 @@
 #include <node/mining_types.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <sidechain/hooks.h>
 #include <threadsafety.h>
 #include <txmempool.h>
 #include <util/feefrac.h>
 #include <util/time.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -56,6 +58,27 @@ struct CBlockTemplate
     CoinbaseTx m_coinbase_tx;
 };
 
+/**
+ * How a block of a sidechain is assembled, for a sidechain with blocks of kinds of its own
+ * (sidechain/hooks.h). The default is the template's block.
+ */
+struct SidechainAssembly {
+    enum class Peg : uint8_t {
+        //! The peg actions as of the mainchain block the next one is to commit to the block: the template's.
+        BMM,
+        //! No peg actions: no deposits, bundle or refunds, and no payouts.
+        NONE,
+        //! The peg actions of `step`.
+        STEP,
+    };
+    Peg peg{Peg::BMM};
+    sidechain::PegStep step;
+    //! If set, only the transactions it accepts go in, without what depends on those it refuses.
+    std::function<bool(const CTransaction&)> tx_filter;
+    //! The sections of the block (CBlock::vSections), which the sidechain's hooks see (BeforePegStep).
+    std::vector<unsigned char> sections;
+};
+
 /** Generate a new block, without valid proof-of-work */
 class BlockAssembler
 {
@@ -80,7 +103,8 @@ private:
 public:
     explicit BlockAssembler(Chainstate& chainstate,
                             const CTxMemPool* mempool,
-                            BlockCreateOptions create_options);
+                            BlockCreateOptions create_options,
+                            SidechainAssembly sidechain = {});
 
     /** Construct a new block template */
     std::unique_ptr<CBlockTemplate> CreateNewBlock();
@@ -92,6 +116,7 @@ public:
 
 private:
     const BlockCreateOptions m_options;
+    const SidechainAssembly m_sidechain;
 
     // utility functions
     /** Clear the block's state and prepare for assembling a new block */

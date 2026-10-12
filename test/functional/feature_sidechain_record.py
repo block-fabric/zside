@@ -67,7 +67,10 @@ class SidechainRecordTest(BitcoinTestFramework):
         self.node.syncmainchain()
 
     def mine(self):
-        candidate = self.node.createbmmblock(self.address)
+        # To a new address each time: two blocks on one parent in the same second would otherwise be the
+        # same block, and one of them may be a block marked invalid (the one the operator invalidated,
+        # or one that failed against the record), which the node then refuses as a duplicate.
+        candidate = self.node.createbmmblock(self.node.getnewaddress())
         self.commit(candidate["hash"])
         assert_equal(self.node.getbestblockhash(), candidate["hash"])
         return candidate["hash"]

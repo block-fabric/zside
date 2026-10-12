@@ -156,6 +156,14 @@ public:
     bool RisingLeader(int main_height, int window, uint32_t min_rise, const uint256& ours) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** The sidechain block that the mainchain block at `height` committed to, if any. */
     std::optional<uint256> BmmAt(int height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Hash of the mainchain block at `height` on record, if there is one. */
+    std::optional<uint256> HashAt(int height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * The highest height on record whose block has a median time (MainBlock::time) of `time` or
+     * less; none if no block does. The median time of the blocks of a chain never goes down (a block
+     * is later than the median of those before it), which this relies on to search.
+     */
+    std::optional<int> TimeHeight(int64_t time) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
      * Why a block of this chain is marked failed, as far as the Follower is concerned: whether it may

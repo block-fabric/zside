@@ -109,7 +109,8 @@ void RegenerateCommitments(CBlock& block, ChainstateManager& chainman)
 
 BlockAssembler::BlockAssembler(Chainstate& chainstate,
                                const CTxMemPool* mempool,
-                               BlockCreateOptions options)
+                               BlockCreateOptions options,
+                               SidechainAssembly sidechain)
     : chainparams{chainstate.m_chainman.GetParams()},
       m_mempool{options.use_mempool ? mempool : nullptr},
       m_chainstate{chainstate},
@@ -126,7 +127,8 @@ BlockAssembler::BlockAssembler(Chainstate& chainstate,
           const uint64_t limit{std::min<uint64_t>(consensus.max_block_weight, uint64_t{consensus.max_block_tx_weight} + *flattened.block_reserved_weight)};
           if (default_weight || *flattened.block_max_weight > limit) flattened.block_max_weight = limit;
           return flattened;
-      }()}
+      }()},
+      m_sidechain{std::move(sidechain)}
 {
 }
 
@@ -222,11 +224,36 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         sidechain::StoreOverlay side_store{m_chainstate.SideCache(), /*journal=*/false};
         sidechain::State side{side_store};
         std::string reject_reason;
-        // The block is built for the next mainchain block to commit to.
-        if (!side.ApplyMainEvents(mainchain.Height(), mainchain, nHeight, side_params, side_outputs, reject_reason)) {
+        // The block is built for the next mainchain block to commit to (or as the sidechain asks).
+        const bool peg_step{m_sidechain.peg != SidechainAssembly::Peg::NONE};
+        const int main_height{m_sidechain.peg == SidechainAssembly::Peg::STEP ? m_sidechain.step.main_height : mainchain.Height()};
+        const uint256 bundle_nonce{m_sidechain.peg == SidechainAssembly::Peg::STEP ? m_sidechain.step.nonce : pindexPrev->GetBlockHash()};
+        const std::optional<int32_t> max_withdrawal_height{m_sidechain.peg == SidechainAssembly::Peg::STEP ? m_sidechain.step.max_withdrawal_height : std::nullopt};
+        // The height the peg actions count as at (PegStep::peg_height): the block's in the template.
+        const std::optional<int32_t> step_peg_height{m_sidechain.peg == SidechainAssembly::Peg::STEP ? m_sidechain.step.peg_height : std::nullopt};
+        const int peg_height{step_peg_height.value_or(nHeight)};
+        // The peg actions of the sidechain's own come first, as in State::ConnectBlock (none in the
+        // template). They see the block as far as it is known now; what they owe is paid as refunds are.
+        std::vector<CTxOut> side_hook_outputs;
+        if (peg_step) {
+            CBlock known;
+            known.nVersion = pblock->nVersion;
+            known.hashPrevBlock = pindexPrev->GetBlockHash();
+            known.nTime = pblock->nTime;
+            known.vSections = m_sidechain.sections;
+            CMutableTransaction coinbase;
+            coinbase.vin.resize(1);
+            coinbase.vout.emplace_back(0, m_options.coinbase_output_script);
+            known.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
+            const sidechain::PegStep step{.main_height = main_height, .nonce = bundle_nonce, .max_withdrawal_height = max_withdrawal_height, .peg_height = step_peg_height};
+            if (!sidechain::Hooks().BeforePegStep(side, known, nHeight, step, side_params, side_hook_outputs, reject_reason)) {
+                throw std::runtime_error(strprintf("%s: the sidechain's own peg actions refuse the block (%s)", __func__, reject_reason));
+            }
+        }
+        if (peg_step && !side.ApplyMainEvents(main_height, mainchain, peg_height, side_params, side_outputs, reject_reason)) {
             throw std::runtime_error(strprintf("%s: the block does not fit the mainchain on record (%s)", __func__, reject_reason));
         }
-        const bool main_pending{side.MainPending(mainchain, side_params)};
+        const bool main_pending{peg_step && side.MainPending(mainchain, side_params)};
         // Take transactions out of the block, with what spends their outputs.
         const auto drop{[&](std::set<Txid> dropped) {
             // The fee and sigop lists have no entry for the coinbase: transaction i is entry i - 1.
@@ -254,11 +281,12 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         }};
         std::optional<uint256> bundle_hash;
         std::vector<COutPoint> bundled;
-        const auto bundle{side.NextBundle(nHeight, pindexPrev->GetBlockHash(), side_params, &bundled)};
+        const auto bundle{peg_step ? side.NextBundle(peg_height, bundle_nonce, side_params, &bundled, max_withdrawal_height) : std::nullopt};
         // Not a bundle the mainchain has closed already: the block would be invalid. One proposed ahead
         // and still pending is fine, as in State::ConnectBlock (all closes on record are before the
         // next mainchain block, which commits to this one).
-        if (bundle && !mainchain.ClosedHeight(bundle->GetHash().ToUint256())) {
+        const auto closed{bundle ? mainchain.ClosedHeight(bundle->GetHash().ToUint256()) : std::nullopt};
+        if (bundle && !(closed && *closed <= main_height)) {
             // A bundle takes its withdrawals out of reach of refunds. Someone who just made a
             // withdrawal can still take it back: while every withdrawal of the bundle is recent, the
             // bundle waits for refunds that may go in this block. Once one has waited longer, the
@@ -284,7 +312,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
             if (!dropped.empty()) drop(std::move(dropped));
             if (!refund_pending) {
                 bundle_hash = bundle->GetHash().ToUint256();
-                if (!side.StartBundle(*bundle_hash, nHeight, pindexPrev->GetBlockHash(), side_params, reject_reason)) bundle_hash.reset();
+                if (!side.StartBundle(*bundle_hash, peg_height, bundle_nonce, side_params, reject_reason, max_withdrawal_height)) bundle_hash.reset();
             }
         }
         // A transaction of the mempool can break the rules of the sidechain in this block: a refund of a
@@ -292,9 +320,14 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         // rather than making no block at all -- the mempool is only cleaned when the tip changes.
         // One pass: a transaction that breaks a rule leaves the state as it was (ApplyTx is all or
         // nothing), and what depends on it comes after it in the block, so it goes before it is applied.
-        side_tx_outputs.clear();
+        side_tx_outputs = std::move(side_hook_outputs);
         for (size_t i{1}; i < pblock->vtx.size();) {
-            if (side.ApplyTx(*pblock->vtx[i], nHeight, side_params, side_tx_outputs, reject_reason, main_pending)) {
+            if (m_sidechain.tx_filter && !m_sidechain.tx_filter(*pblock->vtx[i])) {
+                LogDebug(BCLog::MINING, "%s: leaving out transaction %s, which this kind of block does not take\n", __func__, pblock->vtx[i]->GetHash().ToString());
+                drop({pblock->vtx[i]->GetHash()});
+                continue;
+            }
+            if (side.ApplyTx(*pblock->vtx[i], nHeight, side_params, side_tx_outputs, reject_reason, main_pending, peg_step)) {
                 ++i;
                 continue;
             }
@@ -302,8 +335,13 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
             drop({pblock->vtx[i]->GetHash()});
         }
         // As many of the payouts owed as a block may pay; the rest wait for the next block.
-        side_outputs = side.TakePayouts(std::move(side_outputs), std::move(side_tx_outputs));
+        side_outputs = side.TakePayouts(std::move(side_outputs), std::move(side_tx_outputs), peg_step ? sidechain::MAX_PAYOUTS_PER_BLOCK : 0);
         if (bundle_hash) side_outputs.emplace_back(0, sidechain::BundleCommitScript(*bundle_hash));
+        // A merged mined block: outputs of the sidechain's own (none in the template).
+        if (m_sidechain.peg == SidechainAssembly::Peg::BMM) {
+            const auto own{sidechain::Hooks().MergeMinedOutputs(side.View(), *pindexPrev, pblock->nTime)};
+            side_outputs.insert(side_outputs.end(), own.begin(), own.end());
+        }
         m_chainstate.ReleaseSideCursor();
     }
 

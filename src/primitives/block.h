@@ -11,10 +11,35 @@
 #include <uint256.h>
 #include <util/time.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
+
+/**
+ * Header version bit that marks an extended block, on a chain that has them (SetBlockExtensions):
+ * its header carries a BlockHeaderExtension after the 80 bytes, and the block carries sections
+ * after its transactions. A sidechain switches extended blocks on at startup; on a chain that does
+ * not, the bit means nothing, and blocks are as Bitcoin's.
+ */
+static constexpr int32_t BLOCK_EXTENSION_BIT{0x00010000};
+
+/** Turn extended blocks on or off for this process. Off unless a sidechain turns them on, before any block is read. */
+void SetBlockExtensions(bool enabled);
+/** Whether extended blocks are on. */
+bool BlockExtensionsEnabled();
+
+/** What an extended header carries after the 80 bytes of Bitcoin's. */
+struct BlockHeaderExtension {
+    //! Commits to the sections of the block (CBlock::vSections); null if it has none.
+    uint256 hashSections;
+    //! A signature, by whoever the chain's rules say makes the block; not covered by the block hash.
+    std::array<unsigned char, 64> sig{};
+
+    SERIALIZE_METHODS(BlockHeaderExtension, obj) { READWRITE(obj.hashSections, obj.sig); }
+    friend bool operator==(const BlockHeaderExtension&, const BlockHeaderExtension&) = default;
+};
 
 /** Nodes collect new transactions into a block, hash them into a hash tree,
  * and scan through nonce values to make the block's hash satisfy proof-of-work
@@ -33,13 +58,22 @@ public:
     uint32_t nTime;
     uint32_t nBits;
     uint32_t nNonce;
+    //! Present only in an extended header (IsExtended).
+    BlockHeaderExtension ext;
 
     CBlockHeader()
     {
         SetNull();
     }
 
-    SERIALIZE_METHODS(CBlockHeader, obj) { READWRITE(obj.nVersion, obj.hashPrevBlock, obj.hashMerkleRoot, obj.nTime, obj.nBits, obj.nNonce); }
+    SERIALIZE_METHODS(CBlockHeader, obj)
+    {
+        READWRITE(obj.nVersion, obj.hashPrevBlock, obj.hashMerkleRoot, obj.nTime, obj.nBits, obj.nNonce);
+        if (obj.IsExtended()) READWRITE(obj.ext);
+    }
+
+    /** Whether the header is extended: its version says so, on a chain that has extended blocks. */
+    bool IsExtended() const { return (nVersion & BLOCK_EXTENSION_BIT) && BlockExtensionsEnabled(); }
 
     void SetNull()
     {
@@ -49,13 +83,16 @@ public:
         nTime = 0;
         nBits = 0;
         nNonce = 0;
+        ext = {};
     }
 
     bool IsNull() const
     {
-        return (nBits == 0);
+        // An extended header may have no proof of work (nBits 0) and be a header all the same.
+        return (nBits == 0) && !IsExtended();
     }
 
+    /** The hash of the 80 bytes, followed by hashSections in an extended header: never the signature. */
     uint256 GetHash() const;
 
     NodeSeconds Time() const
@@ -75,6 +112,9 @@ class CBlock : public CBlockHeader
 public:
     // network and disk
     std::vector<CTransactionRef> vtx;
+    //! Extended block only: data of the chain's own rules, after the transactions, which the header
+    //! commits to (BlockHeaderExtension::hashSections).
+    std::vector<unsigned char> vSections;
 
     // Memory-only flags for caching expensive checks
     mutable bool fChecked;                            // CheckBlock()
@@ -95,12 +135,14 @@ public:
     SERIALIZE_METHODS(CBlock, obj)
     {
         READWRITE(AsBase<CBlockHeader>(obj), obj.vtx);
+        if (obj.IsExtended()) READWRITE(obj.vSections);
     }
 
     void SetNull()
     {
         CBlockHeader::SetNull();
         vtx.clear();
+        vSections.clear();
         fChecked = false;
         m_checked_witness_commitment = false;
         m_checked_merkle_root = false;

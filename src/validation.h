@@ -1198,7 +1198,9 @@ public:
     //! Brings the record of the mainchain up to date, if it can be done without waiting.
     std::function<void()> m_mainchain_poll;
     //! Headers that were turned away because no mainchain block on record committed
-    //! to them. They are tried again when the record gets such a block.
+    //! to them, or for what else a sidechain's own header rules wait for
+    //! (sidechain::ChainHooks::IsWaitReason). They are tried again when the record gets such
+    //! a block (sidechain::ChainHooks::WaitingReady).
     struct BmmWaiting {
         CBlockHeader header;
         //! The peer that sent it, -1 if none.

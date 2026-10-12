@@ -124,6 +124,15 @@ public:
      */
     virtual util::Expected<void, std::string> FetchBlock(NodeId peer_id, const CBlockIndex& block_index) = 0;
 
+    /**
+     * Send a message of a type of a sidechain's own (see sidechain::ChainHooks::ProcessMessage) to a
+     * peer that finished the handshake; `payload` is the message as it goes on the wire.
+     * @return false if there is no such peer
+     */
+    virtual bool SendSidechainMessage(NodeId peer_id, const std::string& msg_type, std::vector<unsigned char> payload) = 0;
+    /** The same, to every peer that finished the handshake but `except`. @return the number of peers it went to */
+    virtual size_t BroadcastSidechainMessage(const std::string& msg_type, const std::vector<unsigned char>& payload, std::optional<NodeId> except = std::nullopt) = 0;
+
     /** Begin running background tasks, should only be called once */
     virtual void StartScheduledTasks(CScheduler& scheduler) = 0;
 

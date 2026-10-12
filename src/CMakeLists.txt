@@ -244,6 +244,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   drivechain/db.cpp
   drivechain/scdb.cpp
   sidechain/follower.cpp
+  sidechain/hooks.cpp
   sidechain/mainchain.cpp
   sidechain/mainclient.cpp
   sidechain/state.cpp

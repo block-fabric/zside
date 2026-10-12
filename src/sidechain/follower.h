@@ -86,6 +86,11 @@ public:
     std::optional<Candidate> CreateCandidate(const CScript& coinbase_script, std::string& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
     /** Ask the wallet of the mainchain node to pay `amount` for a commitment to `candidate`. @return the id of its transaction */
     std::optional<std::string> RequestCommitment(const Candidate& candidate, CAmount amount, std::string& error) const;
+    /**
+     * The same for any hash the mainchain is to commit to, in the mainchain block after `main_prev_hash`
+     * (which the request must follow): a block of this chain, or what a sidechain's own rules commit to.
+     */
+    std::optional<std::string> RequestCommitment(const uint256& commitment, const uint256& main_prev_hash, CAmount amount, std::string& error) const;
 
     struct Mining {
         bool enabled{false};

@@ -17,6 +17,7 @@
 #include <util/time.h>
 
 #include <algorithm>
+#include <memory>
 #include <cassert>
 #include <cstdint>
 #include <string>
@@ -142,6 +143,8 @@ public:
     uint32_t nTime{0};
     uint32_t nBits{0};
     uint32_t nNonce{0};
+    //! The extension of an extended header (CBlockHeader::IsExtended); none otherwise, which costs a pointer.
+    std::shared_ptr<const BlockHeaderExtension> m_ext;
 
     //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
     //! Initialized to SEQ_ID_INIT_FROM_DISK{1} when loading blocks from disk, except for blocks
@@ -156,7 +159,8 @@ public:
           hashMerkleRoot{block.hashMerkleRoot},
           nTime{block.nTime},
           nBits{block.nBits},
-          nNonce{block.nNonce}
+          nNonce{block.nNonce},
+          m_ext{block.IsExtended() ? std::make_shared<const BlockHeaderExtension>(block.ext) : nullptr}
     {
     }
 
@@ -192,6 +196,7 @@ public:
         block.nTime = nTime;
         block.nBits = nBits;
         block.nNonce = nNonce;
+        if (m_ext) block.ext = *m_ext;
         return block;
     }
 
@@ -357,6 +362,13 @@ public:
         READWRITE(obj.nTime);
         READWRITE(obj.nBits);
         READWRITE(obj.nNonce);
+        // An extended header, on a chain that has them: what it carries after the 80 bytes.
+        if ((obj.nVersion & BLOCK_EXTENSION_BIT) && BlockExtensionsEnabled()) {
+            BlockHeaderExtension ext;
+            SER_WRITE(obj, ext = obj.m_ext ? *obj.m_ext : BlockHeaderExtension{});
+            READWRITE(ext);
+            SER_READ(obj, obj.m_ext = std::make_shared<const BlockHeaderExtension>(ext));
+        }
     }
 
     uint256 ConstructBlockHash() const
@@ -368,6 +380,7 @@ public:
         block.nTime = nTime;
         block.nBits = nBits;
         block.nNonce = nNonce;
+        if (m_ext) block.ext = *m_ext;
         return block.GetHash();
     }
 

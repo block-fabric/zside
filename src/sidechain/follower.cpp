@@ -19,6 +19,7 @@
 #include <rpc/util.h>
 #include <streams.h>
 #include <util/strencodings.h>
+#include <sidechain/hooks.h>
 #include <sidechain/mainchain.h>
 #include <util/threadnames.h>
 #include <util/translation.h>
@@ -424,7 +425,7 @@ void Follower::Act()
     const auto waiting_ready{[&] {
         LOCK(::cs_main);
         const Mainchain& record{*chainman.m_mainchain};
-        return std::any_of(chainman.m_bmm_waiting.begin(), chainman.m_bmm_waiting.end(), [&](const auto& entry) { return record.CommittedHeight(entry.first).has_value(); });
+        return std::any_of(chainman.m_bmm_waiting.begin(), chainman.m_bmm_waiting.end(), [&](const auto& entry) { return Hooks().WaitingReady(entry.second.header, record).has_value(); });
     }};
     if (uncommitted.empty() && committed.empty() && !waiting_ready()) return;
 
@@ -432,21 +433,26 @@ void Follower::Act()
     // That includes a block whose commitment moved to another mainchain block in the same update:
     // what the mainchain did before its commitment may differ now, so it is checked again, from the
     // list of committed blocks below.
-    for (const uint256& hash : uncommitted) {
-        CBlockIndex* pindex{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(hash))};
-        if (!pindex) continue;
-        LogInfo("Block %s lost its commitment on the mainchain", hash.ToString());
-        BlockValidationState state;
-        chainman.ActiveChainstate().InvalidateBlock(state, pindex, /*by_record=*/true);
+    // (The blocks that rest on a commitment: the block of that hash, in the template.)
+    for (const uint256& commitment : uncommitted) {
+        for (const uint256& hash : Hooks().BlocksCommittedBy(commitment)) {
+            CBlockIndex* pindex{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(hash))};
+            if (!pindex) continue;
+            LogInfo("Block %s lost its commitment on the mainchain", hash.ToString());
+            BlockValidationState state;
+            chainman.ActiveChainstate().InvalidateBlock(state, pindex, /*by_record=*/true);
+        }
     }
     {
         LOCK(::cs_main);
-        for (const uint256& hash : committed) {
-            CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(hash)};
-            // Only a failure that depended on the record: not that of a block that broke a rule
-            // whatever the mainchain did, nor one the operator marked invalid.
-            if (pindex && chainman.ActiveChainstate().ReconsiderRecordFailure(pindex)) {
-                LogInfo("Block %s has a commitment on the mainchain again", hash.ToString());
+        for (const uint256& commitment : committed) {
+            for (const uint256& hash : Hooks().BlocksCommittedBy(commitment)) {
+                CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(hash)};
+                // Only a failure that depended on the record: not that of a block that broke a rule
+                // whatever the mainchain did, nor one the operator marked invalid.
+                if (pindex && chainman.ActiveChainstate().ReconsiderRecordFailure(pindex)) {
+                    LogInfo("Block %s has a commitment on the mainchain again", hash.ToString());
+                }
             }
         }
     }
@@ -455,13 +461,14 @@ void Follower::Act()
     // not only those of the blocks just added: a header that came while the record was being updated
     // would otherwise wait for ever.
     // In the order of their commitments, which is that of the chain: each header follows the one before.
-    std::map<int, std::pair<CBlockHeader, int64_t>> headers;
+    // (In the order the hooks give, for headers of other kinds.)
+    std::multimap<int64_t, std::pair<CBlockHeader, int64_t>> headers;
     {
         LOCK(::cs_main);
         const Mainchain& record{*chainman.m_mainchain};
         for (auto it{chainman.m_bmm_waiting.begin()}; it != chainman.m_bmm_waiting.end();) {
-            if (const auto height{record.CommittedHeight(it->first)}) {
-                headers.emplace(*height, std::make_pair(it->second.header, it->second.peer));
+            if (const auto order{Hooks().WaitingReady(it->second.header, record)}) {
+                headers.emplace(*order, std::make_pair(it->second.header, it->second.peer));
                 it = chainman.m_bmm_waiting.erase(it);
             } else {
                 ++it;
@@ -503,8 +510,11 @@ void Follower::CheckActiveChain()
     CBlockIndex* moved{nullptr};
     {
         LOCK(::cs_main);
+        // Blocks that need no commitment (none, in the template) are valid whatever the record says.
         for (CBlockIndex* pindex{chainman.ActiveChain().Tip()}; pindex && pindex->nHeight > 0; pindex = pindex->pprev) {
-            if (record.CommittedHeight(pindex->GetBlockHash())) break;
+            const auto commitment{Hooks().CommitmentOf(*pindex)};
+            if (!commitment) continue;
+            if (record.CommittedHeight(*commitment)) break;
             lowest = pindex;
         }
         // Each block was checked against what the mainchain did up to the block before its
@@ -514,10 +524,14 @@ void Follower::CheckActiveChain()
         if (!lowest) {
             int main_height{chainman.ActiveChainstate().SideState().MainHeight()};
             for (CBlockIndex* pindex{chainman.ActiveChain().Tip()}; pindex && pindex->nHeight > 0; pindex = pindex->pprev) {
-                const auto bmm_height{record.CommittedHeight(pindex->GetBlockHash())};
-                if (!bmm_height) break;
-                if (*bmm_height - 1 != main_height) moved = pindex;
-                if (*bmm_height < record.Height() - MOVED_CHECK_DEPTH) break;
+                // A block that needs no commitment acts on nothing the mainchain did: its undo data
+                // leaves the height as it was.
+                if (const auto commitment{Hooks().CommitmentOf(*pindex)}) {
+                    const auto bmm_height{record.CommittedHeight(*commitment)};
+                    if (!bmm_height) break;
+                    if (*bmm_height - 1 != main_height) moved = pindex;
+                    if (*bmm_height < record.Height() - MOVED_CHECK_DEPTH) break;
+                }
                 // What the mainchain had done before this block is what it had done after its parent.
                 drivechain::BlockUndo undo;
                 if (!chainman.m_blockman.m_drivechain_db->ReadBlockUndo(pindex->GetBlockHash(), undo)) break;
@@ -550,7 +564,8 @@ void Follower::CheckActiveChain()
         LOCK(::cs_main);
         std::vector<CBlockIndex*> failed;
         for (auto& [hash, index] : chainman.m_blockman.m_block_index) {
-            if ((index.nStatus & BLOCK_FAILED_VALID) && record.CommittedHeight(hash)) failed.push_back(&index);
+            if (!(index.nStatus & BLOCK_FAILED_VALID)) continue;
+            if (const auto commitment{Hooks().CommitmentOf(index)}; commitment && record.CommittedHeight(*commitment)) failed.push_back(&index);
         }
         for (CBlockIndex* pindex : failed) again += chainman.ActiveChainstate().ReconsiderRecordFailure(pindex);
     }
@@ -570,7 +585,14 @@ bool Follower::CatchingUp() const
     const Mainchain& record{*Assert(chainman.m_mainchain)};
     LOCK(::cs_main);
     const CBlockIndex* tip{chainman.ActiveChain().Tip()};
-    const int tip_commitment{tip->nHeight == 0 ? -1 : record.CommittedHeight(tip->GetBlockHash()).value_or(-1)};
+    // The commitment of the tip, or of the last block below it that needs one (the tip, in the template).
+    const CBlockIndex* committed{tip};
+    std::optional<uint256> commitment{committed->nHeight == 0 ? std::nullopt : Hooks().CommitmentOf(*committed)};
+    while (!commitment && committed->nHeight > 0) {
+        committed = committed->pprev;
+        if (committed->nHeight > 0) commitment = Hooks().CommitmentOf(*committed);
+    }
+    const int tip_commitment{commitment ? record.CommittedHeight(*commitment).value_or(-1) : -1};
     // The last commitment on record, if it is to another block than the tip, well after the tip's: to
     // one this node has yet to connect, or does not know (a block it has not had yet). Not to a block
     // known to have failed, or to be on a branch with no more work.
@@ -578,7 +600,10 @@ bool Follower::CatchingUp() const
     for (int height{top}; height > tip_commitment + CATCH_UP_MARGIN && height > top - CATCH_UP_WINDOW; --height) {
         const auto bmm{record.BmmAt(height)};
         if (!bmm) continue;
-        const CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(*bmm)};
+        const CBlockIndex* pindex{nullptr};
+        for (const uint256& hash : Hooks().BlocksCommittedBy(*bmm)) {
+            if ((pindex = chainman.m_blockman.LookupBlockIndex(hash))) break;
+        }
         if (!pindex) {
             // A block not known yet counts only if a peer announced its header, which waits for the
             // commitment: anyone can have the mainchain commit to a hash that is no block at all.
@@ -736,10 +761,15 @@ std::optional<Follower::Candidate> Follower::CreateCandidate(const CScript& coin
 
 std::optional<std::string> Follower::RequestCommitment(const Candidate& candidate, CAmount amount, std::string& error) const
 {
+    return RequestCommitment(candidate.block->GetHash(), candidate.main_prev_hash, amount, error);
+}
+
+std::optional<std::string> Follower::RequestCommitment(const uint256& commitment, const uint256& main_prev_hash, CAmount amount, std::string& error) const
+{
     try {
-        const UniValue result{m_client.Call("createbmmrequest", Params({static_cast<uint64_t>(m_node.chainman->GetConsensus().sidechain.slot), candidate.block->GetHash().GetHex(), ValueFromAmount(amount)}), /*wallet=*/true)};
-        // The request names the mainchain block it has to follow; it has to be the one the candidate was built on.
-        if (Hash256(result["prevblockhash"]) != candidate.main_prev_hash) {
+        const UniValue result{m_client.Call("createbmmrequest", Params({static_cast<uint64_t>(m_node.chainman->GetConsensus().sidechain.slot), commitment.GetHex(), ValueFromAmount(amount)}), /*wallet=*/true)};
+        // The request names the mainchain block it has to follow; it has to be the one the commitment was made for.
+        if (Hash256(result["prevblockhash"]) != main_prev_hash) {
             error = "The mainchain moved while the request was made";
             return std::nullopt;
         }
@@ -853,7 +883,8 @@ void Follower::Run()
         std::string error;
         if (Sync(error)) {
             failures = 0;
-            Mine();
+            // A sidechain's own producer, if it has one, in place of merged mining as the template does it.
+            if (!Hooks().FollowerRound(*this)) Mine();
         } else {
             ++failures;
         }

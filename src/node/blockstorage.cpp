@@ -21,6 +21,7 @@
 #include <primitives/transaction.h>
 #include <random.h>
 #include <serialize.h>
+#include <sidechain/hooks.h>
 #include <signet.h>
 #include <streams.h>
 #include <sync.h>
@@ -142,10 +143,13 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 pindexNew->nTime          = diskindex.nTime;
                 pindexNew->nBits          = diskindex.nBits;
                 pindexNew->nNonce         = diskindex.nNonce;
+                pindexNew->m_ext          = diskindex.m_ext;
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nTx            = diskindex.nTx;
 
-                if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, consensusParams)) {
+                // (None for a block of a kind of a sidechain's own.)
+                if (sidechain::Hooks().Kind(pindexNew->GetBlockHeader()) == sidechain::BlockKind::BMM &&
+                    !CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, consensusParams)) {
                     LogError("%s: CheckProofOfWork failed: %s\n", __func__, pindexNew->ToString());
                     return false;
                 }
@@ -244,7 +248,9 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
         pindexNew->BuildSkip();
     }
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
-    pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
+    // A sidechain may order chains by a key of its own (see sidechain::ChainHooks::ChainWork).
+    pindexNew->nChainWork = sidechain::Hooks().CustomChainOrder() ? sidechain::Hooks().ChainWork(pindexNew->pprev, block) :
+                                                                    (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
     if (best_header == nullptr || best_header->nChainWork < pindexNew->nChainWork) {
         best_header = pindexNew;
@@ -481,7 +487,8 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             return false;
         }
         previous_index = pindex;
-        pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
+        pindex->nChainWork = sidechain::Hooks().CustomChainOrder() ? sidechain::Hooks().ChainWork(pindex->pprev, pindex->GetBlockHeader()) :
+                                                                     (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
         pindex->nTimeMax = (pindex->pprev ? std::max(pindex->pprev->nTimeMax, pindex->nTime) : pindex->nTime);
 
         // We can link the chain of blocks for which we've received transactions at some point, or
@@ -1068,7 +1075,7 @@ bool BlockManager::ReadBlock(CBlock& block, const FlatFilePos& pos, const std::o
     const auto block_hash{block.GetHash()};
 
     // Check the header
-    if (!CheckProofOfWork(block_hash, block.nBits, GetConsensus())) {
+    if (sidechain::Hooks().Kind(block) == sidechain::BlockKind::BMM && !CheckProofOfWork(block_hash, block.nBits, GetConsensus())) {
         LogError("Errors in block header at %s while reading block", pos.ToString());
         return false;
     }
@@ -1091,7 +1098,15 @@ bool BlockManager::ReadBlock(CBlock& block, const FlatFilePos& pos, const std::o
 bool BlockManager::ReadBlock(CBlock& block, const CBlockIndex& index) const
 {
     const FlatFilePos block_pos{WITH_LOCK(cs_main, return index.GetBlockPos())};
-    return ReadBlock(block, block_pos, index.GetBlockHash());
+    if (!ReadBlock(block, block_pos, index.GetBlockHash())) return false;
+    // The block hash does not cover the signature of an extended header: the one the node checked is
+    // the index's. A block stored with another one (before AcceptBlock turned such blocks away) is
+    // read with the index's: the same block otherwise, as the hash says.
+    if (!sidechain::SameExtension(block, index) && index.m_ext) {
+        LogWarning("The block %s on disk does not carry the extension of its header; reading it with the header's", index.GetBlockHash().ToString());
+        block.ext = *index.m_ext;
+    }
+    return true;
 }
 
 BlockManager::ReadRawBlockResult BlockManager::ReadRawBlock(const FlatFilePos& pos, std::optional<std::pair<size_t, size_t>> block_part) const

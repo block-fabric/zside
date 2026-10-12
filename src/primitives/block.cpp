@@ -8,12 +8,23 @@
 #include <hash.h>
 #include <tinyformat.h>
 
+#include <atomic>
 #include <memory>
 #include <sstream>
 
+namespace {
+std::atomic<bool> g_block_extensions{false};
+} // namespace
+
+void SetBlockExtensions(bool enabled) { g_block_extensions.store(enabled, std::memory_order_relaxed); }
+bool BlockExtensionsEnabled() { return g_block_extensions.load(std::memory_order_relaxed); }
+
 uint256 CBlockHeader::GetHash() const
 {
-    return (HashWriter{} << *this).GetHash();
+    HashWriter hasher{};
+    hasher << nVersion << hashPrevBlock << hashMerkleRoot << nTime << nBits << nNonce;
+    if (IsExtended()) hasher << ext.hashSections;
+    return hasher.GetHash();
 }
 
 std::string CBlock::ToString() const

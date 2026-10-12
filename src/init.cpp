@@ -67,6 +67,7 @@
 #include <node/mempool_persist_args.h>
 #include <node/cpuminer.h>
 #include <sidechain/follower.h>
+#include <sidechain/hooks.h>
 #include <sidechain/mainclient.h>
 #include <node/mining_args.h>
 #include <node/mining_types.h>
@@ -333,6 +334,8 @@ void Shutdown(NodeContext& node)
     StopHTTPServer();
     if (node.cpu_miner) node.cpu_miner->Stop();
     if (node.follower) {
+        // The services of a sidechain's own (none in the template) go first: they may use the follower.
+        sidechain::Hooks().StopServices(node);
         node.follower->Stop();
         if (node.chainman) WITH_LOCK(::cs_main, node.chainman->m_mainchain_poll = nullptr);
     }
@@ -2257,6 +2260,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // mainchain node cannot be reached (the node says so in its warnings). Not here: a mainchain
         // node that takes the connection and never answers would hold startup for a minute.
         node.follower->Start();
+        // And the services of a sidechain's own, such as a block producer (none in the template).
+        sidechain::Hooks().StartServices(node);
     }
 
     // ********************************************************* Step 12: start node

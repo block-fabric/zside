@@ -224,6 +224,21 @@ std::optional<uint256> Mainchain::BmmAt(int height) const
     return m_blocks[height].bmm;
 }
 
+std::optional<uint256> Mainchain::HashAt(int height) const
+{
+    LOCK(m_mutex);
+    if (height < 0 || height >= static_cast<int>(m_blocks.size())) return std::nullopt;
+    return m_blocks[height].hash;
+}
+
+std::optional<int> Mainchain::TimeHeight(int64_t time) const
+{
+    LOCK(m_mutex);
+    const auto after{std::partition_point(m_blocks.begin(), m_blocks.end(), [&](const MainBlock& block) { return block.time <= time; })};
+    if (after == m_blocks.begin()) return std::nullopt;
+    return static_cast<int>(after - m_blocks.begin()) - 1;
+}
+
 void Mainchain::NoteFailure(const uint256& block_hash, Failure failure)
 {
     LOCK(m_mutex);

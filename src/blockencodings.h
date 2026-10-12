@@ -103,6 +103,8 @@ public:
     static constexpr int SHORTTXIDS_LENGTH = 6;
 
     CBlockHeader header;
+    //! The sections of an extended block (CBlock::vSections), which come whole.
+    std::vector<unsigned char> sections;
 
     /**
      * Dummy for deserialization
@@ -121,6 +123,7 @@ public:
     SERIALIZE_METHODS(CBlockHeaderAndShortTxIDs, obj)
     {
         READWRITE(obj.header, obj.nonce, Using<VectorFormatter<CustomUintFormatter<SHORTTXIDS_LENGTH>>>(obj.shorttxids), obj.prefilledtxn);
+        if (obj.header.IsExtended()) READWRITE(obj.sections);
         if (ser_action.ForRead()) {
             if (obj.BlockTxCount() > std::numeric_limits<uint16_t>::max()) {
                 throw std::ios_base::failure("indexes overflowed 16 bits");
@@ -137,6 +140,7 @@ protected:
     const CTxMemPool* pool;
 public:
     CBlockHeader header;
+    std::vector<unsigned char> sections;
 
     // Can be overridden for testing
     using IsBlockMutatedFn = std::function<bool(const CBlock&, bool)>;

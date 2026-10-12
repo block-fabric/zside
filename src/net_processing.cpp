@@ -48,6 +48,7 @@
 #include <protocol.h>
 #include <random.h>
 #include <scheduler.h>
+#include <sidechain/hooks.h>
 #include <script/script.h>
 #include <serialize.h>
 #include <span.h>
@@ -598,6 +599,8 @@ public:
     /** Implement PeerManager */
     void StartScheduledTasks(CScheduler& scheduler) override;
     void CheckForStaleTipAndEvictPeers() override;
+    bool SendSidechainMessage(NodeId peer_id, const std::string& msg_type, std::vector<unsigned char> payload) override;
+    size_t BroadcastSidechainMessage(const std::string& msg_type, const std::vector<unsigned char>& payload, std::optional<NodeId> except) override;
     util::Expected<void, std::string> FetchBlock(NodeId peer_id, const CBlockIndex& block_index) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     bool GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
@@ -2080,6 +2083,32 @@ bool PeerManagerImpl::BlockRequestAllowed(const CBlockIndex& block_index)
            (GetBlockProofEquivalentTime(*m_chainman.m_best_header, block_index, *m_chainman.m_best_header, m_chainparams.GetConsensus()) < STALE_RELAY_AGE_LIMIT);
 }
 
+bool PeerManagerImpl::SendSidechainMessage(NodeId peer_id, const std::string& msg_type, std::vector<unsigned char> payload)
+{
+    return m_connman.ForNode(peer_id, [&](CNode* node) {
+        if (!node->fSuccessfullyConnected || node->fDisconnect) return false;
+        CSerializedNetMsg msg;
+        msg.m_type = msg_type;
+        msg.data = std::move(payload);
+        m_connman.PushMessage(node, std::move(msg));
+        return true;
+    });
+}
+
+size_t PeerManagerImpl::BroadcastSidechainMessage(const std::string& msg_type, const std::vector<unsigned char>& payload, std::optional<NodeId> except)
+{
+    size_t sent{0};
+    m_connman.ForEachNode([&](CNode* node) {
+        if (!node->fSuccessfullyConnected || node->fDisconnect || (except && node->GetId() == *except)) return;
+        CSerializedNetMsg msg;
+        msg.m_type = msg_type;
+        msg.data = payload;
+        m_connman.PushMessage(node, std::move(msg));
+        ++sent;
+    });
+    return sent;
+}
+
 util::Expected<void, std::string> PeerManagerImpl::FetchBlock(NodeId peer_id, const CBlockIndex& block_index)
 {
     if (m_chainman.m_blockman.LoadingBlocks()) return util::Unexpected{"Loading blocks ..."};
@@ -2883,6 +2912,11 @@ bool PeerManagerImpl::CheckHeadersPoW(const std::vector<CBlockHeader>& headers, 
 
 arith_uint256 PeerManagerImpl::GetAntiDoSWorkThreshold()
 {
+    // On a sidechain whose chain order is not work, a key "near the tip" means nothing: a block whose
+    // parent has a lower key (one anchor fewer, say) is not low-work, and a compact block of it, sent
+    // because we asked for it, must not be dropped as such (the block would stay in flight, and the
+    // node on its branch). Its own header rules keep headers in check (as in ProcessHeadersMessage).
+    if (sidechain::Hooks().CustomChainOrder()) return m_chainman.MinimumChainWork();
     arith_uint256 near_chaintip_work = 0;
     LOCK(cs_main);
     if (m_chainman.ActiveChain().Tip() != nullptr) {
@@ -3320,6 +3354,11 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     if (pfrom.HasPermission(NetPermissionFlags::NoBan)) {
         already_validated_work = true;
     }
+    // Nor on a sidechain whose chain order is not work: a minimum of it would mean nothing. Its own
+    // header rules (a commitment or a signature per block) are what keep headers in check.
+    if (sidechain::Hooks().CustomChainOrder()) {
+        already_validated_work = true;
+    }
 
     // At this point, the headers connect to something in our block index.
     // Do anti-DoS checks to determine if we should process or store for later
@@ -3355,7 +3394,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
             }
             // On a sidechain, a header can come before the mainchain block that commits to it
             // is on record. It is tried again then; remember that this peer has the block.
-            if (state.GetRejectReason() == "bmm-unknown") {
+            if (sidechain::Hooks().IsWaitReason(state.GetRejectReason())) {
                 LOCK(::cs_main);
                 // The headers after the first one without a commitment were not looked at. Keep them
                 // too, to be taken in when the mainchain commits to them: the peer sends them only once,
@@ -4873,7 +4912,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             if (state.IsInvalid()) {
                 // On a sidechain, a header can come before the mainchain block that commits to it
                 // is on record. It is tried again then; remember that this peer has the block.
-                if (state.GetRejectReason() == "bmm-unknown") {
+                if (sidechain::Hooks().IsWaitReason(state.GetRejectReason())) {
                     LOCK(::cs_main);
                     UpdateBlockAvailability(pfrom.GetId(), cmpctblock.header.GetHash());
                     // And who sent it: the block is fetched from that peer once the header is taken in,
@@ -4890,6 +4929,20 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         Assert(pindex);
         if (received_new_header) {
             LogBlockHeader(*pindex, pfrom, /*via_compact_block=*/true);
+        }
+
+        // An extended header the node has, with another extension (a signature the block hash does
+        // not cover): the block it makes would be a mutated one (AcceptBlock). It is not
+        // reconstructed; the block comes whole, from this peer or another one. (BIP 152 lets peers
+        // relay compact blocks before they validate them: no punishment.) Unless the sidechain's
+        // rules find the other extension as valid: the same block, which the node takes with its own
+        // (ProcessNewBlock).
+        if (!sidechain::SameExtension(cmpctblock.header, *pindex) &&
+            WITH_LOCK(cs_main, return sidechain::Hooks().CheckOtherExtension(cmpctblock.header, *pindex)) != sidechain::OtherExtension::EQUIVALENT) {
+            LogDebug(BCLog::CMPCTBLOCK, "%s sent us a compact block for %s without the extension of its header\n", pfrom.LogPeer(), blockhash.ToString());
+            LOCK(cs_main);
+            RemoveBlockRequest(blockhash, pfrom.GetId());
+            return;
         }
 
         bool fProcessBLOCKTXN = false;
@@ -5129,6 +5182,11 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         for (unsigned int n = 0; n < nCount; n++) {
             vRecv >> headers[n];
             ReadCompactSize(vRecv); // ignore tx count; assume it is 0.
+            // An extended header comes as a block without transactions: with its sections, none.
+            if (headers[n].IsExtended()) {
+                std::vector<unsigned char> sections;
+                vRecv >> sections;
+            }
         }
 
         ProcessHeadersMessage(pfrom, peer, std::move(headers), /*via_compact_block=*/false);
@@ -5403,6 +5461,15 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         LOCK(m_tx_download_mutex);
         m_txdownloadman.ReceivedNotFound(pfrom.GetId(), tx_invs);
         return;
+    }
+
+    // Messages of a sidechain's own (none in the template).
+    {
+        std::string misbehaving;
+        if (sidechain::Hooks().ProcessMessage(pfrom.GetId(), msg_type, vRecv, misbehaving)) {
+            if (!misbehaving.empty()) Misbehaving(peer, misbehaving);
+            return;
+        }
     }
 
     // Ignore unknown message types for extensibility

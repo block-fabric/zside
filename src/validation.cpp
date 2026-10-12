@@ -45,6 +45,7 @@
 #include <random.h>
 #include <script/script.h>
 #include <script/sigcache.h>
+#include <sidechain/hooks.h>
 #include <signet.h>
 #include <tinyformat.h>
 #include <txdb.h>
@@ -827,6 +828,15 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
         }
         if (!side.Shielded().CheckState(tx, reject_reason)) {
             return ws.m_state.Invalid(TxValidationResult::TX_CONSENSUS, reject_reason);
+        }
+        // The rules of the sidechain's own, as the next block would apply them (none in the template),
+        // on an overlay that is dropped.
+        sidechain::StoreOverlay scratch{side.View(), /*journal=*/false};
+        sidechain::State scratch_state{scratch};
+        std::vector<CTxOut> payouts;
+        const int next_height{m_active_chainstate.m_chain.Height() + 1};
+        if (!sidechain::Hooks().ApplyTx(scratch_state, tx, next_height, /*peg_step=*/false, payouts, reject_reason)) {
+            return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
         }
     }
 
@@ -2960,7 +2970,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
             // What is not on record yet is no fault of the peer that sent the block. Nor, to VerifyDB,
             // is a block of the chain the record does not agree with any more a sign of a corrupt database.
-            const bool not_yet{reject_reason == "bmm-unknown" || reject_reason == "bad-sc-main-unknown" || (verifying && side && side->failed)};
+            const bool not_yet{sidechain::Hooks().IsWaitReason(reject_reason) || reject_reason == "bmm-unknown" || reject_reason == "bad-sc-main-unknown" || (verifying && side && side->failed)};
             state.Invalid(not_yet ? BlockValidationResult::BLOCK_TIME_FUTURE : BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
         } else if (scdb_check) {
             CAmount check_minted{0};
@@ -4187,6 +4197,21 @@ bool Chainstate::ReconsiderRecordFailure(CBlockIndex* pindex)
         if ((block_index.nStatus & BLOCK_FAILED_VALID) && block_index.GetAncestor(root->nHeight) == root) failed.push_back(&block_index);
     }
     std::sort(failed.begin(), failed.end(), [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight < b->nHeight; });
+    // A chain order of a sidechain's own may read the record, which changed: the commitment may be at
+    // another height now. Computed anew for the block and all above it, parents first (out of the
+    // candidates while it changes).
+    if (sidechain::Hooks().CustomChainOrder()) {
+        std::vector<CBlockIndex*> above;
+        for (auto& [_, block_index] : m_blockman.m_block_index) {
+            if (block_index.GetAncestor(root->nHeight) == root) above.push_back(&block_index);
+        }
+        std::sort(above.begin(), above.end(), [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight < b->nHeight; });
+        for (CBlockIndex* block_index : above) {
+            const bool candidate{setBlockIndexCandidates.erase(block_index) > 0};
+            block_index->nChainWork = sidechain::Hooks().ChainWork(block_index->pprev, block_index->GetBlockHeader());
+            if (candidate) setBlockIndexCandidates.insert(block_index);
+        }
+    }
     for (CBlockIndex* block_index : failed) {
         // Above a block that stays failed, everything does.
         if (block_index != root && (block_index->pprev->nStatus & BLOCK_FAILED_VALID)) continue;
@@ -4302,8 +4327,8 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
 
 static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true)
 {
-    // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(block.GetHash(), block.nBits, consensusParams))
+    // Check proof of work matches claimed amount (none for a block of a kind of a sidechain's own)
+    if (fCheckPOW && !sidechain::CheckHeaderWork(block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
 
     return true;
@@ -4411,6 +4436,10 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
     if (fCheckMerkleRoot && !CheckMerkleRoot(block, state)) {
         return false;
     }
+    // And, in an extended block, the sections: like the transactions, data the header commits to.
+    if (fCheckMerkleRoot && !sidechain::CheckSections(block)) {
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-sections-hash", "the sections are not those the header commits to");
+    }
 
     // All potential-corruption validation must be done before we do any
     // transaction validation, as otherwise we may mark the header as invalid
@@ -4466,6 +4495,9 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
     if (nSigOps * WITNESS_SCALE_FACTOR > consensusParams.MaxBlockSigOpsCost())
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops", "out-of-bounds SigOpCount");
 
+    // The context free rules of a sidechain's own (none in the template).
+    if (!sidechain::Hooks().CheckBlock(block, state)) return false;
+
     if (fCheckPOW && fCheckMerkleRoot)
         block.fChecked = true;
 
@@ -4511,7 +4543,7 @@ void ChainstateManager::GenerateCoinbaseCommitment(CBlock& block, const CBlockIn
 bool HasValidProofOfWork(std::span<const CBlockHeader> headers, const Consensus::Params& consensusParams)
 {
     return std::ranges::all_of(headers,
-                               [&](const auto& header) { return CheckProofOfWork(header.GetHash(), header.nBits, consensusParams); });
+                               [&](const auto& header) { return sidechain::CheckHeaderWork(header, consensusParams); });
 }
 
 bool IsBlockMutated(const CBlock& block, bool check_witness_root)
@@ -4519,6 +4551,10 @@ bool IsBlockMutated(const CBlock& block, bool check_witness_root)
     BlockValidationState state;
     if (!CheckMerkleRoot(block, state)) {
         LogDebug(BCLog::VALIDATION, "Block mutated: %s\n", state.ToString());
+        return true;
+    }
+    if (!sidechain::CheckSections(block)) {
+        LogDebug(BCLog::VALIDATION, "Block mutated: its sections are not those its header commits to\n");
         return true;
     }
 
@@ -4573,18 +4609,28 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     assert(pindexPrev != nullptr);
     const int nHeight = pindexPrev->nHeight + 1;
 
-    // Check proof of work
+    // A block of a kind of a sidechain's own has no proof of work; the sidechain checks its header.
     const Consensus::Params& consensusParams = chainman.GetConsensus();
-    if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
+    const sidechain::BlockKind kind{sidechain::Hooks().Kind(block)};
+
+    // Check proof of work
+    if (kind == sidechain::BlockKind::BMM && block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
 
     // Check timestamp against prev
     if (block.GetBlockTime() <= pindexPrev->GetMedianTimePast())
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-too-old", "block's timestamp is too early");
 
-    // Blind merged mining: a block of a sidechain is one that a mainchain block
-    // committed to, and the mainchain commits to the blocks of a chain in order.
-    if (consensusParams.sidechain.enabled) {
+    if (kind != sidechain::BlockKind::BMM) {
+        if (!sidechain::Hooks().CheckHeader(block, *pindexPrev, chainman, state)) {
+            if (state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE && sidechain::Hooks().IsWaitReason(state.GetRejectReason())) {
+                chainman.AddBmmWaiting(block, /*peer=*/-1);
+            }
+            return false;
+        }
+    } else if (consensusParams.sidechain.enabled) {
+        // Blind merged mining: a block of a sidechain is one that a mainchain block
+        // committed to, and the mainchain commits to the blocks of a chain in order.
         const sidechain::Mainchain& mainchain{*Assert(chainman.m_mainchain)};
         const uint256 hash{block.GetHash()};
         auto bmm_height{mainchain.BmmHeight(hash)};
@@ -4599,8 +4645,15 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
             chainman.AddBmmWaiting(block, /*peer=*/-1);
             return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "bmm-unknown", "no mainchain block is known to commit to this block");
         }
-        if (pindexPrev->pprev) {
-            const auto prev_bmm_height{mainchain.BmmHeight(pindexPrev->GetBlockHash())};
+        // In order after the last block below that needs a commitment: the parent, in the template.
+        const CBlockIndex* committed_prev{pindexPrev};
+        std::optional<uint256> prev_commitment{sidechain::Hooks().CommitmentOf(*committed_prev)};
+        while (!prev_commitment && committed_prev->pprev) {
+            committed_prev = committed_prev->pprev;
+            prev_commitment = sidechain::Hooks().CommitmentOf(*committed_prev);
+        }
+        if (committed_prev->pprev && prev_commitment) {
+            const auto prev_bmm_height{mainchain.BmmHeight(*prev_commitment)};
             if (!prev_bmm_height) return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "bmm-prev-unknown", "no mainchain block is known to commit to the previous block");
             if (*bmm_height <= *prev_bmm_height) return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bmm-order", "the mainchain committed to this block before it committed to the previous block");
         }
@@ -4618,8 +4671,8 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         }
     }
 
-    // Check timestamp
-    if (block.Time() > NodeClock::now() + std::chrono::seconds{MAX_FUTURE_BLOCK_TIME}) {
+    // Check timestamp (a sidechain may allow less than Bitcoin's two hours)
+    if (block.Time() > NodeClock::now() + std::chrono::seconds{sidechain::Hooks().MaxFutureBlockTime()}) {
         return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "time-too-new", "block timestamp too far in the future");
     }
 
@@ -4706,6 +4759,19 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     return true;
 }
 
+/**
+ * Whether a block marked failed failed against the record of the mainchain: it, or the block it
+ * descends from that failed first (descendants of a failed block are marked failed too, unnoted).
+ */
+static bool FailedAgainstRecord(const ChainstateManager& chainman, const CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (!chainman.m_mainchain) return false;
+    for (; index && (index->nStatus & BLOCK_FAILED_VALID); index = index->pprev) {
+        if (const auto failure{chainman.m_mainchain->GetFailure(index->GetBlockHash())}) return *failure == sidechain::Mainchain::Failure::RECORD;
+    }
+    return false;
+}
+
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)
 {
     AssertLockHeld(cs_main);
@@ -4721,6 +4787,10 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 *ppindex = pindex;
             if (pindex->nStatus & BLOCK_FAILED_VALID) {
                 LogDebug(BCLog::VALIDATION, "%s: block %s is marked invalid\n", __func__, hash.ToString());
+                // Against the record, which the peer's may be ahead of: no fault of the peer's (with the hook).
+                if (sidechain::Hooks().PardonRecordFailures() && FailedAgainstRecord(*this, pindex)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "record-failed", strprintf("block %s failed against the record of the mainchain", hash.ToString()));
+                }
                 return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate-invalid",
                                      strprintf("block %s was previously marked invalid", hash.ToString()));
             }
@@ -4742,6 +4812,9 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         pindexPrev = &((*mi).second);
         if (pindexPrev->nStatus & BLOCK_FAILED_VALID) {
             LogDebug(BCLog::VALIDATION, "header %s has prev block invalid: %s\n", hash.ToString(), block.hashPrevBlock.ToString());
+            if (sidechain::Hooks().PardonRecordFailures() && FailedAgainstRecord(*this, pindexPrev)) {
+                return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "record-failed", strprintf("block %s failed against the record of the mainchain", block.hashPrevBlock.ToString()));
+            }
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
         }
         if (!ContextualCheckBlockHeader(block, state, *this, pindexPrev)) {
@@ -4834,6 +4907,29 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     if (!accepted_header)
         return false;
 
+    // The extension of an extended header carries what the block hash does not cover (a signature):
+    // a block for a header the node has must carry the extension that header came with, the one its
+    // rules checked. Another one is a mutated block, never a reason to take the header for invalid --
+    // unless the sidechain's rules find it as valid (another signature of the same block): the block
+    // is then the same, taken with the extension the node has.
+    if (!sidechain::SameExtension(block, *pindex)) {
+        switch (sidechain::Hooks().CheckOtherExtension(block, *pindex)) {
+        case sidechain::OtherExtension::EQUIVALENT: {
+            LogDebug(BCLog::VALIDATION, "%s: block %s carries another valid extension than its header's: taken with its header's\n", __func__, pindex->GetBlockHash().ToString());
+            auto same{std::make_shared<CBlock>(block)};
+            same->ext = *Assert(pindex->m_ext);
+            return AcceptBlock(same, state, ppindex, fRequested, dbp, fNewBlock, min_pow_checked);
+        }
+        case sidechain::OtherExtension::UNKNOWN:
+            LogDebug(BCLog::VALIDATION, "%s: block %s carries another extension than its header's, which cannot be checked yet\n", __func__, pindex->GetBlockHash().ToString());
+            return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "blk-extension-unknown", "another extension than that of the header the node has, not known to be valid yet");
+        case sidechain::OtherExtension::INVALID:
+            break;
+        }
+        LogDebug(BCLog::VALIDATION, "%s: block %s does not carry the extension of its header\n", __func__, pindex->GetBlockHash().ToString());
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-blk-extension", "the extension is not that of the header the node has");
+    }
+
     // Check all requested blocks that we do not already have for validity and
     // save them to disk. Skip processing of unrequested blocks as an anti-DoS
     // measure, unless the blocks have more work than the active chain tip, and
@@ -4925,10 +5021,28 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     return true;
 }
 
-bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block)
+/**
+ * A block for an extended header the node has, with another extension the sidechain's rules find as
+ * valid (ChainHooks::CheckOtherExtension): the same block with the header's extension, the one the
+ * node keeps. Any other block as it is.
+ */
+static std::shared_ptr<const CBlock> WithHeaderExtension(const ChainstateManager& chainman, const std::shared_ptr<const CBlock>& block) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (!block->IsExtended()) return block;
+    const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(block->GetHash())};
+    if (!index || !index->m_ext || sidechain::SameExtension(*block, *index)) return block;
+    if (sidechain::Hooks().CheckOtherExtension(*block, *index) != sidechain::OtherExtension::EQUIVALENT) return block;
+    auto same{std::make_shared<CBlock>(*block)};
+    same->ext = *index->m_ext;
+    return same;
+}
+
+bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& block_in, bool force_processing, bool min_pow_checked, bool* new_block)
 {
     AssertLockNotHeld(cs_main);
 
+    // (What is connected and announced is the block as the node keeps it.)
+    std::shared_ptr<const CBlock> block{block_in};
     {
         CBlockIndex *pindex = nullptr;
         if (new_block) *new_block = false;
@@ -4937,6 +5051,7 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         // CheckBlock() does not support multi-threaded block validation because CBlock::fChecked can cause data race.
         // Therefore, the following critical section must include the CheckBlock() call as well.
         LOCK(cs_main);
+        block = WithHeaderExtension(*this, block);
 
         // Skipping AcceptBlock() for CheckBlock() failures means that we will never mark a block as invalid if
         // CheckBlock() fails.  This is protective against consensus failure if there are any unknown forms of block
@@ -6623,9 +6738,14 @@ double ChainstateManager::GuessVerificationProgress(const CBlockIndex* pindex) c
     }
 
     const int64_t nNow{TicksSinceEpoch<std::chrono::seconds>(NodeClock::now())};
+    // With a chain order of a sidechain's own, the header of the most work may be lower than the tip
+    // (a sidechain's key need not grow with the height alone): not a bug then.
+    const auto best_header_above{[&] {
+        return sidechain::Hooks().CustomChainOrder() ? m_best_header->nHeight >= pindex->nHeight : Assume(m_best_header->nHeight >= pindex->nHeight);
+    }};
     const auto block_time{
         (Assume(m_best_header) && std::abs(nNow - pindex->GetBlockTime()) <= Ticks<std::chrono::seconds>(2h) &&
-         Assume(m_best_header->nHeight >= pindex->nHeight)) ?
+         best_header_above()) ?
             // When the header is known to be recent, switch to a height-based
             // approach. This ensures the returned value is quantized when
             // close to "1.0", because some users expect it to be. This also
