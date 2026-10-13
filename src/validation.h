@@ -1215,6 +1215,14 @@ public:
      * that a peer flooding it with headers that will never be committed to only crowds out its own.
      */
     void AddBmmWaiting(const CBlockHeader& header, int64_t peer) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Try again the waiting headers the record now lets through (sidechain::ChainHooks::WaitingReady), in
+     * the order the hooks give. A header stays waiting, with the peer that sent it, until it is taken in
+     * or turned away for good: one still waiting for its reason, or whose parent is still to come (one
+     * the hooks put after it, or that waits too), is kept.
+     * @return the headers taken in, each with the peer that sent it (-1 if none), in the order taken
+     */
+    std::vector<std::pair<const CBlockIndex*, int64_t>> RetryBmmWaiting() LOCKS_EXCLUDED(::cs_main);
     /** What the sidechain rules need to check a block; empty if this chain is not a sidechain. */
     std::optional<drivechain::SideContext> SideContext(CAmount& minted, sidechain::StoreOverlay& store) const;
 

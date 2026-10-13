@@ -108,6 +108,8 @@ public:
         //! Mainchain blocks for which another node's bid, for another block of this chain, paid more.
         uint64_t outbid{0};
         std::string error;
+        //! Blocks built and kept until the mainchain commits to them or moves on.
+        size_t candidates{0};
     };
     /**
      * What is offered to the miners of the mainchain for a block with these
@@ -187,6 +189,8 @@ private:
     std::vector<uint256> m_uncommitted GUARDED_BY(m_mutex);
     std::vector<uint256> m_committed GUARDED_BY(m_mutex);
     std::map<uint256, Candidate> m_candidates GUARDED_BY(m_mutex);
+    //! The candidate of the last round of mining that asked for none (Mine): dropped at the next such round.
+    std::optional<uint256> m_unrequested GUARDED_BY(m_mutex);
     Mining m_mining GUARDED_BY(m_mutex);
     //! Counts the calls of SetMining, for the thread to tell that the settings changed under it.
     uint64_t m_mining_settings GUARDED_BY(m_mutex){0};

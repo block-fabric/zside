@@ -462,29 +462,13 @@ void Follower::Act()
     // would otherwise wait for ever.
     // In the order of their commitments, which is that of the chain: each header follows the one before.
     // (In the order the hooks give, for headers of other kinds.)
-    std::multimap<int64_t, std::pair<CBlockHeader, int64_t>> headers;
-    {
-        LOCK(::cs_main);
-        const Mainchain& record{*chainman.m_mainchain};
-        for (auto it{chainman.m_bmm_waiting.begin()}; it != chainman.m_bmm_waiting.end();) {
-            if (const auto order{Hooks().WaitingReady(it->second.header, record)}) {
-                headers.emplace(*order, std::make_pair(it->second.header, it->second.peer));
-                it = chainman.m_bmm_waiting.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-    for (const auto& [_, entry] : headers) {
-        const auto& [header, peer]{entry};
-        BlockValidationState state;
-        const CBlockIndex* pindex{nullptr};
-        if (!chainman.ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, &pindex) || !pindex || peer < 0 || !m_node.peerman) continue;
+    for (const auto& [pindex, peer] : chainman.RetryBmmWaiting()) {
+        if (peer < 0 || !m_node.peerman) continue;
         // The block, from the peer that announced it: a header with less work than what the peer
         // announced before (blocks the record made invalid) would not be fetched otherwise.
         if (!WITH_LOCK(::cs_main, return pindex->nStatus & BLOCK_HAVE_DATA)) {
             if (const auto fetched{m_node.peerman->FetchBlock(peer, *pindex)}; !fetched) {
-                LogDebug(BCLog::NET, "Block %s, now committed to, not fetched from peer=%d: %s", header.GetHash().ToString(), peer, fetched.error());
+                LogDebug(BCLog::NET, "Block %s, now committed to, not fetched from peer=%d: %s", pindex->GetBlockHash().ToString(), peer, fetched.error());
             }
         }
     }
@@ -809,7 +793,9 @@ void Follower::DropCandidate(const uint256& hash)
 Follower::Mining Follower::GetMining() const
 {
     LOCK(m_mutex);
-    return m_mining;
+    Mining mining{m_mining};
+    mining.candidates = m_candidates.size();
+    return mining;
 }
 
 void Follower::Mine()
@@ -874,6 +860,14 @@ void Follower::Mine()
     LOCK(m_mutex);
     if (m_mining.error != error) LogWarning("Merged mining: %s", error);
     m_mining.error = error;
+    // No commitment was asked for the candidate (a mainchain wallet without the funds, say), and the
+    // next round builds another: it is kept until then, in case the request went through unanswered,
+    // but no longer. Rounds come every second, mainchain blocks every few minutes.
+    if (candidate) {
+        const uint256 hash{candidate->block->GetHash()};
+        if (m_unrequested && *m_unrequested != hash) m_candidates.erase(*m_unrequested);
+        m_unrequested = hash;
+    }
 }
 
 void Follower::Run()

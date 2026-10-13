@@ -302,6 +302,7 @@ RPCMethod getbmminfo()
             {RPCResult::Type::NUM, "blocks", "Number of blocks of this node that the mainchain committed to"},
             {RPCResult::Type::NUM, "outbid", "Number of mainchain blocks for which another node bid more, for another block of this chain"},
             {RPCResult::Type::STR, "error", /*optional=*/true, "Why the last attempt to mine failed"},
+            {RPCResult::Type::NUM, "candidates", "Number of blocks built and kept until the mainchain commits to them or moves on"},
         }},
         RPCExamples{HelpExampleCli("getbmminfo", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -325,6 +326,7 @@ RPCMethod getbmminfo()
     result.pushKV("blocks", mining.blocks);
     result.pushKV("outbid", mining.outbid);
     if (!mining.error.empty()) result.pushKV("error", mining.error);
+    result.pushKV("candidates", uint64_t{mining.candidates});
     return result;
 },
     };
