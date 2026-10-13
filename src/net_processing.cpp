@@ -399,6 +399,12 @@ struct Peer {
 
     /** Time of the last getheaders message to this peer */
     NodeClock::time_point m_last_getheaders_timestamp GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
+    /**
+     * The tip when a header of this peer's failed through no fault of its own (a sidechain's header
+     * the node could not take yet: BLOCK_TIME_FUTURE that does not wait, BLOCK_HEADER_LOW_WORK):
+     * its headers are asked for again once the tip moved on from it, when they may be taken.
+     */
+    std::optional<uint256> m_headers_retry_after GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
     /** Protects m_headers_sync **/
     Mutex m_headers_sync_mutex;
@@ -928,6 +934,13 @@ private:
      * punished if the block is invalid.
      */
     std::map<uint256, std::pair<NodeId, bool>> mapBlockSource GUARDED_BY(cs_main);
+    /**
+     * Blocks that failed for a reason another extension could fix (ChainHooks::OtherExtensionMayFix: a
+     * sidechain's signature the node took before it could check it, forged), and the peers asked for
+     * them since: a peer's copy may carry a valid one, which replaces the node's (AcceptBlockHeader).
+     * Each peer that has such a block is asked for it once. Bounded.
+     */
+    std::map<uint256, std::set<NodeId>> m_extension_reask GUARDED_BY(cs_main);
 
     /** Number of peers with wtxid relay. */
     std::atomic<int> m_wtxid_relay_peers{0};
@@ -1824,6 +1837,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     assert(m_outbound_peers_with_protect_from_disconnect >= 0);
 
     m_node_states.erase(nodeid);
+    sidechain::Hooks().SourceGone(nodeid);
 
     if (m_node_states.empty()) {
         // Do a consistency check after the last peer is removed.
@@ -2388,6 +2402,9 @@ void PeerManagerImpl::BlockChecked(const std::shared_ptr<const CBlock>& block, c
     }
     if (it != mapBlockSource.end())
         mapBlockSource.erase(it);
+    if (state.IsInvalid() && block->IsExtended() && sidechain::Hooks().OtherExtensionMayFix(state.GetRejectReason()) && m_extension_reask.size() < 64) {
+        m_extension_reask.try_emplace(hash);
+    }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -3382,7 +3399,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     BlockValidationState state;
     const bool processed{m_chainman.ProcessNewBlockHeaders(headers,
                                                            /*min_pow_checked=*/true,
-                                                           state, &pindexLast)};
+                                                           state, &pindexLast, pfrom.GetId())};
     if (!processed) {
         if (state.IsInvalid()) {
             if (!pfrom.IsInboundConn() && state.GetResult() == BlockValidationResult::BLOCK_CACHED_INVALID) {
@@ -3414,6 +3431,20 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                     if (++kept >= MAX_WAITING_PER_MESSAGE) break;
                 }
                 UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash());
+            } else if (pindexLast && (state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE || state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK)) {
+                // The headers taken before the one that failed for a reason that is not the peer's
+                // fault (a header too far ahead of the node's clock, one a sidechain cannot check yet,
+                // a branch it does not need) are the peer's: without this, a node catching up whose
+                // last header from each peer fails so would fetch no block below it.
+                LOCK(::cs_main);
+                UpdateBlockAvailability(pfrom.GetId(), pindexLast->GetBlockHash());
+            }
+            if (state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK && sidechain::Hooks().CustomChainOrder()) {
+                // The rest of the peer's headers, once the node took in more of the chain (a sidechain
+                // that takes so many headers it cannot check yet from a peer: those it checked since
+                // make room). Without this, a node that had all a peer had room for would not ask it
+                // for more before it announced a new block.
+                peer.m_headers_retry_after = WITH_LOCK(::cs_main, return m_chainman.ActiveChain().Tip()->GetBlockHash());
             }
             MaybePunishNodeForBlock(pfrom.GetId(), state, via_compact_block, "invalid header received");
             return;
@@ -3753,7 +3784,7 @@ void PeerManagerImpl::ProcessGetCFCheckPt(CNode& node, Peer& peer, DataStream& v
 void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
 {
     bool new_block{false};
-    m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
+    m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block, node.GetId());
     if (new_block) {
         node.m_last_block_time = GetTime<std::chrono::seconds>();
         // In case this block came from a different peer than we requested
@@ -4908,7 +4939,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         const CBlockIndex *pindex = nullptr;
         BlockValidationState state;
-        if (!m_chainman.ProcessNewBlockHeaders({{cmpctblock.header}}, /*min_pow_checked=*/true, state, &pindex)) {
+        if (!m_chainman.ProcessNewBlockHeaders({{cmpctblock.header}}, /*min_pow_checked=*/true, state, &pindex, pfrom.GetId())) {
             if (state.IsInvalid()) {
                 // On a sidechain, a header can come before the mainchain block that commits to it
                 // is on record. It is tried again then; remember that this peer has the block.
@@ -6285,6 +6316,29 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                         );
                     nSyncStarted++;
                 }
+            }
+        }
+
+        // A block that failed for a reason another extension could fix: asked for once from each peer that has it.
+        for (auto it{m_extension_reask.begin()}; it != m_extension_reask.end();) {
+            const CBlockIndex* index{m_chainman.m_blockman.LookupBlockIndex(it->first)};
+            if (!index || !(index->nStatus & BLOCK_FAILED_VALID)) {
+                it = m_extension_reask.erase(it);
+                continue;
+            }
+            if (state.pindexBestKnownBlock && state.pindexBestKnownBlock->GetAncestor(index->nHeight) == index && it->second.insert(node.GetId()).second) {
+                LogDebug(BCLog::NET, "block %s, which failed with an extension another may fix, asked for again from peer=%d", it->first.ToString(), node.GetId());
+                MakeAndPushMessage(node, NetMsgType::GETDATA, std::vector<CInv>{CInv(MSG_BLOCK | MSG_WITNESS_FLAG, it->first)});
+            }
+            ++it;
+        }
+
+        // Headers of this peer's that failed through no fault of its own: asked for again once the tip moved.
+        if (peer.m_headers_retry_after && *peer.m_headers_retry_after != m_chainman.ActiveChain().Tip()->GetBlockHash()) {
+            const CBlockIndex* from{state.pindexBestKnownBlock ? state.pindexBestKnownBlock : m_chainman.m_best_header};
+            if (MaybeSendGetHeaders(node, GetLocator(from), peer)) {
+                LogDebug(BCLog::NET, "getheaders (%d) again to peer=%d, its headers refused before through no fault of its own", from->nHeight, node.GetId());
+                peer.m_headers_retry_after.reset();
             }
         }
 

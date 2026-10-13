@@ -30,6 +30,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -955,12 +956,148 @@ BOOST_FIXTURE_TEST_CASE(block_extension_mismatch, SidechainSetup)
     BOOST_CHECK(sidechain::SameExtension(Header(false), CBlockIndex{Header(false)}));
 }
 
+/**
+ * SignedHooks for a chain whose signatures the node can check only once it connects the chain below
+ * (`known`): all nines is a forged signature it takes in a header before it can tell, which all fives
+ * replaces once it can.
+ */
+struct LateCheckedHooks : SignedHooks {
+    bool known{false};
+    bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const override
+    {
+        std::array<unsigned char, 64> forged;
+        forged.fill(9);
+        if (!known && header.ext.sig == forged) return true;
+        return SignedHooks::CheckHeader(header, prev, chainman, state);
+    }
+    sidechain::OtherExtension CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const override
+    {
+        if (!known) return sidechain::OtherExtension::UNKNOWN;
+        std::array<unsigned char, 64> valid;
+        valid.fill(5);
+        if (header.ext.sig != valid) return sidechain::OtherExtension::INVALID;
+        return index.m_ext && index.m_ext->sig == valid ? sidechain::OtherExtension::EQUIVALENT : sidechain::OtherExtension::REPLACE;
+    }
+};
+
+BOOST_FIXTURE_TEST_CASE(block_extension_unknown_taken, SidechainSetup)
+{
+    // A block for a header the node has, with another signature the node cannot check yet (it took the
+    // header's, forged, before it could tell; it can once it connects the chain below): the same block
+    // but for the signature. Taken, with the header's signature, and the other one kept: when the
+    // block is connected, where the node can tell, the valid one replaces the forged one. Turned away,
+    // the block would stall a branch that needs it to be connected (a fork whose overtaking block it is).
+    auto owned{std::make_unique<LateCheckedHooks>()};
+    LateCheckedHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3e};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    CBlock honest{Build()};
+    honest.nVersion |= BLOCK_EXTENSION_BIT;
+    honest.ext.hashSections.SetNull();
+    honest.ext.sig.fill(5);
+    CBlock forged{honest};
+    forged.ext.sig.fill(9);
+    BlockValidationState header_state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{forged}}, /*min_pow_checked=*/true, header_state), header_state.ToString());
+    CBlockIndex* index{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(honest.GetHash()))};
+    BOOST_REQUIRE(index);
+    {
+        BlockValidationState state;
+        bool new_block{false};
+        BOOST_CHECK_MESSAGE(WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(honest), state, nullptr, true, nullptr, &new_block, true, /*source=*/7)), state.ToString());
+        BOOST_CHECK(new_block);
+        BOOST_CHECK(state.IsValid());
+        LOCK(::cs_main);
+        BOOST_CHECK(index->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_VALID));
+        BOOST_CHECK(*index->m_ext == forged.ext);
+        BOOST_CHECK(chainman.m_other_extensions.contains(honest.GetHash()));
+    }
+    {
+        // Stored with the header's (the node serves what it has; what the block hash covers is the same).
+        CBlock raw;
+        BOOST_REQUIRE(chainman.m_blockman.ReadBlock(raw, *index));
+        BOOST_CHECK(raw.ext == forged.ext);
+    }
+    // The node can tell now (the chain below connected): the honest signature replaces the forged one
+    // as the block is connected.
+    hooks.known = true;
+    BlockValidationState state;
+    BOOST_REQUIRE(chainman.ActiveChainstate().ActivateBestChain(state));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()) == index);
+    BOOST_CHECK(*index->m_ext == honest.ext);
+    CBlock raw;
+    BOOST_REQUIRE(chainman.m_blockman.ReadBlock(raw, *index));
+    BOOST_CHECK(raw.ext == honest.ext);
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.m_other_extensions.contains(honest.GetHash())));
+}
+
+BOOST_FIXTURE_TEST_CASE(header_extension_replaced, SidechainSetup)
+{
+    // A header the node took with a signature it could not check then (forged), and that comes again
+    // with a valid one once the node can tell: the valid one replaces it (CheckOtherExtension REPLACE).
+    // Without the hook (INVALID, the template's), the node keeps the one it has.
+    auto owned{std::make_unique<LateCheckedHooks>()};
+    LateCheckedHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3d};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    CBlock honest{Build()};
+    honest.nVersion |= BLOCK_EXTENSION_BIT;
+    honest.ext.hashSections.SetNull();
+    honest.ext.sig.fill(5);
+    CBlock forged{honest};
+    forged.ext.sig.fill(9);
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{forged}}, /*min_pow_checked=*/true, state), state.ToString());
+    const CBlockIndex* index{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(honest.GetHash()))};
+    BOOST_REQUIRE(index);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return *index->m_ext == forged.ext));
+    hooks.known = true;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{honest}}, /*min_pow_checked=*/true, state), state.ToString());
+    BOOST_CHECK(WITH_LOCK(::cs_main, return *index->m_ext == honest.ext));
+}
+
+/** Hooks that note where the headers they are shown come from. */
+struct SourceHooks : sidechain::ChainHooks {
+    mutable std::vector<int64_t> sources;
+    mutable int open{0};
+    void BeginHeaders(std::span<const CBlockHeader>, int64_t source) const override
+    {
+        sources.push_back(source);
+        ++open;
+    }
+    void EndHeaders() const override { --open; }
+};
+
+BOOST_FIXTURE_TEST_CASE(headers_named_by_source, SidechainSetup)
+{
+    // The hooks are shown each message's headers, and where they come from: the peer, -1 for none.
+    auto owned{std::make_unique<SourceHooks>()};
+    const SourceHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    ChainstateManager& chainman{*m_node.chainman};
+    const CBlock block{Build()};
+    Commit(block.GetHash());
+    BlockValidationState state;
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({{block}}, /*min_pow_checked=*/true, state, nullptr, /*source=*/5));
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({{block}}, /*min_pow_checked=*/true, state));
+    BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(block), /*force_processing=*/true, /*min_pow_checked=*/true, nullptr, /*source=*/6));
+    BOOST_CHECK(hooks.sources == (std::vector<int64_t>{5, -1, 6}));
+    BOOST_CHECK_EQUAL(hooks.open, 0);
+}
+
 BOOST_FIXTURE_TEST_CASE(block_extension_equivalent, SidechainSetup)
 {
     // A chain whose signer can sign one block twice: a block for a header the node has, with another
     // signature its rules find as valid, is the same block. It is taken with the header's signature
-    // (the node keeps that one), and is no mutated block; one the node cannot check yet is not taken,
-    // and no fault either. Others are mutated blocks, as without the hook.
+    // (the node keeps that one), and is no mutated block; one the node cannot check yet is the same
+    // block too (block_extension_unknown_taken). Others are mutated blocks, as without the hook.
     InstallHooks installed{std::make_unique<TwiceSignedHooks>()};
     sidechain::MainBlock first;
     first.hash = uint256{0x3f};
@@ -984,16 +1121,6 @@ BOOST_FIXTURE_TEST_CASE(block_extension_equivalent, SidechainSetup)
         BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
         BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-blk-extension");
     }
-    {
-        BlockValidationState state;
-        bool new_block{true};
-        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(unknown), state, nullptr, true, nullptr, &new_block, true)));
-        BOOST_CHECK(!new_block);
-        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE);
-        BOOST_CHECK_EQUAL(state.GetRejectReason(), "blk-extension-unknown");
-        LOCK(::cs_main);
-        BOOST_CHECK(!(index->nStatus & (BLOCK_FAILED_VALID | BLOCK_HAVE_DATA)));
-    }
     // The block with the other valid signature: taken, connected, and kept with the header's.
     bool new_block{false};
     BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(other), /*force_processing=*/true, /*min_pow_checked=*/true, &new_block));
@@ -1006,8 +1133,9 @@ BOOST_FIXTURE_TEST_CASE(block_extension_equivalent, SidechainSetup)
         BOOST_REQUIRE(chainman.m_blockman.ReadBlock(raw, pos, honest.GetHash()));
         BOOST_CHECK(raw.ext == honest.ext);
     }
-    // Again, either way: a duplicate, no fault. The block the node has is not touched.
-    for (const CBlock& again : {other, honest}) {
+    // Again, either way, or with a signature the node cannot check: a duplicate, no fault. The block
+    // the node has is not touched.
+    for (const CBlock& again : {other, honest, unknown}) {
         BlockValidationState state;
         new_block = true;
         BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(again), state, nullptr, true, nullptr, &new_block, true)));

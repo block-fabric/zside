@@ -2971,7 +2971,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             // What is not on record yet is no fault of the peer that sent the block. Nor, to VerifyDB,
             // is a block of the chain the record does not agree with any more a sign of a corrupt database.
             const bool not_yet{sidechain::Hooks().IsWaitReason(reject_reason) || reject_reason == "bmm-unknown" || reject_reason == "bad-sc-main-unknown" || (verifying && side && side->failed)};
-            state.Invalid(not_yet ? BlockValidationResult::BLOCK_TIME_FUTURE : BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
+            // Nor, where record failures are pardoned, a rule that reads the record: the peer's may
+            // say otherwise (after a mainchain reorg, the nodes that connected such a block again
+            // disconnected the peer that had relayed it before).
+            const bool pardoned{side && side->failed && !sidechain::RecordIndependent(reject_reason) && sidechain::Hooks().PardonRecordFailures()};
+            state.Invalid(not_yet || pardoned ? BlockValidationResult::BLOCK_TIME_FUTURE : BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
         } else if (scdb_check) {
             CAmount check_minted{0};
             sidechain::StoreOverlay check_store{side_base, /*journal=*/true};
@@ -3445,6 +3449,9 @@ bool Chainstate::ConnectTip(
     if (m_mempool) AssertLockHeld(m_mempool->cs);
 
     assert(pindexNew->pprev == m_chain.Tip());
+    // Another extension than its header's that the block came with, which the node could not check
+    // then, and now can: a valid one replaces an invalid one (written to disk with the block).
+    if (pindexNew->m_ext && m_chainman.TakeOtherExtensions(*pindexNew)) block_to_connect.reset();
     // Read block from disk.
     const auto time_1{SteadyClock::now()};
     if (!block_to_connect) {
@@ -3455,6 +3462,13 @@ bool Chainstate::ConnectTip(
         block_to_connect = std::move(pblockNew);
     } else {
         LogDebug(BCLog::BENCH, "  - Using cached block\n");
+        // The block as the node keeps it: with its header's extension (a block that came with
+        // another one is stored with the header's).
+        if (pindexNew->m_ext && block_to_connect->ext != *pindexNew->m_ext) {
+            auto kept{std::make_shared<CBlock>(*block_to_connect)};
+            kept->ext = *pindexNew->m_ext;
+            block_to_connect = std::move(kept);
+        }
     }
     // Apply the block atomically to the chain state.
     const auto time_2{SteadyClock::now()};
@@ -4229,6 +4243,85 @@ bool Chainstate::ReconsiderRecordFailure(CBlockIndex* pindex)
     return true;
 }
 
+void ChainstateManager::AddOtherExtension(const CBlockIndex& index, const BlockHeaderExtension& ext, int64_t source)
+{
+    AssertLockHeld(cs_main);
+    const uint256 hash{index.GetBlockHash()};
+    auto [found, inserted]{m_other_extensions.try_emplace(hash)};
+    if (inserted) {
+        m_other_extensions_order.push_back(hash);
+        while (m_other_extensions_order.size() > MAX_OTHER_EXTENSION_BLOCKS) {
+            m_other_extensions.erase(m_other_extensions_order.front());
+            m_other_extensions_order.pop_front();
+        }
+    }
+    auto& by_source{found->second};
+    if (!by_source.contains(source) && by_source.size() >= MAX_OTHER_EXTENSION_SOURCES) return;
+    by_source.insert_or_assign(source, ext);
+}
+
+bool ChainstateManager::TakeOtherExtensions(CBlockIndex& index)
+{
+    AssertLockHeld(cs_main);
+    const auto found{m_other_extensions.find(index.GetBlockHash())};
+    if (found == m_other_extensions.end()) return false;
+    const std::map<int64_t, BlockHeaderExtension> others{std::move(found->second)};
+    m_other_extensions.erase(found);
+    std::erase(m_other_extensions_order, index.GetBlockHash());
+    for (const auto& [source, ext] : others) {
+        if (!index.m_ext || ext == *index.m_ext) continue;
+        CBlockHeader header{index.GetBlockHeader()};
+        header.ext = ext;
+        if (sidechain::Hooks().CheckOtherExtension(header, index) != sidechain::OtherExtension::REPLACE) continue;
+        ActiveChainstate().ReplaceBlockExtension(&index, ext);
+        return true;
+    }
+    return false;
+}
+
+void Chainstate::ReplaceBlockExtension(CBlockIndex* pindex, const BlockHeaderExtension& ext)
+{
+    AssertLockHeld(cs_main);
+    LogInfo("Block %s: its header's extension is replaced by a valid one (the one the node had is not)", pindex->GetBlockHash().ToString());
+    pindex->m_ext = std::make_shared<const BlockHeaderExtension>(ext);
+    m_blockman.m_dirty_blockindex.insert(pindex);
+    // What is stored is written again with it: the node serves its blocks as they are on disk.
+    if (pindex->nStatus & BLOCK_HAVE_DATA) {
+        CBlock block;
+        if (m_blockman.ReadBlock(block, *pindex)) {
+            const FlatFilePos pos{m_blockman.WriteBlock(block, pindex->nHeight)};
+            if (!pos.IsNull()) {
+                pindex->nFile = pos.nFile;
+                pindex->nDataPos = pos.nPos;
+                // (Its undo data, if any, was in the undo file of the old block file: written again when connected.)
+                pindex->nUndoPos = 0;
+                pindex->nStatus &= ~BLOCK_HAVE_UNDO;
+            }
+        }
+    }
+    if (!(pindex->nStatus & BLOCK_FAILED_VALID)) return;
+    if (pindex->pprev && (pindex->pprev->nStatus & BLOCK_FAILED_VALID)) return;
+    sidechain::Mainchain* mainchain{m_chainman.m_mainchain.get()};
+    if (mainchain && mainchain->GetFailure(pindex->GetBlockHash()) == sidechain::Mainchain::Failure::MANUAL) return;
+    std::vector<CBlockIndex*> failed;
+    for (auto& [_, block_index] : m_blockman.m_block_index) {
+        if ((block_index.nStatus & BLOCK_FAILED_VALID) && block_index.GetAncestor(pindex->nHeight) == pindex) failed.push_back(&block_index);
+    }
+    std::sort(failed.begin(), failed.end(), [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight < b->nHeight; });
+    for (CBlockIndex* block_index : failed) {
+        if (block_index != pindex && (block_index->pprev->nStatus & BLOCK_FAILED_VALID)) continue;
+        if (block_index != pindex && mainchain && mainchain->GetFailure(block_index->GetBlockHash()) == sidechain::Mainchain::Failure::MANUAL) continue;
+        block_index->nStatus &= ~BLOCK_FAILED_VALID;
+        m_blockman.m_dirty_blockindex.insert(block_index);
+        if (block_index->IsValid(BLOCK_VALID_TRANSACTIONS) && block_index->HaveNumChainTxs() && setBlockIndexCandidates.value_comp()(m_chain.Tip(), block_index)) {
+            setBlockIndexCandidates.insert(block_index);
+        }
+        if (block_index == m_chainman.m_best_invalid) m_chainman.m_best_invalid = nullptr;
+        if (mainchain) mainchain->ForgetFailure(block_index->GetBlockHash());
+    }
+    m_chainman.RecalculateBestHeader();
+}
+
 void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 {
     AssertLockHeld(cs_main);
@@ -4786,6 +4879,14 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
             CBlockIndex* pindex = &(miSelf->second);
             if (ppindex)
                 *ppindex = pindex;
+            // With another extension, valid where the one the node has is not (a signature forged
+            // before the node could check it): the node takes this one, and gives the block another
+            // chance if it failed with the old one. (Not for a block of the active chain: its
+            // extension was checked when it was connected.)
+            if (pindex->m_ext && !sidechain::SameExtension(block, *pindex) && !ActiveChain().Contains(*pindex) &&
+                sidechain::Hooks().CheckOtherExtension(block, *pindex) == sidechain::OtherExtension::REPLACE) {
+                ActiveChainstate().ReplaceBlockExtension(pindex, block.ext);
+            }
             if (pindex->nStatus & BLOCK_FAILED_VALID) {
                 LogDebug(BCLog::VALIDATION, "%s: block %s is marked invalid\n", __func__, hash.ToString());
                 // Against the record, which the peer's may be ahead of: no fault of the peer's (with the hook).
@@ -4836,11 +4937,16 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
 }
 
 // Exposed wrapper for AcceptBlockHeader
-bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> headers, bool min_pow_checked, BlockValidationState& state, const CBlockIndex** ppindex)
+bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> headers, bool min_pow_checked, BlockValidationState& state, const CBlockIndex** ppindex, int64_t source)
 {
     AssertLockNotHeld(cs_main);
     {
         LOCK(cs_main);
+        // A sidechain may count the headers each peer sends.
+        sidechain::Hooks().BeginHeaders(headers, source);
+        struct EndHeaders {
+            ~EndHeaders() { sidechain::Hooks().EndHeaders(); }
+        } end_headers;
         for (const CBlockHeader& header : headers) {
             CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
             bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked)};
@@ -4892,7 +4998,7 @@ void ChainstateManager::ReportHeadersPresync(int64_t height, int64_t timestamp)
 }
 
 /** Store block on disk. If dbp is non-nullptr, the file is known to already reside on disk */
-bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked)
+bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked, int64_t source)
 {
     const CBlock& block = *pblock;
 
@@ -4912,18 +5018,26 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // a block for a header the node has must carry the extension that header came with, the one its
     // rules checked. Another one is a mutated block, never a reason to take the header for invalid --
     // unless the sidechain's rules find it as valid (another signature of the same block): the block
-    // is then the same, taken with the extension the node has.
+    // is then the same, taken with the extension the node has. One the rules cannot tell yet is the
+    // same block too, but for the extension, which is tried when the block is connected: refusing
+    // the block would stall a branch that needs it to be connected, and so to tell.
     if (!sidechain::SameExtension(block, *pindex)) {
         switch (sidechain::Hooks().CheckOtherExtension(block, *pindex)) {
         case sidechain::OtherExtension::EQUIVALENT: {
             LogDebug(BCLog::VALIDATION, "%s: block %s carries another valid extension than its header's: taken with its header's\n", __func__, pindex->GetBlockHash().ToString());
             auto same{std::make_shared<CBlock>(block)};
             same->ext = *Assert(pindex->m_ext);
-            return AcceptBlock(same, state, ppindex, fRequested, dbp, fNewBlock, min_pow_checked);
+            return AcceptBlock(same, state, ppindex, fRequested, dbp, fNewBlock, min_pow_checked, source);
         }
         case sidechain::OtherExtension::UNKNOWN:
-            LogDebug(BCLog::VALIDATION, "%s: block %s carries another extension than its header's, which cannot be checked yet\n", __func__, pindex->GetBlockHash().ToString());
-            return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "blk-extension-unknown", "another extension than that of the header the node has, not known to be valid yet");
+        case sidechain::OtherExtension::REPLACE: { // (REPLACE: taken by AcceptBlockHeader already, not reached)
+            LogDebug(BCLog::VALIDATION, "%s: block %s carries another extension than its header's, which cannot be checked yet: taken with its header's, the other one tried when it is connected\n", __func__, pindex->GetBlockHash().ToString());
+            // (Not for a block of the active chain: its extension was checked when it was connected.)
+            if (!ActiveChain().Contains(*pindex)) AddOtherExtension(*pindex, block.ext, source);
+            auto same{std::make_shared<CBlock>(block)};
+            same->ext = *Assert(pindex->m_ext);
+            return AcceptBlock(same, state, ppindex, fRequested, dbp, fNewBlock, min_pow_checked, source);
+        }
         case sidechain::OtherExtension::INVALID:
             break;
         }
@@ -5038,7 +5152,7 @@ static std::shared_ptr<const CBlock> WithHeaderExtension(const ChainstateManager
     return same;
 }
 
-bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& block_in, bool force_processing, bool min_pow_checked, bool* new_block)
+bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& block_in, bool force_processing, bool min_pow_checked, bool* new_block, int64_t source)
 {
     AssertLockNotHeld(cs_main);
 
@@ -5061,8 +5175,13 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         // not very expensive, the anti-DoS benefits of caching failure (of a definitely-invalid block) are not substantial.
         bool ret = CheckBlock(*block, state, GetConsensus());
         if (ret) {
-            // Store to disk
-            ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, new_block, min_pow_checked);
+            // Store to disk (the block's header, if new, is one the source sent: ChainHooks::BeginHeaders)
+            const CBlockHeader& header{*block};
+            sidechain::Hooks().BeginHeaders(std::span{&header, 1}, source);
+            struct EndHeaders {
+                ~EndHeaders() { sidechain::Hooks().EndHeaders(); }
+            } end_headers;
+            ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, new_block, min_pow_checked, source);
         }
         if (!ret) {
             if (m_options.signals) {
@@ -5329,7 +5448,8 @@ void Chainstate::RemoveStaleDrivechainTxs(bool after_reorg)
         m_blocks_disconnected = false;
     }
 
-    if (m_mempool->m_bmm_requests.empty() && m_mempool->m_escrow_txs.empty() && m_mempool->m_refunds.empty() && m_mempool->m_shielded_nullifiers.empty()) return;
+    // (On a sidechain the hooks' own rules are checked again whatever else is in the mempool.)
+    if (!m_chainman.GetConsensus().sidechain.enabled && m_mempool->m_bmm_requests.empty() && m_mempool->m_escrow_txs.empty() && m_mempool->m_refunds.empty() && m_mempool->m_shielded_nullifiers.empty()) return;
 
     std::vector<CTransactionRef> stale;
 
@@ -5354,6 +5474,23 @@ void Chainstate::RemoveStaleDrivechainTxs(bool after_reorg)
             std::string error;
             const auto bundle{zside::Bundle::FromTx(*tx, error)};
             if (bundle && !SideState().Shielded().IsAnchor(bundle->Anchor())) stale.push_back(tx);
+        }
+        // The sidechain's own rules (ChainHooks::HasTxRules), checked at entry against the tip then:
+        // a block may have changed the state they read (a name or an asset taken by another transaction
+        // that was mined first, say). Such a transaction no block takes would
+        // otherwise hold its inputs, and the wallet that made it, until the mempool expires it.
+        const int next_height{m_chain.Height() + 1};
+        for (const CTxMemPoolEntryRef& entry : m_mempool->entryAll()) {
+            const CTransaction& tx{entry.get().GetTx()};
+            if (!sidechain::Hooks().HasTxRules(tx)) continue;
+            sidechain::StoreOverlay scratch{side.View(), /*journal=*/false};
+            sidechain::State scratch_state{scratch};
+            std::vector<CTxOut> payouts;
+            std::string reason;
+            if (!sidechain::Hooks().ApplyTx(scratch_state, tx, next_height, /*peg_step=*/false, payouts, reason)) {
+                LogDebug(BCLog::MEMPOOL, "%s no longer keeps the rules of the sidechain (%s): out of the mempool\n", tx.GetHash().ToString(), reason);
+                stale.push_back(entry.get().GetSharedTx());
+            }
         }
     }
 
@@ -7735,7 +7872,7 @@ std::vector<std::pair<const CBlockIndex*, int64_t>> ChainstateManager::RetryBmmW
             const uint256 hash{header.GetHash()};
             BlockValidationState state;
             const CBlockIndex* pindex{nullptr};
-            const bool accepted{ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, &pindex) && pindex};
+            const bool accepted{ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, &pindex, peer) && pindex};
             LOCK(::cs_main);
             const auto it{m_bmm_waiting.find(hash)};
             if (accepted) {

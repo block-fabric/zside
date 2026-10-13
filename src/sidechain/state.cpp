@@ -573,12 +573,14 @@ int32_t State::BundleMainHeight() const { return BUNDLE_MAIN_HEIGHT.Get(*m_view)
 bool RecordIndependent(const std::string& reject_reason)
 {
     // What a block breaks whatever the mainchain did: the form of its withdrawals and commitments,
-    // and the signatures of refunds (checked once the withdrawal is known and free).
+    // and the signatures of refunds (checked once the withdrawal is known and free); and what the
+    // sidechain's own rules say (ChainHooks::RecordIndependent).
     static const std::set<std::string> independent{
         "bad-sc-withdrawal", "bad-sc-withdrawal-amount", "bad-sc-refund-signature", "bad-sc-bundle-multiple",
     };
-    // zSide: and the checks of a shielded transaction alone (zside/shielded.h).
-    return independent.contains(reject_reason) || zside::TxOnlyReason(reject_reason);
+    // zSide: and the checks of a shielded transaction alone (zside/shielded.h); and what the sidechain's
+    // own rules say (ChainHooks::RecordIndependent).
+    return independent.contains(reject_reason) || zside::TxOnlyReason(reject_reason) || Hooks().RecordIndependent(reject_reason);
 }
 
 std::vector<CTxOut> State::TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, uint64_t max_payouts)

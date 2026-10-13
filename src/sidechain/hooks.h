@@ -65,6 +65,9 @@ enum class OtherExtension : uint8_t {
     EQUIVALENT,
     //! The node cannot tell yet.
     UNKNOWN,
+    //! Valid, and the extension the node has is not: the node takes this one in its place (a header
+    //! taken before its signature could be checked, with a forged one).
+    REPLACE,
 };
 
 /**
@@ -111,6 +114,17 @@ public:
      * knows more is BLOCK_TIME_FUTURE, with a reason that IsWaitReason accepts. Called with cs_main held.
      */
     virtual bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const;
+    /**
+     * The headers of one message (ChainstateManager::ProcessNewBlockHeaders: a headers message, a
+     * compact block's header, a waiting header taken in; ProcessNewBlock: a block's), and where they
+     * come from: the peer, -1 for none (the node itself, its operator, its disk). Before CheckHeader
+     * is called for each of them; EndHeaders after. A chain may count what each peer makes it take
+     * in (the headers it cannot check yet, say). Called with cs_main held.
+     */
+    virtual void BeginHeaders(std::span<const CBlockHeader> headers, int64_t source) const {}
+    virtual void EndHeaders() const {}
+    /** A peer is gone (net_processing, FinalizeNode): what a chain counted for it may go. Called with cs_main held. */
+    virtual void SourceGone(int64_t source) const {}
     /** Context free checks of a whole block, after Bitcoin's (CheckBlock). */
     virtual bool CheckBlock(const CBlock& block, BlockValidationState& state) const;
     /** What an extended header's hashSections must be for these sections (not empty). */
@@ -125,6 +139,12 @@ public:
      * cs_main held.
      */
     virtual OtherExtension CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const;
+    /**
+     * Whether a block that failed for this reason may be valid with another extension (a signature the
+     * node took in a header before it could check it, forged): the node asks its peers for their copy,
+     * whose extension replaces its own if valid (CheckOtherExtension, REPLACE). By default none.
+     */
+    virtual bool OtherExtensionMayFix(const std::string& reject_reason) const { return false; }
     /**
      * How far ahead of the node's clock a block's time may be, in seconds (ContextualCheckBlockHeader,
      * "time-too-new", a header that may come later). By default Bitcoin's MAX_FUTURE_BLOCK_TIME. A chain
@@ -163,6 +183,14 @@ public:
      * from the peers that are not. A chain that wants Bitcoin's punishment turns it off.
      */
     virtual bool PardonRecordFailures() const { return true; }
+
+    /**
+     * Whether a block that fails for `reject_reason` (a reason of the sidechain's own rules) fails
+     * whatever the record of the mainchain says: then it is not noted as failed against the record,
+     * and is not tried again when the record changes, nor pardoned. In addition to the template's own
+     * (sidechain::RecordIndependent). By default none.
+     */
+    virtual bool RecordIndependent(const std::string& reject_reason) const { return false; }
 
     /** Whether a header turned away for `reject_reason` may become valid later, and should wait. */
     virtual bool IsWaitReason(const std::string& reject_reason) const;
@@ -206,6 +234,12 @@ public:
      * and `peg_step` false. By default nothing: every transaction keeps them.
      */
     virtual bool ApplyTx(State& state, const CTransaction& tx, int height, bool peg_step, std::vector<CTxOut>& payouts, std::string& reject_reason) const;
+    /**
+     * Whether ApplyTx may refuse `tx` (it has outputs of the sidechain's own kinds): the mempool checks
+     * such transactions again after every change of its tip, and drops those the next block could no
+     * longer take (the state moved under them). By default none.
+     */
+    virtual bool HasTxRules(const CTransaction& tx) const { return false; }
     /**
      * Peg actions of the sidechain's own, first in a block that takes them: what it adds to
      * `owed_tx` is paid by the coinbase as refunds are. Block assembly calls it too, with the block

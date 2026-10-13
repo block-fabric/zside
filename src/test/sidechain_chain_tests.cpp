@@ -28,6 +28,7 @@
 #include <script/script.h>
 #include <script/sign.h>
 #include <script/signingprovider.h>
+#include <sidechain/hooks.h>
 #include <sidechain/mainchain.h>
 #include <sidechain/state.h>
 #include <sidechain/store.h>
@@ -43,6 +44,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -60,6 +62,49 @@ struct BlockCatcher final : public CValidationInterface {
     void BlockChecked(const std::shared_ptr<const CBlock>& block, const BlockValidationState& state) override
     {
         states[block->GetHash()] = state;
+    }
+};
+
+/** Installs hooks for the life of the object; the template's again after. */
+struct InstallHooks {
+    explicit InstallHooks(std::unique_ptr<sidechain::ChainHooks> hooks) { sidechain::SetHooks(std::move(hooks)); }
+    ~InstallHooks() { sidechain::SetHooks(nullptr); }
+};
+
+/** Hooks that punish peers for blocks that failed against the record, as Bitcoin. */
+struct NoPardonHooks : sidechain::ChainHooks {
+    bool PardonRecordFailures() const override { return false; }
+};
+
+/**
+ * Hooks with transaction rules of their own that read the state: an output OP_RETURN {'N', n} takes
+ * the name n, which only one transaction may take.
+ */
+const sidechain::Table<uint32_t, int64_t> NAMES_TABLE{0xF2};
+
+struct NameHooks : sidechain::ChainHooks {
+    static std::optional<uint32_t> Name(const CTxOut& out)
+    {
+        const CScript& script{out.scriptPubKey};
+        if (script.size() == 4 && script[0] == OP_RETURN && script[1] == 2 && script[2] == 'N') return script[3];
+        return std::nullopt;
+    }
+    bool HasTxRules(const CTransaction& tx) const override
+    {
+        return std::any_of(tx.vout.begin(), tx.vout.end(), [](const CTxOut& out) { return Name(out).has_value(); });
+    }
+    bool ApplyTx(sidechain::State& state, const CTransaction& tx, int height, bool, std::vector<CTxOut>&, std::string& reject_reason) const override
+    {
+        for (const CTxOut& out : tx.vout) {
+            const auto name{Name(out)};
+            if (!name) continue;
+            if (NAMES_TABLE.Contains(state.View(), *name)) {
+                reject_reason = "bad-test-name-taken";
+                return false;
+            }
+            NAMES_TABLE.Put(state.Writable(), *name, height);
+        }
+        return true;
     }
 };
 
@@ -148,6 +193,14 @@ struct SidechainChainSetup : public TestingSetup {
         Submit(block);
         BOOST_REQUIRE(Tip()->GetBlockHash() == block.GetHash());
         return block;
+    }
+
+    /** What validation found of the block; BLOCK_RESULT_UNSET if it did not check it or found it valid. */
+    BlockValidationResult Result(const CBlock& block)
+    {
+        const auto it{catcher->states.find(block.GetHash())};
+        if (it == catcher->states.end() || it->second.IsValid()) return BlockValidationResult::BLOCK_RESULT_UNSET;
+        return it->second.GetResult();
     }
 
     /** Why validation refused the block; empty if it did not. */
@@ -528,6 +581,87 @@ BOOST_AUTO_TEST_CASE(refund_held_back_by_a_bundle_pending_on_the_mainchain)
     BOOST_CHECK(!InMempool(refund));
     const auto again{Accept(refund, /*test_accept=*/true)};
     BOOST_CHECK_EQUAL(again.m_state.GetRejectReason(), "bad-sc-refund-bundle-pending");
+}
+
+BOOST_AUTO_TEST_CASE(block_failing_against_the_record_is_no_fault_of_the_peer)
+{
+    // A block that fails against the record of the mainchain when it is connected is no fault of the
+    // peer that sent it, whose record may say otherwise (a mainchain reorg moved a commitment or a
+    // deposit): not BLOCK_CONSENSUS, which a peer is disconnected for (after a mainchain reorg, every
+    // node that connected such a block disconnected the peer that had relayed it). A rule broken
+    // whatever the record says still is; and so is a failure against the record where the sidechain
+    // does not pardon them (hook PardonRecordFailures).
+    COutPoint coin;
+    const CTxOut spent{Fund(10 * COIN, coin)};
+    Deposit(3 * COIN);
+    // A deposit the coinbase pays wrong.
+    CBlock misplaced{Build()};
+    CMutableTransaction coinbase{*misplaced.vtx[0]};
+    BOOST_REQUIRE(coinbase.vout.size() == 3 && coinbase.vout[1].nValue == 3 * COIN);
+    coinbase.vout.erase(coinbase.vout.begin() + 1);
+    misplaced.vtx[0] = MakeTransactionRef(coinbase);
+    Finish(misplaced);
+    Submit(misplaced);
+    BOOST_CHECK_EQUAL(Reason(misplaced), "bad-sc-payout");
+    BOOST_CHECK(Failure(misplaced) == sidechain::Mainchain::Failure::RECORD);
+    BOOST_CHECK(Result(misplaced) == BlockValidationResult::BLOCK_TIME_FUTURE);
+    BOOST_CHECK(Failed(misplaced));
+
+    // A withdrawal that does not parse: wrong whatever the mainchain did.
+    CBlock malformed{Build(/*use_mempool=*/false)};
+    malformed.vtx.push_back(MakeTransactionRef(Spend(coin, spent, {CTxOut{COIN, sidechain::WithdrawalScript(COIN, key.GetPubKey().GetID(), script)}, CTxOut{spent.nValue - COIN - TX_FEE, script}})));
+    node::RegenerateCommitments(malformed, Chainman());
+    Finish(malformed);
+    Submit(malformed);
+    BOOST_CHECK_EQUAL(Reason(malformed), "bad-sc-withdrawal");
+    BOOST_CHECK(Result(malformed) == BlockValidationResult::BLOCK_CONSENSUS);
+
+    // Without the pardon: as Bitcoin.
+    InstallHooks installed{std::make_unique<NoPardonHooks>()};
+    CBlock unpaid{Build()};
+    coinbase = CMutableTransaction{*unpaid.vtx[0]};
+    coinbase.vout.resize(1);
+    coinbase.vin[0].scriptWitness.SetNull();
+    unpaid.vtx[0] = MakeTransactionRef(coinbase);
+    Finish(unpaid);
+    Submit(unpaid);
+    BOOST_CHECK_EQUAL(Reason(unpaid), "bad-sc-payouts-missing");
+    BOOST_CHECK(Failure(unpaid) == sidechain::Mainchain::Failure::RECORD);
+    BOOST_CHECK(Result(unpaid) == BlockValidationResult::BLOCK_CONSENSUS);
+}
+
+BOOST_AUTO_TEST_CASE(mempool_rechecks_own_tx_rules_on_each_tip)
+{
+    // The sidechain's own transaction rules are checked as a transaction enters the mempool, against
+    // the tip then. Two transactions that take the same name both enter; a block takes one of them,
+    // after which no block can take the other: it leaves the mempool (hook HasTxRules), rather than
+    // hold its inputs until the mempool expires it. A transaction the rules still take stays.
+    InstallHooks installed{std::make_unique<NameHooks>()};
+    COutPoint a, b, c;
+    const CTxOut spent_a{Fund(10 * COIN, a)};
+    const CTxOut spent_b{Fund(10 * COIN, b)};
+    const CTxOut spent_c{Fund(10 * COIN, c)};
+    const auto claim{[&](const COutPoint& coin, const CTxOut& spent, uint8_t name, CAmount fee) {
+        return Spend(coin, spent, {CTxOut{0, CScript() << OP_RETURN << std::vector<unsigned char>{'N', name}}, CTxOut{spent.nValue - fee, script}});
+    }};
+    const CMutableTransaction first{claim(a, spent_a, 9, TX_FEE)};
+    const CMutableTransaction second{claim(b, spent_b, 9, 2 * TX_FEE)};
+    BOOST_REQUIRE(Accept(first).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_REQUIRE(Accept(second).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    // The block takes one (a block of only the other, with this one next).
+    const CBlock block{Mine()};
+    const bool took_first{InBlock(block, first)};
+    BOOST_REQUIRE(took_first != InBlock(block, second));
+    const CMutableTransaction& left{took_first ? second : first};
+    BOOST_CHECK(!InMempool(took_first ? first : second));
+    // The other no block can take any more: out of the mempool, and its coin free to spend again.
+    BOOST_CHECK(!InMempool(left));
+    BOOST_CHECK(Accept(left, /*test_accept=*/true).m_state.GetRejectReason() == "bad-test-name-taken");
+    // A name nobody took is kept across tip changes.
+    const CMutableTransaction third{claim(c, spent_c, 10, TX_FEE)};
+    BOOST_REQUIRE(Accept(third).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    Mine(/*use_mempool=*/false);
+    BOOST_CHECK(InMempool(third));
 }
 
 BOOST_AUTO_TEST_CASE(mempool_withdrawal_rules)
