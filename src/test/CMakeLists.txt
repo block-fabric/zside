@@ -48,6 +48,7 @@ add_executable(test_bitcoin
   drivechain_tests.cpp
   sidechain_chain_tests.cpp
   sidechain_hooks_tests.cpp
+  sidechain_state_golden_tests.cpp
   sidechain_store_tests.cpp
   drivechain_validation_tests.cpp
   disconnected_transactions.cpp
@@ -159,6 +160,7 @@ target_json_data_sources(test_bitcoin
   data/siphash.json
   data/tx_invalid.json
   data/tx_valid.json
+  data/zside_golden_txs.json
 )
 target_raw_data_sources(test_bitcoin NAMESPACE test::data
   data/asmap.raw
