@@ -63,7 +63,7 @@ enum class OtherExtension : uint8_t {
     INVALID,
     //! As valid as the node's (another valid signature of the same block): the same block.
     EQUIVALENT,
-    //! The node cannot tell yet.
+    //! The node cannot tell yet (the header it has was taken unchecked: ChainHooks::HeaderCheckable).
     UNKNOWN,
     //! Valid, and the extension the node has is not: the node takes this one in its place (a header
     //! taken before its signature could be checked, with a forged one).
@@ -115,36 +115,49 @@ public:
      */
     virtual bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const;
     /**
-     * The headers of one message (ChainstateManager::ProcessNewBlockHeaders: a headers message, a
-     * compact block's header, a waiting header taken in; ProcessNewBlock: a block's), and where they
-     * come from: the peer, -1 for none (the node itself, its operator, its disk). Before CheckHeader
-     * is called for each of them; EndHeaders after. A chain may count what each peer makes it take
-     * in (the headers it cannot check yet, say). Called with cs_main held.
+     * Whether the node can check every rule of this header now (CheckHeader). A chain whose headers
+     * carry a signature the node can check only once it has connected the chain below (the signer is
+     * known from that chain's state) says no: the header is then taken *unchecked* (CheckHeader lets
+     * it through), within the budget of the peer that sent it (UncheckedLimits), and its signature is
+     * checked when its block is connected. Unchecked headers, and every header on top of one, belong
+     * to the peers that sent them (ChainstateManager::m_unchecked): they are not written to disk, and
+     * leave the block index when no peer holds them any more. See doc/sidechain.md, "Headers the node
+     * cannot check yet". By default every header can be checked. Called with cs_main held.
      */
-    virtual void BeginHeaders(std::span<const CBlockHeader> headers, int64_t source) const {}
-    virtual void EndHeaders() const {}
-    /** A peer is gone (net_processing, FinalizeNode): what a chain counted for it may go. Called with cs_main held. */
-    virtual void SourceGone(int64_t source) const {}
+    virtual bool HeaderCheckable(const CBlockHeader& header, const CBlockIndex& prev) const { return true; }
+    struct UncheckedBudget {
+        //! The unchecked headers a peer may hold.
+        size_t per_peer{2000};
+        //! The unchecked headers the node holds, at most (but its own).
+        size_t total{10000};
+    };
+    /** The budget of unchecked headers (HeaderCheckable). Not consensus. */
+    virtual UncheckedBudget UncheckedLimits() const { return {}; }
     /** Context free checks of a whole block, after Bitcoin's (CheckBlock). */
     virtual bool CheckBlock(const CBlock& block, BlockValidationState& state) const;
     /** What an extended header's hashSections must be for these sections (not empty). */
     virtual uint256 SectionsHash(std::span<const unsigned char> sections) const;
     /**
-     * A block (or compact block) for an extended header the node has, `index`, with another extension:
-     * the block hash covers neither signature. By default INVALID: a mutated block (AcceptBlock,
-     * "bad-blk-extension"), which Bitcoin punishes. A chain whose signatures a signer can make twice
-     * for one block says EQUIVALENT when the other one is as valid: the block is then taken with the
-     * extension the node has (it keeps that one), the peer is not punished. UNKNOWN: the node cannot
-     * tell yet; the block is not taken ("blk-extension-unknown"), the peer not punished. Called with
-     * cs_main held.
+     * A header or block (or compact block) for an extended header the node has, `index`, with another
+     * extension: the block hash covers neither signature. By default INVALID: for a block, a mutated
+     * block (AcceptBlock, "bad-blk-extension"), which Bitcoin punishes; for a header, nothing. A chain
+     * whose signatures a signer can make twice for one block says EQUIVALENT when the other one is as
+     * valid: the block is then taken with the extension the node has (it keeps that one), the peer is
+     * not punished. REPLACE: valid, and the one the node has is not (taken unchecked, forged): the
+     * node takes this one in its place (Chainstate::ReplaceBlockExtension). UNKNOWN: the node cannot
+     * tell yet; the block is the same block, taken with the header's extension, which is checked when
+     * it is connected -- unless that one failed already (ExtensionFailure), then this one replaces it.
+     * Called with cs_main held.
      */
     virtual OtherExtension CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const;
     /**
-     * Whether a block that failed for this reason may be valid with another extension (a signature the
-     * node took in a header before it could check it, forged): the node asks its peers for their copy,
-     * whose extension replaces its own if valid (CheckOtherExtension, REPLACE). By default none.
+     * Whether a block that failed for this reason failed for its extension alone (a signature): if the
+     * node took its header unchecked (HeaderCheckable), the failure is that of the copy it has, not of
+     * the block. It is no fault of the peers (BLOCK_TIME_FUTURE, "extension-failed"), in memory only,
+     * taken back by any other extension, and the node asks the peers that have the block for its
+     * header again. By default none.
      */
-    virtual bool OtherExtensionMayFix(const std::string& reject_reason) const { return false; }
+    virtual bool ExtensionFailure(const std::string& reject_reason) const { return false; }
     /**
      * How far ahead of the node's clock a block's time may be, in seconds (ContextualCheckBlockHeader,
      * "time-too-new", a header that may come later). By default Bitcoin's MAX_FUTURE_BLOCK_TIME. A chain

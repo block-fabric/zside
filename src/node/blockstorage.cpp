@@ -545,7 +545,9 @@ void BlockManager::WriteBlockIndexDB()
     std::vector<const CBlockIndex*> vBlocks;
     vBlocks.reserve(m_dirty_blockindex.size());
     for (std::set<CBlockIndex*>::iterator it = m_dirty_blockindex.begin(); it != m_dirty_blockindex.end();) {
-        vBlocks.push_back(*it);
+        // A sidechain's unchecked header is not written (ChainstateManager::m_unchecked): it is marked
+        // dirty again once its block is connected.
+        if (!(*it)->m_unchecked) vBlocks.push_back(*it);
         m_dirty_blockindex.erase(it++);
     }
     int max_blockfile{this->MaxBlockfileNum()};

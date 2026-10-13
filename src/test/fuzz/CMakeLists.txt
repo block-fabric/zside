@@ -48,6 +48,7 @@ add_executable(fuzz
   deserialize.cpp
   difference_formatter.cpp
   sidechain.cpp
+  sidechain_unchecked.cpp
   drivechain.cpp
   eval_script.cpp
   feefrac.cpp

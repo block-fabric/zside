@@ -455,6 +455,9 @@ struct CNodeState {
     const CBlockIndex* pindexLastCommonBlock{nullptr};
     //! The best header we have sent our peer.
     const CBlockIndex* pindexBestHeaderSent{nullptr};
+    //! A sidechain's block whose extension failed (ChainHooks::ExtensionFailure), which this peer has:
+    //! its headers are asked for again from the block's parent, for the peer's copy of the extension.
+    std::optional<uint256> m_reask_headers_from;
     //! Whether we've started headers synchronization with this peer.
     bool fSyncStarted{false};
     //! Since when we're stalling block download progress (in microseconds), or 0.
@@ -578,6 +581,11 @@ public:
     PeerManagerImpl(CConnman& connman, AddrMan& addrman,
                     BanMan* banman, ChainstateManager& chainman,
                     CTxMemPool& pool, node::Warnings& warnings, Options opts);
+    /**
+     * A sidechain's unchecked headers left the block index (ChainstateManager::m_unchecked): the
+     * peers' pointers to them move to the nearest block below that stays, and their requests go.
+     */
+    void UncheckedErased(const std::vector<std::pair<const CBlockIndex*, const CBlockIndex*>>& moved) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Overridden from CValidationInterface. */
     void ActiveTipChange(const CBlockIndex& new_tip, bool) override
@@ -934,13 +942,8 @@ private:
      * punished if the block is invalid.
      */
     std::map<uint256, std::pair<NodeId, bool>> mapBlockSource GUARDED_BY(cs_main);
-    /**
-     * Blocks that failed for a reason another extension could fix (ChainHooks::OtherExtensionMayFix: a
-     * sidechain's signature the node took before it could check it, forged), and the peers asked for
-     * them since: a peer's copy may carry a valid one, which replaces the node's (AcceptBlockHeader).
-     * Each peer that has such a block is asked for it once. Bounded.
-     */
-    std::map<uint256, std::set<NodeId>> m_extension_reask GUARDED_BY(cs_main);
+    //! Gone with this (ChainstateManager::m_on_unchecked_erased).
+    const std::shared_ptr<bool> m_alive{std::make_shared<bool>(true)};
 
     /** Number of peers with wtxid relay. */
     std::atomic<int> m_wtxid_relay_peers{0};
@@ -1726,6 +1729,8 @@ void PeerManagerImpl::InitializeNode(const CNode& node, ServiceFlags our_service
     {
         LOCK(cs_main); // For m_node_states
         m_node_states.try_emplace(m_node_states.end(), nodeid);
+        // It may hold a sidechain's unchecked headers.
+        m_chainman.UncheckedSourceAdded(nodeid);
     }
     WITH_LOCK(m_tx_download_mutex, m_txdownloadman.CheckIsEmpty(nodeid));
 
@@ -1837,7 +1842,8 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     assert(m_outbound_peers_with_protect_from_disconnect >= 0);
 
     m_node_states.erase(nodeid);
-    sidechain::Hooks().SourceGone(nodeid);
+    // The unchecked headers no other peer holds go (the other peers' pointers to them moved: UncheckedErased).
+    m_chainman.UncheckedSourceGone(nodeid);
 
     if (m_node_states.empty()) {
         // Do a consistency check after the last peer is removed.
@@ -2137,6 +2143,9 @@ util::Expected<void, std::string> PeerManagerImpl::FetchBlock(NodeId peer_id, co
     PeerRef peer = GetPeerRef(peer_id);
     if (peer == nullptr) return util::Unexpected{"Peer does not exist"};
 
+    // (A sidechain's unchecked header may have left the block index since the caller looked it up.)
+    if (m_chainman.m_blockman.LookupBlockIndex(block_index.GetBlockHash()) != &block_index) return util::Unexpected{"Block header unknown"};
+
     // Ignore pre-segwit peers
     if (!CanServeWitnesses(*peer)) return util::Unexpected{"Pre-SegWit peer"};
 
@@ -2192,6 +2201,31 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
     if (opts.reconcile_txs) {
         m_txreconciliation = std::make_unique<TxReconciliationTracker>(TXRECONCILIATION_VERSION);
     }
+    // (The chainstate manager may outlive this, or not: the callback does nothing once this is gone.)
+    LOCK(cs_main);
+    m_chainman.m_on_unchecked_erased = [this, alive = std::weak_ptr<bool>{m_alive}](const auto& moved) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (alive.lock()) UncheckedErased(moved);
+    };
+}
+
+void PeerManagerImpl::UncheckedErased(const std::vector<std::pair<const CBlockIndex*, const CBlockIndex*>>& moved)
+{
+    AssertLockHeld(cs_main);
+    std::unordered_map<const CBlockIndex*, const CBlockIndex*> to{moved.begin(), moved.end()};
+    const auto move{[&](const CBlockIndex*& pointer) {
+        if (const auto found{to.find(pointer)}; found != to.end()) pointer = found->second;
+    }};
+    for (auto& [_, state] : m_node_states) {
+        move(state.pindexBestKnownBlock);
+        move(state.pindexLastCommonBlock);
+        move(state.pindexBestHeaderSent);
+        move(state.m_chain_sync.m_work_header);
+    }
+    std::vector<uint256> requested;
+    for (const auto& [hash, request] : mapBlocksInFlight) {
+        if (to.contains(request.second->pindex)) requested.push_back(hash);
+    }
+    for (const uint256& hash : requested) RemoveBlockRequest(hash, std::nullopt);
 }
 
 void PeerManagerImpl::StartScheduledTasks(CScheduler& scheduler)
@@ -2402,8 +2436,18 @@ void PeerManagerImpl::BlockChecked(const std::shared_ptr<const CBlock>& block, c
     }
     if (it != mapBlockSource.end())
         mapBlockSource.erase(it);
-    if (state.IsInvalid() && block->IsExtended() && sidechain::Hooks().OtherExtensionMayFix(state.GetRejectReason()) && m_extension_reask.size() < 64) {
-        m_extension_reask.try_emplace(hash);
+    // An unchecked header's extension failure (the copy's fault): the peers that hold the header, or
+    // whose best chain has it, are asked for its headers again, for their copy of the extension, which
+    // replaces the node's (AcceptBlockHeader). One pending request a peer.
+    if (state.IsInvalid() && block->IsExtended() && sidechain::Hooks().ExtensionFailure(state.GetRejectReason())) {
+        const CBlockIndex* index{m_chainman.m_blockman.LookupBlockIndex(hash)};
+        if (index && index->pprev && m_chainman.UncheckedExtensionFailed(*index)) {
+            for (auto& [node_id, node_state] : m_node_states) {
+                if (m_chainman.HoldsUnchecked(*index, node_id) || (node_state.pindexBestKnownBlock && node_state.pindexBestKnownBlock->GetAncestor(index->nHeight) == index)) {
+                    node_state.m_reask_headers_from = index->pprev->GetBlockHash();
+                }
+            }
+        }
     }
 }
 
@@ -3397,9 +3441,18 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
 
     // Now process all the headers.
     BlockValidationState state;
+    const uint64_t replaced_before{m_chainman.m_extensions_replaced.load()};
     const bool processed{m_chainman.ProcessNewBlockHeaders(headers,
                                                            /*min_pow_checked=*/true,
                                                            state, &pindexLast, pfrom.GetId())};
+    // A sidechain's header whose extension replaced one the node's block failed with (or a forged
+    // one): that block may connect now.
+    if (m_chainman.m_extensions_replaced.load() != replaced_before) {
+        BlockValidationState activate_state;
+        if (!m_chainman.ActiveChainstate().ActivateBestChain(activate_state)) {
+            LogDebug(BCLog::NET, "failed to activate chain after an extension was replaced (%s)\n", activate_state.ToString());
+        }
+    }
     if (!processed) {
         if (state.IsInvalid()) {
             if (!pfrom.IsInboundConn() && state.GetResult() == BlockValidationResult::BLOCK_CACHED_INVALID) {
@@ -3439,11 +3492,11 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 LOCK(::cs_main);
                 UpdateBlockAvailability(pfrom.GetId(), pindexLast->GetBlockHash());
             }
-            if (state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK && sidechain::Hooks().CustomChainOrder()) {
-                // The rest of the peer's headers, once the node took in more of the chain (a sidechain
-                // that takes so many headers it cannot check yet from a peer: those it checked since
-                // make room). Without this, a node that had all a peer had room for would not ask it
-                // for more before it announced a new block.
+            if (state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK && (sidechain::Hooks().CustomChainOrder() || state.GetRejectReason() == "unchecked-budget")) {
+                // The rest of the peer's headers, once the node took in more of the chain (a sidechain's
+                // unchecked headers, of which a peer holds so many: those whose blocks the node connected
+                // since make room). Without this, a node that had all a peer had room for would not ask
+                // it for more before it announced a new block.
                 peer.m_headers_retry_after = WITH_LOCK(::cs_main, return m_chainman.ActiveChain().Tip()->GetBlockHash());
             }
             MaybePunishNodeForBlock(pfrom.GetId(), state, via_compact_block, "invalid header received");
@@ -6319,18 +6372,15 @@ bool PeerManagerImpl::SendMessages(CNode& node)
             }
         }
 
-        // A block that failed for a reason another extension could fix: asked for once from each peer that has it.
-        for (auto it{m_extension_reask.begin()}; it != m_extension_reask.end();) {
-            const CBlockIndex* index{m_chainman.m_blockman.LookupBlockIndex(it->first)};
-            if (!index || !(index->nStatus & BLOCK_FAILED_VALID)) {
-                it = m_extension_reask.erase(it);
-                continue;
+        // The headers of a block whose extension failed, which this peer has: its copy of the extension.
+        if (state.m_reask_headers_from) {
+            const CBlockIndex* from{m_chainman.m_blockman.LookupBlockIndex(*state.m_reask_headers_from)};
+            if (!from) {
+                state.m_reask_headers_from.reset();
+            } else if (MaybeSendGetHeaders(node, GetLocator(from), peer)) {
+                LogDebug(BCLog::NET, "getheaders (%d) to peer=%d, for its copy of the extension of the block after it, which failed\n", from->nHeight, node.GetId());
+                state.m_reask_headers_from.reset();
             }
-            if (state.pindexBestKnownBlock && state.pindexBestKnownBlock->GetAncestor(index->nHeight) == index && it->second.insert(node.GetId()).second) {
-                LogDebug(BCLog::NET, "block %s, which failed with an extension another may fix, asked for again from peer=%d", it->first.ToString(), node.GetId());
-                MakeAndPushMessage(node, NetMsgType::GETDATA, std::vector<CInv>{CInv(MSG_BLOCK | MSG_WITNESS_FLAG, it->first)});
-            }
-            ++it;
         }
 
         // Headers of this peer's that failed through no fault of its own: asked for again once the tip moved.

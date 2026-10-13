@@ -2965,7 +2965,14 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             // The rules of the sidechain are checked against the record of the mainchain, which can
             // change: the follower takes the failure back if the block's commitment comes back.
             // A rule broken whatever the mainchain did is no failure of the record's.
-            if (side && side->failed && !fJustCheck && !verifying && !sidechain::RecordIndependent(reject_reason)) {
+            // A signature the node could not check when it took the header (unchecked), and that fails:
+            // the failure of the copy it has, not of the block (ChainHooks::ExtensionFailure). In memory
+            // only, taken back by another extension, and no fault of the peers that sent it: it was not
+            // verifiable when they did.
+            const bool extension{!fJustCheck && pindex->m_unchecked && sidechain::Hooks().ExtensionFailure(reject_reason)};
+            if (extension) {
+                if (const auto found{m_chainman.m_unchecked.find(pindex)}; found != m_chainman.m_unchecked.end()) found->second.extension_failed = true;
+            } else if (side && side->failed && !fJustCheck && !verifying && !sidechain::RecordIndependent(reject_reason)) {
                 m_chainman.m_mainchain->NoteFailure(block_hash, sidechain::Mainchain::Failure::RECORD);
             }
             // What is not on record yet is no fault of the peer that sent the block. Nor, to VerifyDB,
@@ -2975,7 +2982,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             // say otherwise (after a mainchain reorg, the nodes that connected such a block again
             // disconnected the peer that had relayed it before).
             const bool pardoned{side && side->failed && !sidechain::RecordIndependent(reject_reason) && sidechain::Hooks().PardonRecordFailures()};
-            state.Invalid(not_yet || pardoned ? BlockValidationResult::BLOCK_TIME_FUTURE : BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
+            state.Invalid(not_yet || pardoned || extension ? BlockValidationResult::BLOCK_TIME_FUTURE : BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
         } else if (scdb_check) {
             CAmount check_minted{0};
             sidechain::StoreOverlay check_store{side_base, /*journal=*/true};
@@ -3449,9 +3456,6 @@ bool Chainstate::ConnectTip(
     if (m_mempool) AssertLockHeld(m_mempool->cs);
 
     assert(pindexNew->pprev == m_chain.Tip());
-    // Another extension than its header's that the block came with, which the node could not check
-    // then, and now can: a valid one replaces an invalid one (written to disk with the block).
-    if (pindexNew->m_ext && m_chainman.TakeOtherExtensions(*pindexNew)) block_to_connect.reset();
     // Read block from disk.
     const auto time_1{SteadyClock::now()};
     if (!block_to_connect) {
@@ -3496,6 +3500,9 @@ bool Chainstate::ConnectTip(
             LogError("%s: ConnectBlock %s failed, %s\n", __func__, pindexNew->GetBlockHash().ToString(), state.ToString());
             return false;
         }
+        // An unchecked header is checked now: written to disk from here on (before the chainstate
+        // that names it as its tip is).
+        m_chainman.ReleaseUnchecked(*pindexNew);
         // (The sidechain undo data of blocks no reorg takes back goes when the chainstate is
         // flushed: see EraseDrivechainUndo.)
         time_3 = SteadyClock::now();
@@ -4243,48 +4250,247 @@ bool Chainstate::ReconsiderRecordFailure(CBlockIndex* pindex)
     return true;
 }
 
-void ChainstateManager::AddOtherExtension(const CBlockIndex& index, const BlockHeaderExtension& ext, int64_t source)
+void ChainstateManager::UncheckedSourceAdded(int64_t source)
 {
     AssertLockHeld(cs_main);
-    const uint256 hash{index.GetBlockHash()};
-    auto [found, inserted]{m_other_extensions.try_emplace(hash)};
-    if (inserted) {
-        m_other_extensions_order.push_back(hash);
-        while (m_other_extensions_order.size() > MAX_OTHER_EXTENSION_BLOCKS) {
-            m_other_extensions.erase(m_other_extensions_order.front());
-            m_other_extensions_order.pop_front();
-        }
-    }
-    auto& by_source{found->second};
-    if (!by_source.contains(source) && by_source.size() >= MAX_OTHER_EXTENSION_SOURCES) return;
-    by_source.insert_or_assign(source, ext);
+    if (source >= 0) m_unchecked_sources.insert(source);
 }
 
-bool ChainstateManager::TakeOtherExtensions(CBlockIndex& index)
+void ChainstateManager::AddUncheckedHolder(const CBlockIndex& index, UncheckedHeader& entry, int64_t source)
 {
     AssertLockHeld(cs_main);
-    const auto found{m_other_extensions.find(index.GetBlockHash())};
-    if (found == m_other_extensions.end()) return false;
-    const std::map<int64_t, BlockHeaderExtension> others{std::move(found->second)};
-    m_other_extensions.erase(found);
-    std::erase(m_other_extensions_order, index.GetBlockHash());
-    for (const auto& [source, ext] : others) {
-        if (!index.m_ext || ext == *index.m_ext) continue;
-        CBlockHeader header{index.GetBlockHeader()};
-        header.ext = ext;
-        if (sidechain::Hooks().CheckOtherExtension(header, index) != sidechain::OtherExtension::REPLACE) continue;
-        ActiveChainstate().ReplaceBlockExtension(&index, ext);
-        return true;
+    if (std::ranges::find(entry.holders, source) != entry.holders.end()) return;
+    const std::pair<int, const CBlockIndex*> key{index.nHeight, &index};
+    if (entry.holders.size() == 1) {
+        if (auto sole{m_unchecked_sole.find(entry.holders.front())}; sole != m_unchecked_sole.end() && sole->second.erase(key) && sole->second.empty()) m_unchecked_sole.erase(sole);
+    }
+    entry.holders.push_back(source);
+    if (entry.holders.size() == 1) m_unchecked_sole[source].insert(key);
+    m_unchecked_held[source].insert(key);
+}
+
+void ChainstateManager::RemoveUncheckedHolder(const CBlockIndex& index, UncheckedHeader& entry, int64_t source)
+{
+    AssertLockHeld(cs_main);
+    const auto it{std::ranges::find(entry.holders, source)};
+    if (it == entry.holders.end()) return;
+    const std::pair<int, const CBlockIndex*> key{index.nHeight, &index};
+    if (entry.holders.size() == 1) {
+        if (auto sole{m_unchecked_sole.find(source)}; sole != m_unchecked_sole.end() && sole->second.erase(key) && sole->second.empty()) m_unchecked_sole.erase(sole);
+    }
+    entry.holders.erase(it);
+    if (entry.holders.size() == 1) m_unchecked_sole[entry.holders.front()].insert(key);
+    if (auto held{m_unchecked_held.find(source)}; held != m_unchecked_held.end() && held->second.erase(key) && held->second.empty()) m_unchecked_held.erase(held);
+}
+
+bool ChainstateManager::HoldsUnchecked(const CBlockIndex& index, int64_t source) const
+{
+    AssertLockHeld(cs_main);
+    const auto found{m_unchecked.find(&index)};
+    return found != m_unchecked.end() && std::ranges::find(found->second.holders, source) != found->second.holders.end();
+}
+
+size_t ChainstateManager::UncheckedHeld(int64_t source) const
+{
+    AssertLockHeld(cs_main);
+    const auto held{m_unchecked_held.find(source)};
+    return held == m_unchecked_held.end() ? 0 : held->second.size();
+}
+
+bool ChainstateManager::UncheckedExtensionFailed(const CBlockIndex& index) const
+{
+    AssertLockHeld(cs_main);
+    const auto found{m_unchecked.find(&index)};
+    return found != m_unchecked.end() && found->second.extension_failed;
+}
+
+bool ChainstateManager::AdmitUnchecked(const CBlockIndex& prev, int64_t source)
+{
+    AssertLockHeld(cs_main);
+    // The node's own headers (its blocks, its disk, its operator): always.
+    if (source < 0) return true;
+    // A peer that is gone holds nothing (a waiting header tried again after its peer left).
+    if (!m_unchecked_sources.contains(source)) return false;
+    // The header and the unchecked headers below it the peer does not hold yet.
+    size_t needed{1};
+    for (const CBlockIndex* below{&prev}; below && below->m_unchecked && !HoldsUnchecked(*below, source); below = below->pprev) ++needed;
+    const auto limits{sidechain::Hooks().UncheckedLimits()};
+    if (UncheckedHeld(source) + needed > limits.per_peer) return false;
+    if (m_unchecked.size() + 1 <= limits.total) return true;
+    // The node holds as many as it may: the peer that alone holds the most gives up its newest, if it
+    // alone holds more than this one does. (The newest a peer alone holds have no header on top of
+    // them that another holds: the holders of a header include those of the headers on it.) So no
+    // peer makes room by dropping what another peer holds with it, and a peer that holds no more than
+    // its share of the total is never the one that gives way.
+    const auto own{m_unchecked_sole.find(source)};
+    const size_t own_sole{own == m_unchecked_sole.end() ? 0 : own->second.size()};
+    std::optional<int64_t> largest;
+    size_t largest_sole{0};
+    for (const auto& [holder, sole] : m_unchecked_sole) {
+        if (holder >= 0 && sole.size() > largest_sole) {
+            largest = holder;
+            largest_sole = sole.size();
+        }
+    }
+    if (!largest || largest_sole <= own_sole + 1) return false;
+    // (Not one below the new header: the sender is about to hold those with it.)
+    const auto& sole{m_unchecked_sole.at(*largest)};
+    for (auto it{sole.rbegin()}; it != sole.rend(); ++it) {
+        const CBlockIndex* newest{it->second};
+        if (prev.GetAncestor(newest->nHeight) == newest) continue;
+        LogDebug(BCLog::VALIDATION, "unchecked header %s of peer=%d dropped to make room for one of peer=%d\n", newest->GetBlockHash().ToString(), *largest, source);
+        EraseUnchecked({newest});
+        return m_unchecked.size() + 1 <= limits.total;
     }
     return false;
+}
+
+void ChainstateManager::HoldUnchecked(CBlockIndex& index, int64_t source)
+{
+    AssertLockHeld(cs_main);
+    // A new one: AcceptBlockHeader admitted it (AdmitUnchecked), there is room.
+    const bool fresh{!index.m_unchecked};
+    if (fresh) {
+        index.m_unchecked = true;
+        m_unchecked.try_emplace(&index);
+    }
+    if (source >= 0) {
+        // A peer that is gone holds nothing; a peer whose budget is spent holds no more.
+        size_t needed{0};
+        for (const CBlockIndex* below{&index}; below && below->m_unchecked && !HoldsUnchecked(*below, source); below = below->pprev) ++needed;
+        if (needed == 0) return;
+        if (!m_unchecked_sources.contains(source) || UncheckedHeld(source) + needed > sidechain::Hooks().UncheckedLimits().per_peer) {
+            Assume(!fresh);
+            return;
+        }
+    }
+    for (CBlockIndex* below{&index}; below && below->m_unchecked; below = below->pprev) {
+        UncheckedHeader& entry{m_unchecked.at(below)};
+        if (std::ranges::find(entry.holders, source) != entry.holders.end()) break;
+        AddUncheckedHolder(*below, entry, source);
+    }
+}
+
+void ChainstateManager::ReleaseUnchecked(CBlockIndex& index)
+{
+    AssertLockHeld(cs_main);
+    if (!index.m_unchecked) return;
+    UncheckedHeader& entry{m_unchecked.at(&index)};
+    for (const int64_t holder : std::vector<int64_t>{entry.holders}) RemoveUncheckedHolder(index, entry, holder);
+    m_unchecked.erase(&index);
+    index.m_unchecked = false;
+    m_blockman.m_dirty_blockindex.insert(&index);
+}
+
+void ChainstateManager::UncheckedSourceGone(int64_t source)
+{
+    AssertLockHeld(cs_main);
+    m_unchecked_sources.erase(source);
+    const auto held{m_unchecked_held.find(source)};
+    if (held == m_unchecked_held.end()) return;
+    std::vector<const CBlockIndex*> doomed;
+    for (const auto& [_, index] : std::set<std::pair<int, const CBlockIndex*>>{held->second}) {
+        UncheckedHeader& entry{m_unchecked.at(index)};
+        RemoveUncheckedHolder(*index, entry, source);
+        if (entry.holders.empty()) doomed.push_back(index);
+    }
+    // (Every header on top of one no one holds is held by no one either.)
+    if (!doomed.empty()) {
+        LogDebug(BCLog::VALIDATION, "%d unchecked headers no peer holds since peer=%d left: taken out of the block index\n", doomed.size(), source);
+        EraseUnchecked(std::move(doomed));
+    }
+}
+
+void ChainstateManager::EraseUnchecked(std::vector<const CBlockIndex*> doomed)
+{
+    AssertLockHeld(cs_main);
+    std::unordered_set<const CBlockIndex*> erased{doomed.begin(), doomed.end()};
+    // Where each one's pointers go: the nearest block below it that stays.
+    std::vector<std::pair<const CBlockIndex*, const CBlockIndex*>> moved;
+    moved.reserve(doomed.size());
+    for (const CBlockIndex* index : doomed) {
+        Assume(index->m_unchecked && !(index->nStatus & BLOCK_VALID_SCRIPTS));
+        const CBlockIndex* stays{index->pprev};
+        while (stays && erased.contains(stays)) stays = stays->pprev;
+        moved.emplace_back(index, stays);
+    }
+    // Whoever keeps pointers into the block index moves them first (they may read the entries).
+    if (m_on_unchecked_erased) m_on_unchecked_erased(moved);
+    const bool best_header_erased{erased.contains(m_best_header)};
+    for (auto it{m_blockman.m_blocks_unlinked.begin()}; it != m_blockman.m_blocks_unlinked.end();) {
+        if (erased.contains(it->first) || erased.contains(it->second)) {
+            it = m_blockman.m_blocks_unlinked.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    // Highest first: no entry is erased before those on top of it.
+    std::ranges::sort(doomed, [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight > b->nHeight; });
+    for (const CBlockIndex* index : doomed) {
+        CBlockIndex* entry{const_cast<CBlockIndex*>(index)};
+        for (const auto& chainstate : m_chainstates) chainstate->setBlockIndexCandidates.erase(entry);
+        m_blockman.m_dirty_blockindex.erase(entry);
+        if (m_best_invalid == index) m_best_invalid = nullptr;
+        if (m_last_notified_header == index) m_last_notified_header = nullptr;
+        if (m_mainchain) m_mainchain->ForgetFailure(index->GetBlockHash());
+        if (auto found{m_unchecked.find(index)}; found != m_unchecked.end()) {
+            for (const int64_t holder : std::vector<int64_t>{found->second.holders}) RemoveUncheckedHolder(*index, found->second, holder);
+            m_unchecked.erase(found);
+        }
+        m_erased_headers.push_back(m_blockman.m_block_index.extract(index->GetBlockHash()));
+    }
+    while (m_erased_headers.size() > MAX_ERASED_HEADERS) m_erased_headers.pop_front();
+    if (best_header_erased) RecalculateBestHeader();
+}
+
+void ChainstateManager::CheckUnchecked() const
+{
+    AssertLockHeld(cs_main);
+    size_t flagged{0};
+    for (const auto& [_, index] : m_blockman.m_block_index) {
+        if (!index.m_unchecked) {
+            assert(!m_unchecked.contains(&index));
+            continue;
+        }
+        ++flagged;
+        const auto found{m_unchecked.find(&index)};
+        assert(found != m_unchecked.end());
+        // Unchecked headers are not connected, someone holds each, and their holders hold the
+        // unchecked headers below them.
+        assert(!ActiveChain().Contains(index));
+        const auto& holders{found->second.holders};
+        assert(!holders.empty());
+        if (index.pprev && index.pprev->m_unchecked) {
+            const auto& below{m_unchecked.at(index.pprev).holders};
+            for (const int64_t holder : holders) assert(std::ranges::find(below, holder) != below.end());
+        }
+        const std::pair<int, const CBlockIndex*> key{index.nHeight, &index};
+        for (const int64_t holder : holders) {
+            assert(m_unchecked_held.at(holder).contains(key));
+            const auto sole{m_unchecked_sole.find(holder)};
+            assert((sole != m_unchecked_sole.end() && sole->second.contains(key)) == (holders.size() == 1));
+        }
+    }
+    assert(flagged == m_unchecked.size());
+    size_t pairs{0}, sole{0}, held{0}, alone{0};
+    for (const auto& [_, entry] : m_unchecked) {
+        pairs += entry.holders.size();
+        alone += entry.holders.size() == 1;
+    }
+    for (const auto& [_, set] : m_unchecked_held) held += set.size();
+    for (const auto& [_, set] : m_unchecked_sole) sole += set.size();
+    assert(pairs == held && alone == sole);
 }
 
 void Chainstate::ReplaceBlockExtension(CBlockIndex* pindex, const BlockHeaderExtension& ext)
 {
     AssertLockHeld(cs_main);
-    LogInfo("Block %s: its header's extension is replaced by a valid one (the one the node had is not)", pindex->GetBlockHash().ToString());
+    LogInfo("Block %s: its header's extension is replaced by another (the one the node had is not valid)", pindex->GetBlockHash().ToString());
     pindex->m_ext = std::make_shared<const BlockHeaderExtension>(ext);
     m_blockman.m_dirty_blockindex.insert(pindex);
+    if (const auto found{m_chainman.m_unchecked.find(pindex)}; found != m_chainman.m_unchecked.end()) found->second.extension_failed = false;
+    // (Whoever took the headers in may want to connect what it gave back: PeerManager.)
+    ++m_chainman.m_extensions_replaced;
     // What is stored is written again with it: the node serves its blocks as they are on disk.
     if (pindex->nStatus & BLOCK_HAVE_DATA) {
         CBlock block;
@@ -4853,45 +5059,58 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
 }
 
 /**
- * Whether a block marked failed failed against the record of the mainchain: the lowest failed block
- * it descends from (or it), as for ReconsiderRecordFailure. Not the first noted failure below it: a
- * block on one the operator marked invalid can be noted as failed against the record too, and the
- * record does not take back what the operator did.
+ * Why a block marked failed, or a header on it, is no fault of the peer that sends it, if it is not
+ * (nullptr otherwise): what the lowest failed block it descends from (or it) failed for, as for
+ * ReconsiderRecordFailure. Against the record of the mainchain ("record-failed", where the hooks
+ * pardon such failures: the peer's record may be ahead), not the first noted failure below it (a block
+ * on one the operator marked invalid can be noted as failed against the record too, and the record
+ * does not take back what the operator did); or for the extension of a header the node took unchecked
+ * ("extension-failed": the copy's fault, ChainHooks::ExtensionFailure).
  */
-static bool FailedAgainstRecord(const ChainstateManager& chainman, const CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+static const char* PardonedFailure(const ChainstateManager& chainman, const CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (!chainman.m_mainchain || !index || !(index->nStatus & BLOCK_FAILED_VALID)) return false;
+    if (!index || !(index->nStatus & BLOCK_FAILED_VALID)) return nullptr;
     const CBlockIndex* root{index};
     while (root->pprev && (root->pprev->nStatus & BLOCK_FAILED_VALID)) root = root->pprev;
-    return chainman.m_mainchain->GetFailure(root->GetBlockHash()) == sidechain::Mainchain::Failure::RECORD;
+    if (chainman.UncheckedExtensionFailed(*root)) return "extension-failed";
+    if (chainman.m_mainchain && sidechain::Hooks().PardonRecordFailures() && chainman.m_mainchain->GetFailure(root->GetBlockHash()) == sidechain::Mainchain::Failure::RECORD) return "record-failed";
+    return nullptr;
 }
 
-bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)
+bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked, int64_t source)
 {
     AssertLockHeld(cs_main);
 
     // Check for duplicate
     uint256 hash = block.GetHash();
     BlockMap::iterator miSelf{m_blockman.m_block_index.find(hash)};
+    // A header the node cannot check all of yet, or one on top of such a header: unchecked, taken
+    // within the budget of the peer that sends it (ChainHooks::HeaderCheckable, m_unchecked).
+    bool unchecked{false};
     if (hash != GetConsensus().hashGenesisBlock) {
         if (miSelf != m_blockman.m_block_index.end()) {
             // Block header is already known.
             CBlockIndex* pindex = &(miSelf->second);
             if (ppindex)
                 *ppindex = pindex;
-            // With another extension, valid where the one the node has is not (a signature forged
-            // before the node could check it): the node takes this one, and gives the block another
-            // chance if it failed with the old one. (Not for a block of the active chain: its
-            // extension was checked when it was connected.)
-            if (pindex->m_ext && !sidechain::SameExtension(block, *pindex) && !ActiveChain().Contains(*pindex) &&
-                sidechain::Hooks().CheckOtherExtension(block, *pindex) == sidechain::OtherExtension::REPLACE) {
-                ActiveChainstate().ReplaceBlockExtension(pindex, block.ext);
+            // With another extension: valid where the one the node has is not (a signature forged
+            // before the node could check it), or any other if the block failed with the one it has
+            // (the copy's fault: an unchecked header's extension failure), the node takes this one,
+            // and gives the block another chance if it failed with the old one. (Not for a block of
+            // the active chain: its extension was checked when it was connected.)
+            if (pindex->m_ext && !sidechain::SameExtension(block, *pindex) && !ActiveChain().Contains(*pindex)) {
+                const sidechain::OtherExtension other{sidechain::Hooks().CheckOtherExtension(block, *pindex)};
+                if (other == sidechain::OtherExtension::REPLACE || (other == sidechain::OtherExtension::UNKNOWN && UncheckedExtensionFailed(*pindex))) {
+                    ActiveChainstate().ReplaceBlockExtension(pindex, block.ext);
+                }
             }
+            // An unchecked header: the peer that sends it holds it too.
+            if (pindex->m_unchecked) HoldUnchecked(*pindex, source);
             if (pindex->nStatus & BLOCK_FAILED_VALID) {
                 LogDebug(BCLog::VALIDATION, "%s: block %s is marked invalid\n", __func__, hash.ToString());
-                // Against the record, which the peer's may be ahead of: no fault of the peer's (with the hook).
-                if (sidechain::Hooks().PardonRecordFailures() && FailedAgainstRecord(*this, pindex)) {
-                    return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "record-failed", strprintf("block %s failed against the record of the mainchain", hash.ToString()));
+                // Against the record, which the peer's may be ahead of, or the copy's fault: no fault of the peer's.
+                if (const char* pardoned{PardonedFailure(*this, pindex)}) {
+                    return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, pardoned, strprintf("block %s failed through no fault of the peer's", hash.ToString()));
                 }
                 return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate-invalid",
                                      strprintf("block %s was previously marked invalid", hash.ToString()));
@@ -4914,21 +5133,28 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         pindexPrev = &((*mi).second);
         if (pindexPrev->nStatus & BLOCK_FAILED_VALID) {
             LogDebug(BCLog::VALIDATION, "header %s has prev block invalid: %s\n", hash.ToString(), block.hashPrevBlock.ToString());
-            if (sidechain::Hooks().PardonRecordFailures() && FailedAgainstRecord(*this, pindexPrev)) {
-                return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "record-failed", strprintf("block %s failed against the record of the mainchain", block.hashPrevBlock.ToString()));
+            if (const char* pardoned{PardonedFailure(*this, pindexPrev)}) {
+                return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, pardoned, strprintf("block %s failed through no fault of the peer's", block.hashPrevBlock.ToString()));
             }
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
         }
+        unchecked = pindexPrev->m_unchecked || !sidechain::Hooks().HeaderCheckable(block, *pindexPrev);
         if (!ContextualCheckBlockHeader(block, state, *this, pindexPrev)) {
             LogDebug(BCLog::VALIDATION, "%s: Consensus::ContextualCheckBlockHeader: %s, %s\n", __func__, hash.ToString(), state.ToString());
             return false;
+        }
+        if (unchecked && min_pow_checked && !AdmitUnchecked(*pindexPrev, source)) {
+            LogDebug(BCLog::VALIDATION, "%s: unchecked header %s from peer=%d over the budget (unchecked-budget)\n", __func__, hash.ToString(), source);
+            return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "unchecked-budget", "the peer, or the node, holds as many headers it cannot check yet as it may");
         }
     }
     if (!min_pow_checked) {
         LogDebug(BCLog::VALIDATION, "%s: not adding new block header %s, missing anti-dos proof-of-work validation\n", __func__, hash.ToString());
         return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "too-little-chainwork");
     }
+    // (AdmitUnchecked may have made room: the parent is not among what went.)
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
+    if (unchecked) HoldUnchecked(*pindex, source);
 
     if (ppindex)
         *ppindex = pindex;
@@ -4942,14 +5168,9 @@ bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> hea
     AssertLockNotHeld(cs_main);
     {
         LOCK(cs_main);
-        // A sidechain may count the headers each peer sends.
-        sidechain::Hooks().BeginHeaders(headers, source);
-        struct EndHeaders {
-            ~EndHeaders() { sidechain::Hooks().EndHeaders(); }
-        } end_headers;
         for (const CBlockHeader& header : headers) {
             CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
-            bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked)};
+            bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked, source)};
             CheckBlockIndex();
 
             if (!accepted) {
@@ -5008,7 +5229,7 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     CBlockIndex *pindexDummy = nullptr;
     CBlockIndex *&pindex = ppindex ? *ppindex : pindexDummy;
 
-    bool accepted_header{AcceptBlockHeader(block, state, &pindex, min_pow_checked)};
+    bool accepted_header{AcceptBlockHeader(block, state, &pindex, min_pow_checked, source)};
     CheckBlockIndex();
 
     if (!accepted_header)
@@ -5018,22 +5239,17 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // a block for a header the node has must carry the extension that header came with, the one its
     // rules checked. Another one is a mutated block, never a reason to take the header for invalid --
     // unless the sidechain's rules find it as valid (another signature of the same block): the block
-    // is then the same, taken with the extension the node has. One the rules cannot tell yet is the
-    // same block too, but for the extension, which is tried when the block is connected: refusing
-    // the block would stall a branch that needs it to be connected, and so to tell.
+    // is then the same, taken with the extension the node has. One the rules cannot tell yet (the
+    // header was taken unchecked) is the same block too, taken with the header's extension, which is
+    // checked when the block is connected: refusing the block would stall a branch that needs it to
+    // be connected, and so to tell. (A valid one where the node's is not, or any other where the
+    // node's failed, replaced the node's already: AcceptBlockHeader.)
     if (!sidechain::SameExtension(block, *pindex)) {
         switch (sidechain::Hooks().CheckOtherExtension(block, *pindex)) {
-        case sidechain::OtherExtension::EQUIVALENT: {
-            LogDebug(BCLog::VALIDATION, "%s: block %s carries another valid extension than its header's: taken with its header's\n", __func__, pindex->GetBlockHash().ToString());
-            auto same{std::make_shared<CBlock>(block)};
-            same->ext = *Assert(pindex->m_ext);
-            return AcceptBlock(same, state, ppindex, fRequested, dbp, fNewBlock, min_pow_checked, source);
-        }
+        case sidechain::OtherExtension::EQUIVALENT:
         case sidechain::OtherExtension::UNKNOWN:
-        case sidechain::OtherExtension::REPLACE: { // (REPLACE: taken by AcceptBlockHeader already, not reached)
-            LogDebug(BCLog::VALIDATION, "%s: block %s carries another extension than its header's, which cannot be checked yet: taken with its header's, the other one tried when it is connected\n", __func__, pindex->GetBlockHash().ToString());
-            // (Not for a block of the active chain: its extension was checked when it was connected.)
-            if (!ActiveChain().Contains(*pindex)) AddOtherExtension(*pindex, block.ext, source);
+        case sidechain::OtherExtension::REPLACE: {
+            LogDebug(BCLog::VALIDATION, "%s: block %s carries another extension than its header's, as valid or that cannot be checked yet: taken with its header's\n", __func__, pindex->GetBlockHash().ToString());
             auto same{std::make_shared<CBlock>(block)};
             same->ext = *Assert(pindex->m_ext);
             return AcceptBlock(same, state, ppindex, fRequested, dbp, fNewBlock, min_pow_checked, source);
@@ -5175,12 +5391,7 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         // not very expensive, the anti-DoS benefits of caching failure (of a definitely-invalid block) are not substantial.
         bool ret = CheckBlock(*block, state, GetConsensus());
         if (ret) {
-            // Store to disk (the block's header, if new, is one the source sent: ChainHooks::BeginHeaders)
-            const CBlockHeader& header{*block};
-            sidechain::Hooks().BeginHeaders(std::span{&header, 1}, source);
-            struct EndHeaders {
-                ~EndHeaders() { sidechain::Hooks().EndHeaders(); }
-            } end_headers;
+            // Store to disk (the block's header, if it is an unchecked one, is held by the source)
             ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, new_block, min_pow_checked, source);
         }
         if (!ret) {
@@ -6521,6 +6732,8 @@ void ChainstateManager::CheckBlockIndex() const
         assert(m_blockman.m_block_index.size() <= 1);
         return;
     }
+
+    CheckUnchecked();
 
     // Build forward-pointing data structure for the entire block tree.
     // For performance reasons, indexes of the best header chain are stored in a vector (within CChain).

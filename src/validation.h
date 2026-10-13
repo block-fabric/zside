@@ -47,6 +47,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -54,6 +55,7 @@
 #include <span>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -999,7 +1001,9 @@ public:
     /**
      * On a sidechain with extended blocks: the extension of a header the node has is replaced by
      * another, valid one, the one it had being invalid (ChainHooks::CheckOtherExtension, REPLACE: a
-     * signature forged before the node could check it). The block stored with the old one, if any,
+     * signature forged before the node could check it), or by any other one if the block failed with
+     * it (an unchecked header's extension failure, ChainHooks::ExtensionFailure: the one it had is
+     * known bad, this one is tried when the block is connected). The block stored with the old one, if any,
      * is written again with the new one; a failure of the block (it failed with the old one), and of
      * those built on it, is taken back -- but under a block that failed itself, or one the operator
      * marked invalid.
@@ -1167,12 +1171,15 @@ private:
      * Caller must set min_pow_checked=true in order to add a new header to the
      * block index (permanent memory storage), indicating that the header is
      * known to be part of a sufficiently high-work chain (anti-dos check).
+     * `source`: the peer it comes from (-1: none), which holds it if it is unchecked
+     * (sidechain::ChainHooks::HeaderCheckable, m_unchecked).
      */
     bool AcceptBlockHeader(
         const CBlockHeader& block,
         BlockValidationState& state,
         CBlockIndex** ppindex,
-        bool min_pow_checked) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        bool min_pow_checked,
+        int64_t source = -1) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     friend Chainstate;
 
     /** Most recent headers presync progress update, for rate-limiting. */
@@ -1234,27 +1241,75 @@ public:
      */
     std::vector<std::pair<const CBlockIndex*, int64_t>> RetryBmmWaiting() LOCKS_EXCLUDED(::cs_main);
     /**
-     * Other extensions than their header's that blocks came with, which the node could not check when
-     * they came (ChainHooks::CheckOtherExtension, UNKNOWN: a sidechain that cannot tell a signer
-     * before it connects the chain below), by block and by source (the peer; -1 for none). The block
-     * is stored with its header's extension -- the block hash covers all but the extension: it is the
-     * same block -- and each of these is tried when the block is connected, where the node can tell
-     * (TakeOtherExtensions): a valid one replaces an invalid one the header had. So a block the node
-     * cannot check yet is never turned away, which would stall the download of a branch whose chain
-     * below cannot be connected without it. One per source and block (the newest), so that a peer's
-     * forged ones crowd out only its own; bounded.
+     * Unchecked headers (sidechain::ChainHooks::HeaderCheckable): a sidechain's headers the node took
+     * without all their rules checked (a signature whose signer it cannot tell before it connects the
+     * chain below), and every header on top of one, whose blocks are not connected yet (connected, a
+     * header is checked: Chainstate::ConnectTip lets it go). Each belongs to its *holders*: the peers
+     * that sent it, or a header on top of it (so the holders of a header include those of the headers
+     * on it), and -1, the node itself (its own blocks, its disk, its operator), which never goes. The
+     * accounting is by header: a peer holds at most UncheckedLimits().per_peer of them, the node at
+     * most UncheckedLimits().total (but its own). They are never written to disk, and leave the block
+     * index, with their blocks, as soon as no peer holds them: when a peer is gone
+     * (UncheckedSourceGone), or gives up its newest to make room for another peer's when the node holds
+     * as many as it may (the peer that alone holds the most, if it alone holds more than the other).
+     * So reconnecting, or many peers, never grow them past the bound, and no peer can make the node
+     * drop what another holds. See doc/sidechain.md, "Headers the node cannot check yet".
      */
-    std::map<uint256, std::map<int64_t, BlockHeaderExtension>> m_other_extensions GUARDED_BY(::cs_main);
-    std::deque<uint256> m_other_extensions_order GUARDED_BY(::cs_main);
-    static constexpr size_t MAX_OTHER_EXTENSION_BLOCKS{1000};
-    static constexpr size_t MAX_OTHER_EXTENSION_SOURCES{128};
-    void AddOtherExtension(const CBlockIndex& index, const BlockHeaderExtension& ext, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    struct UncheckedHeader {
+        //! The peers that hold it (-1: the node itself).
+        std::vector<int64_t> holders;
+        //! Its block failed for its extension alone (ChainHooks::ExtensionFailure): the copy's fault.
+        bool extension_failed{false};
+    };
+    std::unordered_map<const CBlockIndex*, UncheckedHeader> m_unchecked GUARDED_BY(::cs_main);
+    //! By holder, the unchecked headers it holds, and those it alone holds, by height.
+    std::map<int64_t, std::set<std::pair<int, const CBlockIndex*>>> m_unchecked_held GUARDED_BY(::cs_main);
+    std::map<int64_t, std::set<std::pair<int, const CBlockIndex*>>> m_unchecked_sole GUARDED_BY(::cs_main);
+    //! The peers connected now, that may hold unchecked headers (UncheckedSourceAdded).
+    std::set<int64_t> m_unchecked_sources GUARDED_BY(::cs_main);
     /**
-     * The other extensions noted for a block about to be connected (its parent is the tip): one the
-     * sidechain's rules find valid where the header's is not replaces it (Chainstate::
-     * ReplaceBlockExtension). The entry is dropped. @return whether the extension was replaced
+     * Entries taken out of the block index (EraseUnchecked), kept a while before they are freed: code
+     * that read a pointer to one before, and uses it without cs_main, reads a dead entry rather than
+     * freed memory. Bounded.
      */
-    bool TakeOtherExtensions(CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::deque<node::BlockMap::node_type> m_erased_headers GUARDED_BY(::cs_main);
+    static constexpr size_t MAX_ERASED_HEADERS{4096};
+    /**
+     * Told of the unchecked headers taken out of the block index, each with the nearest block below it
+     * that stays: whoever keeps pointers into the block index (PeerManager) moves them there. Called with
+     * cs_main held.
+     */
+    std::function<void(const std::vector<std::pair<const CBlockIndex*, const CBlockIndex*>>&)> m_on_unchecked_erased;
+    //! How many times an extension replaced another one that had failed or was invalid (ReplaceBlockExtension).
+    std::atomic<uint64_t> m_extensions_replaced{0};
+
+    /** A peer connected: it may hold unchecked headers. */
+    void UncheckedSourceAdded(int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** A peer is gone: the unchecked headers no one else holds leave the block index. */
+    void UncheckedSourceGone(int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Whether `source` may hold an unchecked header on `prev` (and the unchecked headers below it): within
+     * its budget, and the node's, which it makes room in if need be. -1 always may.
+     */
+    bool AdmitUnchecked(const CBlockIndex& prev, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** `source` holds `index`, an unchecked header (new or known), and those below it, if its budget allows. */
+    void HoldUnchecked(CBlockIndex& index, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** `index`'s block is connected: a checked header, written to disk from now on. */
+    void ReleaseUnchecked(CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether `index` is an unchecked header whose block failed for its extension alone. */
+    bool UncheckedExtensionFailed(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether `source` holds the unchecked header `index`. */
+    bool HoldsUnchecked(const CBlockIndex& index, int64_t source) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** How many unchecked headers `source` holds (-1: the node's own). */
+    size_t UncheckedHeld(int64_t source) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Checks that the unchecked headers are as described above (-checkblockindex). */
+    void CheckUnchecked() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+private:
+    void AddUncheckedHolder(const CBlockIndex& index, UncheckedHeader& entry, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void RemoveUncheckedHolder(const CBlockIndex& index, UncheckedHeader& entry, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Take unchecked headers out of the block index: `doomed` holds every header on top of each. */
+    void EraseUnchecked(std::vector<const CBlockIndex*> doomed) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+public:
     /** What the sidechain rules need to check a block; empty if this chain is not a sidechain. */
     std::optional<drivechain::SideContext> SideContext(CAmount& minted, sidechain::StoreOverlay& store) const;
 

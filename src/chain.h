@@ -154,6 +154,11 @@ public:
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
 
+    //! (memory only) A sidechain's header taken without all its rules checked, or on top of one, whose
+    //! block is not connected yet (ChainstateManager::m_unchecked): never written to disk, and gone from
+    //! the block index once no peer holds it. See sidechain::ChainHooks::HeaderCheckable.
+    bool m_unchecked GUARDED_BY(::cs_main){false};
+
     explicit CBlockIndex(const CBlockHeader& block)
         : nVersion{block.nVersion},
           hashMerkleRoot{block.hashMerkleRoot},

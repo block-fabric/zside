@@ -237,8 +237,8 @@ checks.
 | `BlockExtensions` | once, at `SetHooks`: switches extended blocks on (`BLOCK_EXTENSION_BIT` in `nVersion`: a 32-byte `hashSections` and a 64-byte signature after the 80-byte header, and `vSections` after the transactions, in blocks, the block index, `headers` and compact blocks). The block hash does not cover the signature: a block for a header the node has must carry that header's extension, or it is a mutated block (`bad-blk-extension`; the header stays valid), and a compact block with another one is not reconstructed | off: the bit means nothing |
 | `Kind`, `CheckHeader` | `ContextualCheckBlockHeader`: a `PLUGIN` block has no proof of work and no BMM rule; the sidechain checks its header | every block is `BMM` |
 | `CheckBlock`, `SectionsHash` | `CheckBlock`; sections other than those the header commits to make the block mutated (`bad-sections-hash`) | no rules; tagged hash `sidechain/sections` |
-| `CheckOtherExtension`, `OtherExtensionMayFix` | `AcceptBlockHeader`, `AcceptBlock`, `ProcessNewBlock`, compact blocks: a header or block for an extended header the node has, with another extension. `EQUIVALENT` (another valid signature of the same block): taken with the extension the node has, which it keeps, and the peer is not punished; `REPLACE` (valid, and the one the node has is not: taken before it could be checked): replaces it (`Chainstate::ReplaceBlockExtension`; the stored block is written again with it, and a failure of the block with the old one taken back); `UNKNOWN`: the block is taken with its header's extension, and the other one kept (`ChainstateManager::m_other_extensions`, one per peer and block, bounded) and tried when the block is connected, where a `REPLACE` one replaces the header's. A block that failed for a reason `OtherExtensionMayFix` names is asked for again, once, from each peer that has it | `INVALID`: a mutated block (`bad-blk-extension`); nothing asked for again |
-| `BeginHeaders`, `EndHeaders`, `SourceGone` | around the headers of each message (`ProcessNewBlockHeaders`; `ProcessNewBlock` for a block's), with the peer they come from (-1 for none); when a peer is gone | nothing |
+| `HeaderCheckable`, `UncheckedLimits` | `AcceptBlockHeader`: a header the node cannot check all of yet (a signature whose signer it knows only once it connected the chain below), and every header on top of one, is taken *unchecked*: held by the peers that send it, within their budget and the node's (`unchecked-budget`, not punished), never written to disk, and gone from the block index when no peer holds it; checked when its block is connected. See "Headers the node cannot check yet" | every header can be checked; budget 2000 a peer, 10000 in all |
+| `CheckOtherExtension`, `ExtensionFailure` | `AcceptBlockHeader`, `AcceptBlock`, `ProcessNewBlock`, compact blocks: a header or block for an extended header the node has, with another extension. `EQUIVALENT` (another valid signature of the same block): taken with the extension the node has, which it keeps, and the peer is not punished; `REPLACE` (valid, and the one the node has is not: taken unchecked): replaces it (`Chainstate::ReplaceBlockExtension`; the stored block is written again with it, and a failure of the block with the old one taken back); `UNKNOWN`: the block is the same block, taken with its header's extension. A block whose extension fails when it is connected (`ExtensionFailure`), its header unchecked: the copy's fault (see below) | `INVALID`: a mutated block (`bad-blk-extension`); no extension failures |
 | `MaxFutureBlockTime` | `ContextualCheckBlockHeader`: how far ahead of the node's clock a block's time may be (`time-too-new`, a header that may come later) | two hours, as Bitcoin |
 | `CustomChainOrder`, `ChainWork` | `nChainWork` when a header is added or the index loaded, and for a block and all above it when the record takes back its failure (`ReconsiderRecordFailure`: a key that reads the record may have changed); with a chain order of its own, headers presync (a minimum of work) is skipped, and so is the anti-DoS work threshold near the tip (a compact block whose parent has a lower key is not low-work) | most work |
 | `PardonRecordFailures` | `AcceptBlockHeader`: a header of a block that failed against the record of the mainchain (`Mainchain::Failure::RECORD`, the block or the failed block it descends from), or on one, is `BLOCK_TIME_FUTURE` (`record-failed`) rather than `BLOCK_CACHED_INVALID`/`BLOCK_INVALID_PREV`: the peer is not punished, its record may be ahead; and a block that fails against the record when connected is `BLOCK_TIME_FUTURE` rather than `BLOCK_CONSENSUS`. `RecordIndependent` names the reasons of the sidechain's own rules that fail a block whatever the record says (not failures against the record) | on (off: punished as in Bitcoin); no reasons of its own |
@@ -255,6 +255,52 @@ checks.
 `Follower::RequestCommitment` also takes any hash to commit to, and
 `Mainchain` has `HashAt(height)` and `TimeHeight(time)` (the highest block
 with a median time at or below `time`).
+
+## Headers the node cannot check yet
+
+A sidechain whose headers carry a signature by a signer the node knows only from
+the chain below (a validator set made by an anchor, say) cannot check a header
+before it has connected that chain: a node that catches up, or that sees a
+branch it never connected. It cannot refuse such a header either (it would never
+catch up, nor leave a branch for one with more work). The hooks say which headers
+these are (`HeaderCheckable`); the template does the rest, the same for every
+chain that has them, and nothing for one that does not:
+
+- **They belong to the peers that send them** (`ChainstateManager::m_unchecked`).
+  A header taken unchecked, and every header on top of one, is *unchecked* until
+  its block is connected. Each has *holders*: the peers that sent it, in a headers
+  message, a compact block or a block, or sent a header on top of it. The node
+  (its own blocks, its disk, its operator) is a holder that never goes.
+- **Bounded, by header.** A peer holds at most `UncheckedLimits().per_peer`, the
+  node at most `UncheckedLimits().total` (but its own). Beyond the first, a header
+  is refused (`unchecked-budget`, `BLOCK_HEADER_LOW_WORK`: not punished, and the
+  peer is asked for its headers again once the tip moved). Beyond the second, the
+  peer that alone holds the most headers gives up its newest, if it alone holds
+  more than the sender; else the header is refused the same way.
+- **Volatile.** Unchecked headers are not written to disk, and leave the block
+  index, with their blocks, when no peer holds them (the last holder disconnected
+  or gave them up): a reconnection or a new address never leaves headers behind.
+  The entries go to a bounded list before they are freed, and the peers' pointers
+  into them (best known block, blocks in flight) move to the nearest block that
+  stays (`PeerManagerImpl::UncheckedErased`).
+- **One extension a header.** The first that came, until another valid one
+  replaces it (`REPLACE`); a block with another one the node cannot check is the
+  same block, stored with its header's. No other extension is kept.
+- **A failed extension is the copy's fault.** A block whose header was unchecked
+  and that fails for its extension alone when connected (`ExtensionFailure`) is
+  marked failed in memory only, no fault of the peers (`BLOCK_TIME_FUTURE`, and
+  `extension-failed` for the headers on it), and taken back by any other
+  extension (`REPLACE`, or any other one if the node still cannot check it). The
+  node asks the peers that hold the block's header, or whose best chain has it,
+  for the headers from its parent (one pending `getheaders` a peer): an honest
+  peer's copy of the extension replaces the failed one. A failed block is never
+  asked for again.
+
+Nothing in it is a rule of a block: it decides only whether and when the node
+holds a header, and which copy of an extension it tries first. Tests:
+`sidechain_hooks_tests.cpp` (`unchecked_*`, `block_extension_unknown_taken`,
+`extension_failure_not_the_peers_fault`) and the fuzz target
+`sidechain_unchecked`.
 
 ## Limits to know
 
