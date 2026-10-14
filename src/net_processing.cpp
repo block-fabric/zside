@@ -1729,8 +1729,8 @@ void PeerManagerImpl::InitializeNode(const CNode& node, ServiceFlags our_service
     {
         LOCK(cs_main); // For m_node_states
         m_node_states.try_emplace(m_node_states.end(), nodeid);
-        // It may hold a sidechain's unchecked headers.
-        m_chainman.UncheckedSourceAdded(nodeid);
+        // It may hold a sidechain's unchecked headers (an inbound peer: fewer, and only a few such peers).
+        m_chainman.UncheckedSourceAdded(nodeid, node.IsInboundConn());
     }
     WITH_LOCK(m_tx_download_mutex, m_txdownloadman.CheckIsEmpty(nodeid));
 

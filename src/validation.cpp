@@ -4260,10 +4260,12 @@ bool Chainstate::ReconsiderRecordFailure(CBlockIndex* pindex)
     return true;
 }
 
-void ChainstateManager::UncheckedSourceAdded(int64_t source)
+void ChainstateManager::UncheckedSourceAdded(int64_t source, bool inbound)
 {
     AssertLockHeld(cs_main);
-    if (source >= 0) m_unchecked_sources.insert(source);
+    if (source < 0) return;
+    m_unchecked_sources.insert(source);
+    if (inbound) m_unchecked_inbound.insert(source);
 }
 
 void ChainstateManager::AddUncheckedHolder(const CBlockIndex& index, UncheckedHeader& entry, int64_t source)
@@ -4312,6 +4314,14 @@ size_t ChainstateManager::UncheckedBytes(int64_t source) const
     return bytes == m_unchecked_bytes.end() ? 0 : bytes->second;
 }
 
+size_t ChainstateManager::UncheckedInboundHolders() const
+{
+    AssertLockHeld(cs_main);
+    size_t holders{0};
+    for (const int64_t source : m_unchecked_inbound) holders += m_unchecked_held.contains(source);
+    return holders;
+}
+
 bool ChainstateManager::UncheckedExtensionFailed(const CBlockIndex& index) const
 {
     AssertLockHeld(cs_main);
@@ -4319,11 +4329,19 @@ bool ChainstateManager::UncheckedExtensionFailed(const CBlockIndex& index) const
     return found != m_unchecked.end() && found->second.extension_failed;
 }
 
-/** Whether `source` may hold `count` more unchecked headers, whose stored blocks weigh `bytes`. */
+/**
+ * Whether `source` may hold `count` more unchecked headers, whose stored blocks weigh `bytes`: within its
+ * own budget (an inbound peer's is smaller), and, for an inbound peer that holds none yet, if fewer than
+ * inbound_holders inbound peers hold any. Nothing anyone else holds is dropped to make room.
+ */
 static bool FitsUncheckedBudget(const ChainstateManager& chainman, int64_t source, size_t count, size_t bytes) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     const auto limits{sidechain::Hooks().UncheckedLimits()};
-    return chainman.UncheckedHeld(source) + count <= limits.per_peer && chainman.UncheckedBytes(source) + bytes <= limits.block_bytes_per_peer;
+    const bool inbound{chainman.m_unchecked_inbound.contains(source)};
+    const size_t held{chainman.UncheckedHeld(source)};
+    if (inbound && count > 0 && held == 0 && chainman.UncheckedInboundHolders() >= limits.inbound_holders) return false;
+    return held + count <= (inbound ? limits.per_inbound_peer : limits.per_peer) &&
+           chainman.UncheckedBytes(source) + bytes <= (inbound ? limits.block_bytes_per_inbound_peer : limits.block_bytes_per_peer);
 }
 
 bool ChainstateManager::AdmitUnchecked(const CBlockIndex& prev, int64_t source)
@@ -4446,6 +4464,7 @@ void ChainstateManager::UncheckedSourceGone(int64_t source)
 {
     AssertLockHeld(cs_main);
     m_unchecked_sources.erase(source);
+    m_unchecked_inbound.erase(source);
     const auto held{m_unchecked_held.find(source)};
     if (held == m_unchecked_held.end()) return;
     std::vector<const CBlockIndex*> doomed;
@@ -4549,6 +4568,9 @@ void ChainstateManager::CheckUnchecked() const
     for (const auto& [_, set] : m_unchecked_held) held += set.size();
     assert(pairs == held);
     assert(bytes == m_unchecked_bytes);
+    // Inbound peers are connected peers; every holder but the node is one.
+    for (const int64_t source : m_unchecked_inbound) assert(m_unchecked_sources.contains(source));
+    for (const auto& [holder, _] : m_unchecked_held) assert(holder < 0 || m_unchecked_sources.contains(holder));
 }
 
 void Chainstate::ReplaceBlockExtension(CBlockIndex* pindex, const BlockHeaderExtension& ext)

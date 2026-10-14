@@ -127,12 +127,25 @@ public:
      */
     virtual bool HeaderCheckable(const CBlockHeader& header, const CBlockIndex& prev) const { return true; }
     struct UncheckedBudget {
-        //! The unchecked headers a peer may hold.
+        //! The unchecked headers an outbound (or manual) peer may hold.
         size_t per_peer{2000};
-        //! The bytes of the stored blocks of the unchecked headers a peer holds.
+        //! The bytes of the stored blocks of the unchecked headers an outbound peer holds.
         size_t block_bytes_per_peer{size_t{32} << 20};
+        //! An inbound peer's: much smaller (the honest peer a node syncs from is usually one it chose,
+        //! and anyone can open inbound connections). The bytes: enough for a block of the largest size.
+        size_t per_inbound_peer{500};
+        size_t block_bytes_per_inbound_peer{size_t{8} << 20};
+        //! How many inbound peers may hold unchecked headers at once: a further one is refused
+        //! (unchecked-budget, not punished) until one of them holds none; none is dropped for it.
+        size_t inbound_holders{8};
     };
-    /** The budget of unchecked headers (HeaderCheckable). Not consensus. */
+    /**
+     * The budget of unchecked headers (HeaderCheckable). Not consensus. Worst case, node-wide: the
+     * outbound peers' budgets (19 such peers at most: 11 automatic ones, full relay, block relay,
+     * feelers, address fetches and the extra ones all sharing CConnman::semOutbound, and 8 manual
+     * ones, semAddnode) and inbound_holders inbound peers' (see doc/sidechain.md, "Headers the node
+     * cannot check yet").
+     */
     virtual UncheckedBudget UncheckedLimits() const { return {}; }
     /** Context free checks of a whole block, after Bitcoin's (CheckBlock). */
     virtual bool CheckBlock(const CBlock& block, BlockValidationState& state) const;

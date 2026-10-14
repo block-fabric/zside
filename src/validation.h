@@ -1248,10 +1248,12 @@ public:
      * that sent it, or a header on top of it (so the holders of a header include those of the headers
      * on it), and -1, the node itself (its own blocks, its disk, its operator), which never goes. The
      * accounting is by holder: a peer holds at most UncheckedLimits().per_peer of them, and the blocks
-     * of those it holds that the node stored weigh at most UncheckedLimits().block_bytes_per_peer.
+     * of those it holds that the node stored weigh at most UncheckedLimits().block_bytes_per_peer
+     * (an inbound peer: per_inbound_peer and block_bytes_per_inbound_peer, and at most
+     * inbound_holders inbound peers hold any at once).
      * Every connected peer has that whole budget, whatever the others hold: no peer's headers are
-     * dropped for another's, and the node's memory is bounded by the budget of each peer it is
-     * connected to. Their blocks are stored apart from the block files, in files of their own
+     * dropped for another's, and the node's memory is bounded by the budget of each outbound peer it
+     * is connected to and of inbound_holders inbound ones. Their blocks are stored apart from the block files, in files of their own
      * (node::BlockManager::WriteVolatileBlock), moved to the block files only once they are connected.
      * The headers are never written to the block index database, and leave the block index, their
      * blocks deleted, as soon as no peer holds them (UncheckedSourceGone). So reconnecting, or many peers, never grow memory nor
@@ -1271,6 +1273,8 @@ public:
     std::map<int64_t, size_t> m_unchecked_bytes GUARDED_BY(::cs_main);
     //! The peers connected now, that may hold unchecked headers (UncheckedSourceAdded).
     std::set<int64_t> m_unchecked_sources GUARDED_BY(::cs_main);
+    //! Those of them that are inbound: the inbound budget, and at most UncheckedLimits().inbound_holders hold any.
+    std::set<int64_t> m_unchecked_inbound GUARDED_BY(::cs_main);
     /**
      * Entries taken out of the block index (EraseUnchecked), kept a while before they are freed: code
      * that read a pointer to one before, and uses it without cs_main, reads a dead entry rather than
@@ -1289,8 +1293,12 @@ public:
     //! How many times an extension replaced another one that had failed or was invalid (ReplaceBlockExtension).
     std::atomic<uint64_t> m_extensions_replaced{0};
 
-    /** A peer connected: it may hold unchecked headers. */
-    void UncheckedSourceAdded(int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * A peer connected: it may hold unchecked headers. An inbound peer has the inbound budget
+     * (UncheckedLimits().per_inbound_peer, block_bytes_per_inbound_peer), and holds any only while
+     * fewer than inbound_holders other inbound peers do; an outbound or manual one, the whole budget.
+     */
+    void UncheckedSourceAdded(int64_t source, bool inbound = false) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** A peer is gone: the unchecked headers no one else holds leave the block index. */
     void UncheckedSourceGone(int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
@@ -1315,6 +1323,8 @@ public:
     size_t UncheckedHeld(int64_t source) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** The bytes of the stored blocks of the unchecked headers `source` holds. */
     size_t UncheckedBytes(int64_t source) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** How many inbound peers hold unchecked headers now. */
+    size_t UncheckedInboundHolders() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * Whether to store the block (of `bytes`) of the unchecked header `index`, sent by `source`: it holds
      * the header and the block fits its budget (-1 always). If so, the block is charged to the holders

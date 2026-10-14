@@ -21,6 +21,7 @@
 #include <util/time.h>
 #include <validation.h>
 
+#include <algorithm>
 #include <cassert>
 #include <map>
 #include <memory>
@@ -54,7 +55,11 @@ FUZZ_TARGET(sidechain_unchecked, .init = initialize_unchecked)
     SetMockTime(ConsumeTime(fdp, /*min=*/1700000000, /*max=*/1800000000));
     ChainstateManager& chainman{*g_setup->m_node.chainman};
     auto owned{std::make_unique<UncheckedHooks>()};
-    owned->limits = {.per_peer = fdp.ConsumeIntegralInRange<size_t>(1, 12)};
+    owned->limits.per_peer = fdp.ConsumeIntegralInRange<size_t>(1, 12);
+    // Peers 4 to 7 are inbound: a smaller budget, and at most inbound_holders of them hold any.
+    owned->limits.per_inbound_peer = fdp.ConsumeIntegralInRange<size_t>(1, owned->limits.per_peer);
+    owned->limits.inbound_holders = fdp.ConsumeIntegralInRange<size_t>(0, 3);
+    const auto inbound{[](int64_t peer) { return peer >= 4; }};
     const sidechain::ChainHooks::UncheckedBudget limits{owned->limits};
     sidechain::SetHooks(std::move(owned));
 
@@ -71,7 +76,7 @@ FUZZ_TARGET(sidechain_unchecked, .init = initialize_unchecked)
             fdp,
             [&] {
                 LOCK(::cs_main);
-                chainman.UncheckedSourceAdded(peer);
+                chainman.UncheckedSourceAdded(peer, inbound(peer));
                 live.insert(peer);
             },
             [&] {
@@ -141,11 +146,13 @@ FUZZ_TARGET(sidechain_unchecked, .init = initialize_unchecked)
 
         LOCK(::cs_main);
         chainman.CheckUnchecked();
-        // Bounded by the peers connected: each its own budget.
-        assert(chainman.m_unchecked.size() <= live.size() * limits.per_peer);
+        // Bounded by the peers connected: each its own budget, and inbound_holders inbound peers at most.
+        const size_t live_inbound{static_cast<size_t>(std::ranges::count_if(live, inbound))};
+        assert(chainman.UncheckedInboundHolders() <= limits.inbound_holders);
+        assert(chainman.m_unchecked.size() <= (live.size() - live_inbound) * limits.per_peer + std::min(live_inbound, limits.inbound_holders) * limits.per_inbound_peer);
         assert(chainman.m_blockman.m_block_index.size() == base + chainman.m_unchecked.size());
         for (int64_t source{0}; source < 8; ++source) {
-            assert(chainman.UncheckedHeld(source) <= limits.per_peer);
+            assert(chainman.UncheckedHeld(source) <= (inbound(source) ? limits.per_inbound_peer : limits.per_peer));
             if (!live.contains(source)) assert(chainman.UncheckedHeld(source) == 0);
         }
         assert(chainman.m_best_header && chainman.m_blockman.LookupBlockIndex(chainman.m_best_header->GetBlockHash()) == chainman.m_best_header);

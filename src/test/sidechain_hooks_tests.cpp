@@ -1337,6 +1337,77 @@ BOOST_FIXTURE_TEST_CASE(unchecked_no_peer_drops_another, SidechainSetup)
     chainman.CheckUnchecked();
 }
 
+BOOST_FIXTURE_TEST_CASE(unchecked_inbound_budget_and_holders, SidechainSetup)
+{
+    // Review of audit 6, item 10: without a node-wide total, the worst case was every connection's
+    // budget. Inbound peers (anyone can open those) have a much smaller budget than outbound and
+    // manual ones, and at most inbound_holders of them hold unchecked headers at once: a further one
+    // is refused (unchecked-budget, not punished), and nobody's headers are dropped for it. An honest
+    // outbound peer still has its whole budget while any number of inbound attackers are connected.
+    auto owned{std::make_unique<LateCheckedHooks>()};
+    LateCheckedHooks& hooks{*owned};
+    hooks.limits = {.per_peer = 12, .per_inbound_peer = 3, .inbound_holders = 4};
+    InstallHooks installed{std::move(owned)};
+    ChainstateManager& chainman{*m_node.chainman};
+    const CBlock model{Build()};
+    WITH_LOCK(::cs_main, chainman.UncheckedSourceAdded(1, /*inbound=*/false));
+    // Twenty inbound attackers, each with a chain of its own.
+    std::map<int64_t, std::vector<CBlockHeader>> attacks;
+    for (int64_t peer{100}; peer < 120; ++peer) {
+        WITH_LOCK(::cs_main, chainman.UncheckedSourceAdded(peer, /*inbound=*/true));
+        attacks[peer] = UncheckedChain(model, model.hashPrevBlock, 6, static_cast<uint8_t>(peer));
+        BlockValidationState state;
+        BOOST_CHECK(!chainman.ProcessNewBlockHeaders(attacks[peer], /*min_pow_checked=*/true, state, nullptr, peer));
+        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK);
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "unchecked-budget");
+        LOCK(::cs_main);
+        // The first four hold the inbound budget, the others nothing.
+        BOOST_CHECK_EQUAL(chainman.UncheckedHeld(peer), peer < 104 ? 3U : 0U);
+        BOOST_CHECK_EQUAL(chainman.UncheckedInboundHolders(), std::min<size_t>(peer - 99, 4));
+    }
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainman.m_unchecked.size()), 4U * 3);
+    // The honest outbound peer syncs a stretch of its whole budget.
+    const std::vector<CBlockHeader> honest{UncheckedChain(model, model.hashPrevBlock, 12, 0x01)};
+    {
+        BlockValidationState state;
+        BOOST_CHECK_MESSAGE(chainman.ProcessNewBlockHeaders(honest, /*min_pow_checked=*/true, state, nullptr, /*source=*/1), state.ToString());
+        BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainman.UncheckedHeld(1)), 12U);
+    }
+    // An inbound attacker over the cap that sends the honest peer's headers holds none of them, and
+    // drops nothing (they are the honest peer's).
+    {
+        BlockValidationState state;
+        (void)chainman.ProcessNewBlockHeaders(honest, /*min_pow_checked=*/true, state, nullptr, /*source=*/110);
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainman.UncheckedHeld(110), 0U);
+        BOOST_CHECK_EQUAL(chainman.UncheckedHeld(1), 12U);
+        for (const CBlockHeader& header : honest) BOOST_CHECK(chainman.m_blockman.LookupBlockIndex(header.GetHash()));
+        BOOST_CHECK_EQUAL(chainman.m_unchecked.size(), 4U * 3 + 12);
+        chainman.CheckUnchecked();
+    }
+    // An inbound holder leaves: another inbound peer may hold headers in its place.
+    {
+        LOCK(::cs_main);
+        chainman.UncheckedSourceGone(100);
+        BOOST_CHECK_EQUAL(chainman.UncheckedInboundHolders(), 3U);
+    }
+    {
+        BlockValidationState state;
+        BOOST_CHECK(chainman.ProcessNewBlockHeaders(std::vector<CBlockHeader>{attacks[115].begin(), attacks[115].begin() + 3}, /*min_pow_checked=*/true, state, nullptr, 115));
+        BOOST_CHECK(!chainman.ProcessNewBlockHeaders(attacks[116], /*min_pow_checked=*/true, state, nullptr, 116));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "unchecked-budget");
+    }
+    LOCK(::cs_main);
+    BOOST_CHECK_EQUAL(chainman.UncheckedHeld(115), 3U);
+    BOOST_CHECK_EQUAL(chainman.UncheckedInboundHolders(), 4U);
+    BOOST_CHECK_EQUAL(chainman.UncheckedHeld(1), 12U);
+    chainman.CheckUnchecked();
+    for (int64_t peer{101}; peer < 120; ++peer) chainman.UncheckedSourceGone(peer);
+    chainman.UncheckedSourceGone(1);
+    BOOST_CHECK(chainman.m_unchecked.empty());
+    BOOST_CHECK(chainman.m_unchecked_inbound.empty());
+}
+
 BOOST_FIXTURE_TEST_CASE(unchecked_blocks_stored_apart, SidechainSetup)
 {
     // The block of an unchecked header is stored apart from the block files, in a file of its own,
@@ -1396,6 +1467,19 @@ BOOST_FIXTURE_TEST_CASE(unchecked_blocks_stored_apart, SidechainSetup)
         LOCK(::cs_main);
         BOOST_CHECK(!(chainman.m_blockman.LookupBlockIndex(b.GetHash())->nStatus & BLOCK_HAVE_DATA));
         BOOST_CHECK_EQUAL(chainman.UncheckedBytes(20), size);
+    }
+    // An inbound peer's budget of bytes is the inbound one, smaller: its block is not stored.
+    hooks.limits = {.per_peer = 10, .block_bytes_per_peer = size + size / 2, .block_bytes_per_inbound_peer = size / 2};
+    WITH_LOCK(::cs_main, chainman.UncheckedSourceAdded(23, /*inbound=*/true));
+    const CBlock d{forged(GetTime() + 5)};
+    BOOST_CHECK(!send(d, 23));
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(d.GetHash())};
+        BOOST_REQUIRE(index && chainman.HoldsUnchecked(*index, 23));
+        BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+        BOOST_CHECK_EQUAL(chainman.UncheckedBytes(23), 0U);
+        chainman.UncheckedSourceGone(23);
     }
     // Charged to every holder: one it does not fit stops holding the header and those on it. Peer 21
     // holds c and a header on it, and a's block (it holds a too): full. Peer 22 sends c's block.
