@@ -318,7 +318,24 @@ chain that has them, and nothing for one that does not:
   4096 before it), and the peers' pointers into them (best known block, blocks in
   flight) move to the nearest block that stays
   (`PeerManagerImpl::UncheckedErased`); what is read without `cs_main` is read
-  with it held (the locator of the best header, the header tip notified).
+  with it held (the locator of the best header, the header tip notified,
+  `getblockheader`, `getblockfrompeer`). Code that keeps a pointer into the block
+  index across a release of `cs_main` does not rely on that list: each removal
+  counts (`m_unchecked_erasures`), and once it has the lock again it looks the
+  entry up again by hash if any removal happened meanwhile (`ActivateBestChain`
+  finds its most-work chain again; a headers message or a compact block looks up
+  the last header again, and keeps the lock while it stores pointers to it; the
+  headers taken in once the mainchain commits to them are returned by hash,
+  `RetryBmmWaiting`). (Review of audit 6: a holder that left while
+  `ActivateBestChain` connected toward its headers made the node read a deleted
+  block, a fatal error.)
+- **Waiting headers keep their sender** (`AddBmmWaiting`). A header that waits
+  (for the commitment to it, say) is kept with the peer that sent it, whichever
+  way it came (a headers message, a compact block, a block). One whose sender is
+  not known is tried again as `UNKNOWN_SOURCE`, never as the node's own: it holds
+  no unchecked header, so it is taken in only if the node can check it. (Review
+  of audit 6: blocks whose headers waited were taken as the node's, outside every
+  budget, and never left the block index.)
 - **Their blocks are stored apart.** The block of an unchecked header is stored
   in a file of its own (`blocks/unchecked/unc?????.dat`,
   `BlockManager::WriteVolatileBlock`), never in the block files, if its sender

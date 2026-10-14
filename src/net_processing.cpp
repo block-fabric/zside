@@ -3443,6 +3443,12 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     // Now process all the headers.
     BlockValidationState state;
     const uint64_t replaced_before{m_chainman.m_extensions_replaced.load()};
+    // pindexLast is used after ProcessNewBlockHeaders released cs_main: a sidechain's unchecked header
+    // this peer does not hold (over its budget) may leave the block index meanwhile, another holder
+    // disconnecting (ChainstateManager::EraseUnchecked). Then it is looked up again, and from there on
+    // cs_main is held, so that what is kept of it (the peer's best known block, a block in flight) is
+    // moved should it leave later (UncheckedErased).
+    const uint64_t erasures_before{m_chainman.m_unchecked_erasures.load()};
     const bool processed{m_chainman.ProcessNewBlockHeaders(headers,
                                                            /*min_pow_checked=*/true,
                                                            state, &pindexLast, pfrom.GetId())};
@@ -3452,6 +3458,21 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
         BlockValidationState activate_state;
         if (!m_chainman.ActiveChainstate().ActivateBestChain(activate_state)) {
             LogDebug(BCLog::NET, "failed to activate chain after an extension was replaced (%s)\n", activate_state.ToString());
+        }
+    }
+    LOCK(cs_main);
+    if (pindexLast && m_chainman.m_unchecked_erasures.load() != erasures_before) {
+        // (By hash: the entry it was may be gone. The headers taken, in order, are a prefix of these,
+        // and those on top of one that left left with it.)
+        pindexLast = nullptr;
+        for (const CBlockHeader& header : headers) {
+            const CBlockIndex* const index{m_chainman.m_blockman.LookupBlockIndex(header.GetHash())};
+            if (!index) break;
+            pindexLast = index;
+        }
+        if (!pindexLast && processed) {
+            LogDebug(BCLog::NET, "headers from peer=%d left the block index as they were taken in\n", pfrom.GetId());
+            return;
         }
     }
     if (!processed) {
@@ -3849,6 +3870,12 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
     } else {
         LOCK(cs_main);
         mapBlockSource.erase(block->GetHash());
+        // A sidechain's block whose header waits (for the commitment to it, say) is kept without a peer
+        // by validation: this one sent it. The header is taken in, once it can be, within this peer's
+        // budget (not as the node's own, ChainstateManager::UNKNOWN_SOURCE), and its block fetched from it.
+        if (const auto waiting{m_chainman.m_bmm_waiting.find(block->GetHash())}; waiting != m_chainman.m_bmm_waiting.end() && waiting->second.peer < 0) {
+            waiting->second.peer = node.GetId();
+        }
     }
 }
 
@@ -5012,6 +5039,13 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         // If AcceptBlockHeader returned true, it set pindex
         Assert(pindex);
+        // (A sidechain's unchecked header this peer does not hold may leave the block index whenever
+        // cs_main is released, another holder disconnecting: ChainstateManager::EraseUnchecked. So
+        // pindex is looked up again, by hash, each time the lock is taken again; gone, nothing is done.)
+        {
+        LOCK(cs_main);
+        pindex = m_chainman.m_blockman.LookupBlockIndex(blockhash);
+        if (!pindex) return;
         if (received_new_header) {
             LogBlockHeader(*pindex, pfrom, /*via_compact_block=*/true);
         }
@@ -5023,12 +5057,12 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         // rules find the other extension as valid: the same block, which the node takes with its own
         // (ProcessNewBlock).
         if (!sidechain::SameExtension(cmpctblock.header, *pindex) &&
-            WITH_LOCK(cs_main, return sidechain::Hooks().CheckOtherExtension(cmpctblock.header, *pindex)) != sidechain::OtherExtension::EQUIVALENT) {
+            sidechain::Hooks().CheckOtherExtension(cmpctblock.header, *pindex) != sidechain::OtherExtension::EQUIVALENT) {
             LogDebug(BCLog::CMPCTBLOCK, "%s sent us a compact block for %s without the extension of its header\n", pfrom.LogPeer(), blockhash.ToString());
-            LOCK(cs_main);
             RemoveBlockRequest(blockhash, pfrom.GetId());
             return;
         }
+        } // cs_main
 
         bool fProcessBLOCKTXN = false;
 
@@ -5043,6 +5077,8 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         {
         LOCK(cs_main);
+        pindex = m_chainman.m_blockman.LookupBlockIndex(blockhash);
+        if (!pindex) return;
         UpdateBlockAvailability(pfrom.GetId(), pindex->GetBlockHash());
 
         CNodeState *nodestate = State(pfrom.GetId());
@@ -5222,7 +5258,8 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             // reconstructed compact blocks as having been requested.
             ProcessBlock(pfrom, pblock, /*force_processing=*/true, /*min_pow_checked=*/true);
             LOCK(cs_main); // hold cs_main for CBlockIndex::IsValid()
-            if (pindex->IsValid(BLOCK_VALID_TRANSACTIONS)) {
+            pindex = m_chainman.m_blockman.LookupBlockIndex(blockhash);
+            if (pindex && pindex->IsValid(BLOCK_VALID_TRANSACTIONS)) {
                 // Clear download state for this block, which is in
                 // process from some other peer.  We do this after calling
                 // ProcessNewBlock so that a malleated cmpctblock announcement

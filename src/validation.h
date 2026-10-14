@@ -1220,7 +1220,7 @@ public:
     //! a block (sidechain::ChainHooks::WaitingReady).
     struct BmmWaiting {
         CBlockHeader header;
-        //! The peer that sent it, -1 if none.
+        //! The peer that sent it, -1 if not known (validation looked at it; the net layer tells who sent it).
         int64_t peer{-1};
         uint64_t sequence{0};
     };
@@ -1233,13 +1233,23 @@ public:
      */
     void AddBmmWaiting(const CBlockHeader& header, int64_t peer) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
+     * The source of a header whose sender is not known (a waiting header kept with peer -1, tried
+     * again): unlike -1, the node's own, it holds no unchecked header (m_unchecked), so it is taken in
+     * only if the node can check it. Who sent it may have been a peer, which must not get past its
+     * budget by having its header taken as the node's.
+     */
+    static constexpr int64_t UNKNOWN_SOURCE{-2};
+    /**
      * Try again the waiting headers the record now lets through (sidechain::ChainHooks::WaitingReady), in
      * the order the hooks give. A header stays waiting, with the peer that sent it, until it is taken in
      * or turned away for good: one still waiting for its reason, or whose parent is still to come (one
-     * the hooks put after it, or that waits too), is kept.
-     * @return the headers taken in, each with the peer that sent it (-1 if none), in the order taken
+     * the hooks put after it, or that waits too), is kept. A header without a peer is tried with
+     * UNKNOWN_SOURCE: never as the node's own.
+     * @return the hashes of the headers taken in, each with the peer that sent it (-1 if none), in the
+     * order taken. (Hashes, not block index entries: an unchecked one may leave the block index as soon
+     * as cs_main is released, EraseUnchecked. Look them up again with the lock held.)
      */
-    std::vector<std::pair<const CBlockIndex*, int64_t>> RetryBmmWaiting() LOCKS_EXCLUDED(::cs_main);
+    std::vector<std::pair<uint256, int64_t>> RetryBmmWaiting() LOCKS_EXCLUDED(::cs_main);
     /**
      * Unchecked headers (sidechain::ChainHooks::HeaderCheckable): a sidechain's headers the node took
      * without all their rules checked (a signature whose signer it cannot tell before it connects the
@@ -1284,6 +1294,13 @@ public:
      */
     std::deque<node::BlockMap::node_type> m_erased_headers GUARDED_BY(::cs_main);
     static constexpr size_t MAX_ERASED_HEADERS{4096};
+    /**
+     * How many times unchecked headers were taken out of the block index (EraseUnchecked; changed with
+     * cs_main held). Code that keeps a pointer into the block index across a release of cs_main (an
+     * entry it does not know to be checked) reads this before, and once it has the lock again, looks
+     * the entry up again if it changed, rather than rely on the entries kept a while (m_erased_headers).
+     */
+    std::atomic<uint64_t> m_unchecked_erasures{0};
     /**
      * Told of the unchecked headers taken out of the block index, each with the nearest block below it
      * that stays: whoever keeps pointers into the block index (PeerManager) moves them there. Called with

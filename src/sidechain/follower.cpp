@@ -462,13 +462,17 @@ void Follower::Act()
     // would otherwise wait for ever.
     // In the order of their commitments, which is that of the chain: each header follows the one before.
     // (In the order the hooks give, for headers of other kinds.)
-    for (const auto& [pindex, peer] : chainman.RetryBmmWaiting()) {
+    for (const auto& [hash, peer] : chainman.RetryBmmWaiting()) {
         if (peer < 0 || !m_node.peerman) continue;
         // The block, from the peer that announced it: a header with less work than what the peer
-        // announced before (blocks the record made invalid) would not be fetched otherwise.
-        if (!WITH_LOCK(::cs_main, return pindex->nStatus & BLOCK_HAVE_DATA)) {
+        // announced before (blocks the record made invalid) would not be fetched otherwise. (Looked up
+        // and fetched with cs_main held: an unchecked header may leave the block index as soon as it
+        // is released, ChainstateManager::EraseUnchecked.)
+        LOCK(::cs_main);
+        const CBlockIndex* const pindex{chainman.m_blockman.LookupBlockIndex(hash)};
+        if (pindex && !(pindex->nStatus & BLOCK_HAVE_DATA)) {
             if (const auto fetched{m_node.peerman->FetchBlock(peer, *pindex)}; !fetched) {
-                LogDebug(BCLog::NET, "Block %s, now committed to, not fetched from peer=%d: %s", pindex->GetBlockHash().ToString(), peer, fetched.error());
+                LogDebug(BCLog::NET, "Block %s, now committed to, not fetched from peer=%d: %s", hash.ToString(), peer, fetched.error());
             }
         }
     }

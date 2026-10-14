@@ -3821,6 +3821,10 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
     }
 
     CBlockIndex *pindexMostWork = nullptr;
+    // When pindexMostWork was found (ChainstateManager::m_unchecked_erasures): it is kept across releases
+    // of cs_main, and a sidechain's unchecked headers on the way to it may leave the block index meanwhile
+    // (their last holder disconnects: EraseUnchecked). Then it is found again.
+    uint64_t most_work_erasures{0};
     CBlockIndex *pindexNewTip = nullptr;
     bool exited_ibd{false};
     do {
@@ -3845,7 +3849,11 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 // (with the exception of shutdown due to hardware issues, low disk space, etc).
                 std::vector<ConnectedBlock> connected_blocks; // Destructed before cs_main is unlocked
 
+                if (pindexMostWork != nullptr && m_chainman.m_unchecked_erasures.load() != most_work_erasures) {
+                    pindexMostWork = nullptr;
+                }
                 if (pindexMostWork == nullptr) {
+                    most_work_erasures = m_chainman.m_unchecked_erasures.load();
                     pindexMostWork = FindMostWorkChain();
                 }
 
@@ -4348,8 +4356,9 @@ bool ChainstateManager::AdmitUnchecked(const CBlockIndex& prev, int64_t source)
 {
     AssertLockHeld(cs_main);
     // The node's own headers (its blocks, its disk, its operator): always.
-    if (source < 0) return true;
-    // A peer that is gone holds nothing (a waiting header tried again after its peer left).
+    if (source == -1) return true;
+    // A peer that is gone holds nothing (a waiting header tried again after its peer left), nor does
+    // a sender not known (UNKNOWN_SOURCE): it may have been a peer.
     if (!m_unchecked_sources.contains(source)) return false;
     // The header and the unchecked headers below it the peer does not hold yet, with their blocks.
     // Within the peer's own budget, whatever other peers hold: no peer makes room by dropping what
@@ -4371,8 +4380,8 @@ void ChainstateManager::HoldUnchecked(CBlockIndex& index, int64_t source)
         index.m_unchecked = true;
         m_unchecked.try_emplace(&index);
     }
-    if (source >= 0) {
-        // A peer that is gone holds nothing; a peer whose budget is spent holds no more.
+    if (source != -1) {
+        // A peer that is gone (or a sender not known) holds nothing; a peer whose budget is spent holds no more.
         size_t needed{0}, bytes{0};
         for (const CBlockIndex* below{&index}; below && below->m_unchecked && !HoldsUnchecked(*below, source); below = below->pprev) {
             ++needed;
@@ -4397,7 +4406,7 @@ bool ChainstateManager::AdmitUncheckedBlock(CBlockIndex& index, size_t bytes, in
     if (!Assume(index.m_unchecked)) return true;
     // Its sender holds the header (AcceptBlockHeader made it a holder, if its budget allowed) and has
     // room for the block. The node's own: always.
-    if (source >= 0 && (!HoldsUnchecked(index, source) || !FitsUncheckedBudget(*this, source, 0, bytes))) return false;
+    if (source != -1 && (!HoldsUnchecked(index, source) || !FitsUncheckedBudget(*this, source, 0, bytes))) return false;
     // Charged to every holder: one it does not fit stops holding the header and those on it. (An
     // honest peer holds the blocks of its own chain, which it would send itself.)
     for (const int64_t holder : std::vector<int64_t>{m_unchecked.at(&index).holders}) {
@@ -4493,6 +4502,8 @@ void ChainstateManager::EraseUnchecked(std::vector<const CBlockIndex*> doomed)
         while (stays && erased.contains(stays)) stays = stays->pprev;
         moved.emplace_back(index, stays);
     }
+    // Code that keeps a pointer into the block index across a release of cs_main looks it up again.
+    ++m_unchecked_erasures;
     // Whoever keeps pointers into the block index moves them first (they may read the entries).
     if (m_on_unchecked_erased) m_on_unchecked_erased(moved);
     const bool best_header_erased{erased.contains(m_best_header)};
@@ -8171,7 +8182,7 @@ void ChainstateManager::AddBmmWaiting(const CBlockHeader& header, int64_t peer) 
     m_bmm_waiting.emplace(hash, BmmWaiting{header, peer, m_bmm_waiting_sequence++});
 }
 
-std::vector<std::pair<const CBlockIndex*, int64_t>> ChainstateManager::RetryBmmWaiting()
+std::vector<std::pair<uint256, int64_t>> ChainstateManager::RetryBmmWaiting()
 {
     AssertLockNotHeld(::cs_main);
     std::vector<std::pair<CBlockHeader, int64_t>> pending;
@@ -8186,7 +8197,7 @@ std::vector<std::pair<const CBlockIndex*, int64_t>> ChainstateManager::RetryBmmW
     }
     // Each stays in the store while it is tried: validation, finding it still waits, keeps it there with
     // its peer, where a header taken out would come back without one (and the block never be fetched).
-    std::vector<std::pair<const CBlockIndex*, int64_t>> taken;
+    std::vector<std::pair<uint256, int64_t>> taken;
     while (!pending.empty()) {
         // A header the hooks put before its parent (the same key, say) is tried again after it, as long
         // as each pass takes another header in.
@@ -8196,14 +8207,15 @@ std::vector<std::pair<const CBlockIndex*, int64_t>> ChainstateManager::RetryBmmW
             const uint256 hash{header.GetHash()};
             BlockValidationState state;
             const CBlockIndex* pindex{nullptr};
-            const bool accepted{ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, &pindex, peer) && pindex};
+            // A header whose sender is not known is not the node's own: it holds no unchecked header.
+            const bool accepted{ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, &pindex, peer < 0 ? UNKNOWN_SOURCE : peer) && pindex};
             LOCK(::cs_main);
             const auto it{m_bmm_waiting.find(hash)};
             if (accepted) {
                 // The peer may have been learned since the header was looked up.
                 const int64_t from{it != m_bmm_waiting.end() && it->second.peer >= 0 ? it->second.peer : peer};
                 if (it != m_bmm_waiting.end()) m_bmm_waiting.erase(it);
-                taken.emplace_back(pindex, from);
+                taken.emplace_back(hash, from);
                 progress = true;
             } else if (state.GetResult() == BlockValidationResult::BLOCK_MISSING_PREV) {
                 orphans.emplace_back(header, peer);

@@ -196,7 +196,8 @@ static const CBlockIndex* ParseHashOrHeight(const UniValue& param, ChainstateMan
 UniValue blockheaderToJSON(const CBlockIndex& tip, const CBlockIndex& blockindex, const uint256 pow_limit)
 {
     // Serialize passed information without accessing chain state of the active chain!
-    AssertLockNotHeld(cs_main); // For performance reasons
+    // (getblockheader holds cs_main here: a sidechain's unchecked header may leave the block index as
+    // soon as it is released, ChainstateManager::EraseUnchecked. The header alone is cheap to write.)
 
     UniValue result(UniValue::VOBJ);
     result.pushKV("hash", blockindex.GetBlockHash().GetHex());
@@ -583,7 +584,10 @@ static RPCMethod getblockfrompeer()
     const uint256& block_hash{ParseHashV(request.params[0], "blockhash")};
     const NodeId peer_id{request.params[1].getInt<int64_t>()};
 
-    const CBlockIndex* const index = WITH_LOCK(cs_main, return chainman.m_blockman.LookupBlockIndex(block_hash););
+    // (Held throughout: a sidechain's unchecked header may leave the block index as soon as it is
+    // released, ChainstateManager::EraseUnchecked.)
+    LOCK(cs_main);
+    const CBlockIndex* const index = chainman.m_blockman.LookupBlockIndex(block_hash);
 
     if (!index) {
         throw JSONRPCError(RPC_MISC_ERROR, "Block header missing");
@@ -591,11 +595,11 @@ static RPCMethod getblockfrompeer()
 
     // Fetching blocks before the node has syncing past their height can prevent block files from
     // being pruned, so we avoid it if the node is in prune mode.
-    if (chainman.m_blockman.IsPruneMode() && index->nHeight > WITH_LOCK(chainman.GetMutex(), return chainman.ActiveTip()->nHeight)) {
+    if (chainman.m_blockman.IsPruneMode() && index->nHeight > chainman.ActiveTip()->nHeight) {
         throw JSONRPCError(RPC_MISC_ERROR, "In prune mode, only blocks that the node has already synced previously can be fetched from a peer");
     }
 
-    const bool block_has_data = WITH_LOCK(::cs_main, return index->nStatus & BLOCK_HAVE_DATA);
+    const bool block_has_data = index->nStatus & BLOCK_HAVE_DATA;
     if (block_has_data) {
         throw JSONRPCError(RPC_MISC_ERROR, "Block already downloaded");
     }
@@ -687,11 +691,11 @@ static RPCMethod getblockheader()
     const CBlockIndex* pblockindex;
     const CBlockIndex* tip;
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
-    {
-        LOCK(cs_main);
-        pblockindex = chainman.m_blockman.LookupBlockIndex(hash);
-        tip = chainman.ActiveChain().Tip();
-    }
+    // (Held throughout: a sidechain's unchecked header may leave the block index as soon as it is
+    // released, ChainstateManager::EraseUnchecked.)
+    LOCK(cs_main);
+    pblockindex = chainman.m_blockman.LookupBlockIndex(hash);
+    tip = chainman.ActiveChain().Tip();
 
     if (!pblockindex) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
