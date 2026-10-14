@@ -1247,30 +1247,36 @@ public:
      * header is checked: Chainstate::ConnectTip lets it go). Each belongs to its *holders*: the peers
      * that sent it, or a header on top of it (so the holders of a header include those of the headers
      * on it), and -1, the node itself (its own blocks, its disk, its operator), which never goes. The
-     * accounting is by header: a peer holds at most UncheckedLimits().per_peer of them, the node at
-     * most UncheckedLimits().total (but its own). They are never written to disk, and leave the block
-     * index, with their blocks, as soon as no peer holds them: when a peer is gone
-     * (UncheckedSourceGone), or gives up its newest to make room for another peer's when the node holds
-     * as many as it may (the peer that alone holds the most, if it alone holds more than the other).
-     * So reconnecting, or many peers, never grow them past the bound, and no peer can make the node
-     * drop what another holds. See doc/sidechain.md, "Headers the node cannot check yet".
+     * accounting is by holder: a peer holds at most UncheckedLimits().per_peer of them, and the blocks
+     * of those it holds that the node stored weigh at most UncheckedLimits().block_bytes_per_peer.
+     * Every connected peer has that whole budget, whatever the others hold: no peer's headers are
+     * dropped for another's, and the node's memory is bounded by the budget of each peer it is
+     * connected to. Their blocks are stored apart from the block files, in files of their own
+     * (node::BlockManager::WriteVolatileBlock), moved to the block files only once they are connected.
+     * The headers are never written to the block index database, and leave the block index, their
+     * blocks deleted, as soon as no peer holds them (UncheckedSourceGone). So reconnecting, or many peers, never grow memory nor
+     * disk past what the connected peers hold. See doc/sidechain.md, "Headers the node cannot check yet".
      */
     struct UncheckedHeader {
         //! The peers that hold it (-1: the node itself).
         std::vector<int64_t> holders;
         //! Its block failed for its extension alone (ChainHooks::ExtensionFailure): the copy's fault.
         bool extension_failed{false};
+        //! The size of its block, if the node stored it (in a file of its own): charged to each holder.
+        size_t block_bytes{0};
     };
     std::unordered_map<const CBlockIndex*, UncheckedHeader> m_unchecked GUARDED_BY(::cs_main);
-    //! By holder, the unchecked headers it holds, and those it alone holds, by height.
+    //! By holder, the unchecked headers it holds, by height, and the bytes of their stored blocks.
     std::map<int64_t, std::set<std::pair<int, const CBlockIndex*>>> m_unchecked_held GUARDED_BY(::cs_main);
-    std::map<int64_t, std::set<std::pair<int, const CBlockIndex*>>> m_unchecked_sole GUARDED_BY(::cs_main);
+    std::map<int64_t, size_t> m_unchecked_bytes GUARDED_BY(::cs_main);
     //! The peers connected now, that may hold unchecked headers (UncheckedSourceAdded).
     std::set<int64_t> m_unchecked_sources GUARDED_BY(::cs_main);
     /**
      * Entries taken out of the block index (EraseUnchecked), kept a while before they are freed: code
      * that read a pointer to one before, and uses it without cs_main, reads a dead entry rather than
-     * freed memory. Bounded.
+     * freed memory. The last batch taken out is always kept whole (a peer that leaves may take
+     * per_peer at once), with up to MAX_ERASED_HEADERS of the batches before it: an entry is freed
+     * only once another batch was taken out after it.
      */
     std::deque<node::BlockMap::node_type> m_erased_headers GUARDED_BY(::cs_main);
     static constexpr size_t MAX_ERASED_HEADERS{4096};
@@ -1289,11 +1295,16 @@ public:
     void UncheckedSourceGone(int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * Whether `source` may hold an unchecked header on `prev` (and the unchecked headers below it): within
-     * its budget, and the node's, which it makes room in if need be. -1 always may.
+     * its own budget, whatever other peers hold. -1 always may.
      */
     bool AdmitUnchecked(const CBlockIndex& prev, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** `source` holds `index`, an unchecked header (new or known), and those below it, if its budget allows. */
     void HoldUnchecked(CBlockIndex& index, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * `index`'s block, of an unchecked header and stored apart, passed every rule as it is connected:
+     * written to the block files, its own file deleted. False if it could not be written.
+     */
+    bool PromoteUncheckedBlock(const CBlock& block, CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** `index`'s block is connected: a checked header, written to disk from now on. */
     void ReleaseUnchecked(CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Whether `index` is an unchecked header whose block failed for its extension alone. */
@@ -1302,11 +1313,22 @@ public:
     bool HoldsUnchecked(const CBlockIndex& index, int64_t source) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** How many unchecked headers `source` holds (-1: the node's own). */
     size_t UncheckedHeld(int64_t source) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** The bytes of the stored blocks of the unchecked headers `source` holds. */
+    size_t UncheckedBytes(int64_t source) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Whether to store the block (of `bytes`) of the unchecked header `index`, sent by `source`: it holds
+     * the header and the block fits its budget (-1 always). If so, the block is charged to the holders
+     * of the header; a holder it does not fit stops holding the header and those on it (they hold the
+     * chain only as far as their budget goes).
+     */
+    bool AdmitUncheckedBlock(CBlockIndex& index, size_t bytes, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Checks that the unchecked headers are as described above (-checkblockindex). */
     void CheckUnchecked() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 private:
     void AddUncheckedHolder(const CBlockIndex& index, UncheckedHeader& entry, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     void RemoveUncheckedHolder(const CBlockIndex& index, UncheckedHeader& entry, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** The block of the unchecked header `index` is no longer stored apart: its holders are not charged for it. */
+    void UnchargeUncheckedBlock(const CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Take unchecked headers out of the block index: `doomed` holds every header on top of each. */
     void EraseUnchecked(std::vector<const CBlockIndex*> doomed) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 public:

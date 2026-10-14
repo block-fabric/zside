@@ -4,7 +4,7 @@
 
 // A sidechain's unchecked headers (sidechain::ChainHooks::HeaderCheckable) under fuzzing: peers come
 // and go, and send headers nobody can check, on the tip or on each other's, in any order. Whatever
-// they do, the node holds no more than its budget (each peer's, and the total), every unchecked
+// they do, the node holds no more than its budget (each peer's, whatever the others hold), every unchecked
 // header has a holder that holds those below it, the block index holds exactly the checked headers
 // and the unchecked ones (what no one holds is gone, with nothing pointing to it), and a peer that
 // leaves takes what it alone held with it.
@@ -54,7 +54,7 @@ FUZZ_TARGET(sidechain_unchecked, .init = initialize_unchecked)
     SetMockTime(ConsumeTime(fdp, /*min=*/1700000000, /*max=*/1800000000));
     ChainstateManager& chainman{*g_setup->m_node.chainman};
     auto owned{std::make_unique<UncheckedHooks>()};
-    owned->limits = {.per_peer = fdp.ConsumeIntegralInRange<size_t>(1, 12), .total = fdp.ConsumeIntegralInRange<size_t>(1, 30)};
+    owned->limits = {.per_peer = fdp.ConsumeIntegralInRange<size_t>(1, 12)};
     const sidechain::ChainHooks::UncheckedBudget limits{owned->limits};
     sidechain::SetHooks(std::move(owned));
 
@@ -117,16 +117,32 @@ FUZZ_TARGET(sidechain_unchecked, .init = initialize_unchecked)
                     parent = header.GetHash();
                     sent.push_back(parent);
                 }
+                // What the other peers hold, which no header of this one's drops.
+                std::vector<std::pair<int64_t, uint256>> others;
+                {
+                    LOCK(::cs_main);
+                    for (const auto& [index, entry] : chainman.m_unchecked) {
+                        for (const int64_t holder : entry.holders) {
+                            if (holder != peer) others.emplace_back(holder, index->GetBlockHash());
+                        }
+                    }
+                }
                 BlockValidationState state;
                 // A peer that never connected, or left, is refused too ("unchecked-budget").
                 if (!chainman.ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state, nullptr, peer)) {
                     assert(state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK || state.GetResult() == BlockValidationResult::BLOCK_MISSING_PREV);
                 }
+                LOCK(::cs_main);
+                for (const auto& [holder, hash] : others) {
+                    const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(hash)};
+                    assert(index && chainman.HoldsUnchecked(*index, holder));
+                }
             });
 
         LOCK(::cs_main);
         chainman.CheckUnchecked();
-        assert(chainman.m_unchecked.size() <= limits.total);
+        // Bounded by the peers connected: each its own budget.
+        assert(chainman.m_unchecked.size() <= live.size() * limits.per_peer);
         assert(chainman.m_blockman.m_block_index.size() == base + chainman.m_unchecked.size());
         for (int64_t source{0}; source < 8; ++source) {
             assert(chainman.UncheckedHeld(source) <= limits.per_peer);

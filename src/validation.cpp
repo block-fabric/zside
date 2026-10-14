@@ -3021,6 +3021,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         return true;
     }
 
+    // The block of an unchecked header, stored apart, passed every rule: it goes to the block files
+    // now, before its undo data (which goes with the block file).
+    if (node::BlockManager::IsVolatile(pindex->GetBlockPos()) && !m_chainman.PromoteUncheckedBlock(block, *pindex)) {
+        return FatalError(m_chainman.GetNotifications(), state, _("Failed to write block."));
+    }
     if (!m_blockman.WriteBlockUndo(blockundo, state, *pindex)) {
         return false;
     }
@@ -3761,20 +3766,25 @@ bool ChainstateManager::NotifyHeaderTip()
 {
     bool fNotify = false;
     bool fInitialBlockDownload = false;
-    CBlockIndex* pindexHeader = nullptr;
+    // (What is notified is read with the lock held: a sidechain's unchecked best header may leave the
+    // block index as soon as it is released, EraseUnchecked.)
+    int height{0};
+    int64_t time{0};
     {
         LOCK(GetMutex());
-        pindexHeader = m_best_header;
+        CBlockIndex* pindexHeader = m_best_header;
 
         if (pindexHeader != m_last_notified_header) {
             fNotify = true;
             fInitialBlockDownload = IsInitialBlockDownload();
             m_last_notified_header = pindexHeader;
+            height = pindexHeader->nHeight;
+            time = pindexHeader->nTime;
         }
     }
     // Send block tip changed notifications without the lock held
     if (fNotify) {
-        GetNotifications().headerTip(GetSynchronizationState(fInitialBlockDownload, m_blockman.m_blockfiles_indexed), pindexHeader->nHeight, pindexHeader->nTime, false);
+        GetNotifications().headerTip(GetSynchronizationState(fInitialBlockDownload, m_blockman.m_blockfiles_indexed), height, time, false);
     }
     return fNotify;
 }
@@ -4260,13 +4270,9 @@ void ChainstateManager::AddUncheckedHolder(const CBlockIndex& index, UncheckedHe
 {
     AssertLockHeld(cs_main);
     if (std::ranges::find(entry.holders, source) != entry.holders.end()) return;
-    const std::pair<int, const CBlockIndex*> key{index.nHeight, &index};
-    if (entry.holders.size() == 1) {
-        if (auto sole{m_unchecked_sole.find(entry.holders.front())}; sole != m_unchecked_sole.end() && sole->second.erase(key) && sole->second.empty()) m_unchecked_sole.erase(sole);
-    }
     entry.holders.push_back(source);
-    if (entry.holders.size() == 1) m_unchecked_sole[source].insert(key);
-    m_unchecked_held[source].insert(key);
+    m_unchecked_held[source].insert({index.nHeight, &index});
+    if (entry.block_bytes) m_unchecked_bytes[source] += entry.block_bytes;
 }
 
 void ChainstateManager::RemoveUncheckedHolder(const CBlockIndex& index, UncheckedHeader& entry, int64_t source)
@@ -4274,13 +4280,15 @@ void ChainstateManager::RemoveUncheckedHolder(const CBlockIndex& index, Unchecke
     AssertLockHeld(cs_main);
     const auto it{std::ranges::find(entry.holders, source)};
     if (it == entry.holders.end()) return;
-    const std::pair<int, const CBlockIndex*> key{index.nHeight, &index};
-    if (entry.holders.size() == 1) {
-        if (auto sole{m_unchecked_sole.find(source)}; sole != m_unchecked_sole.end() && sole->second.erase(key) && sole->second.empty()) m_unchecked_sole.erase(sole);
-    }
     entry.holders.erase(it);
-    if (entry.holders.size() == 1) m_unchecked_sole[entry.holders.front()].insert(key);
-    if (auto held{m_unchecked_held.find(source)}; held != m_unchecked_held.end() && held->second.erase(key) && held->second.empty()) m_unchecked_held.erase(held);
+    if (auto held{m_unchecked_held.find(source)}; held != m_unchecked_held.end() && held->second.erase({index.nHeight, &index}) && held->second.empty()) m_unchecked_held.erase(held);
+    if (entry.block_bytes) {
+        auto bytes{m_unchecked_bytes.find(source)};
+        if (Assume(bytes != m_unchecked_bytes.end() && bytes->second >= entry.block_bytes)) {
+            bytes->second -= entry.block_bytes;
+            if (bytes->second == 0) m_unchecked_bytes.erase(bytes);
+        }
+    }
 }
 
 bool ChainstateManager::HoldsUnchecked(const CBlockIndex& index, int64_t source) const
@@ -4297,11 +4305,25 @@ size_t ChainstateManager::UncheckedHeld(int64_t source) const
     return held == m_unchecked_held.end() ? 0 : held->second.size();
 }
 
+size_t ChainstateManager::UncheckedBytes(int64_t source) const
+{
+    AssertLockHeld(cs_main);
+    const auto bytes{m_unchecked_bytes.find(source)};
+    return bytes == m_unchecked_bytes.end() ? 0 : bytes->second;
+}
+
 bool ChainstateManager::UncheckedExtensionFailed(const CBlockIndex& index) const
 {
     AssertLockHeld(cs_main);
     const auto found{m_unchecked.find(&index)};
     return found != m_unchecked.end() && found->second.extension_failed;
+}
+
+/** Whether `source` may hold `count` more unchecked headers, whose stored blocks weigh `bytes`. */
+static bool FitsUncheckedBudget(const ChainstateManager& chainman, int64_t source, size_t count, size_t bytes) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    const auto limits{sidechain::Hooks().UncheckedLimits()};
+    return chainman.UncheckedHeld(source) + count <= limits.per_peer && chainman.UncheckedBytes(source) + bytes <= limits.block_bytes_per_peer;
 }
 
 bool ChainstateManager::AdmitUnchecked(const CBlockIndex& prev, int64_t source)
@@ -4311,44 +4333,21 @@ bool ChainstateManager::AdmitUnchecked(const CBlockIndex& prev, int64_t source)
     if (source < 0) return true;
     // A peer that is gone holds nothing (a waiting header tried again after its peer left).
     if (!m_unchecked_sources.contains(source)) return false;
-    // The header and the unchecked headers below it the peer does not hold yet.
-    size_t needed{1};
-    for (const CBlockIndex* below{&prev}; below && below->m_unchecked && !HoldsUnchecked(*below, source); below = below->pprev) ++needed;
-    const auto limits{sidechain::Hooks().UncheckedLimits()};
-    if (UncheckedHeld(source) + needed > limits.per_peer) return false;
-    if (m_unchecked.size() + 1 <= limits.total) return true;
-    // The node holds as many as it may: the peer that alone holds the most gives up its newest, if it
-    // alone holds more than this one does. (The newest a peer alone holds have no header on top of
-    // them that another holds: the holders of a header include those of the headers on it.) So no
-    // peer makes room by dropping what another peer holds with it, and a peer that holds no more than
-    // its share of the total is never the one that gives way.
-    const auto own{m_unchecked_sole.find(source)};
-    const size_t own_sole{own == m_unchecked_sole.end() ? 0 : own->second.size()};
-    std::optional<int64_t> largest;
-    size_t largest_sole{0};
-    for (const auto& [holder, sole] : m_unchecked_sole) {
-        if (holder >= 0 && sole.size() > largest_sole) {
-            largest = holder;
-            largest_sole = sole.size();
-        }
+    // The header and the unchecked headers below it the peer does not hold yet, with their blocks.
+    // Within the peer's own budget, whatever other peers hold: no peer makes room by dropping what
+    // another holds, so no number of peers can take or drop an honest peer's budget.
+    size_t needed{1}, bytes{0};
+    for (const CBlockIndex* below{&prev}; below && below->m_unchecked && !HoldsUnchecked(*below, source); below = below->pprev) {
+        ++needed;
+        bytes += m_unchecked.at(below).block_bytes;
     }
-    if (!largest || largest_sole <= own_sole + 1) return false;
-    // (Not one below the new header: the sender is about to hold those with it.)
-    const auto& sole{m_unchecked_sole.at(*largest)};
-    for (auto it{sole.rbegin()}; it != sole.rend(); ++it) {
-        const CBlockIndex* newest{it->second};
-        if (prev.GetAncestor(newest->nHeight) == newest) continue;
-        LogDebug(BCLog::VALIDATION, "unchecked header %s of peer=%d dropped to make room for one of peer=%d\n", newest->GetBlockHash().ToString(), *largest, source);
-        EraseUnchecked({newest});
-        return m_unchecked.size() + 1 <= limits.total;
-    }
-    return false;
+    return FitsUncheckedBudget(*this, source, needed, bytes);
 }
 
 void ChainstateManager::HoldUnchecked(CBlockIndex& index, int64_t source)
 {
     AssertLockHeld(cs_main);
-    // A new one: AcceptBlockHeader admitted it (AdmitUnchecked), there is room.
+    // A new one: AcceptBlockHeader admitted it (AdmitUnchecked).
     const bool fresh{!index.m_unchecked};
     if (fresh) {
         index.m_unchecked = true;
@@ -4356,10 +4355,13 @@ void ChainstateManager::HoldUnchecked(CBlockIndex& index, int64_t source)
     }
     if (source >= 0) {
         // A peer that is gone holds nothing; a peer whose budget is spent holds no more.
-        size_t needed{0};
-        for (const CBlockIndex* below{&index}; below && below->m_unchecked && !HoldsUnchecked(*below, source); below = below->pprev) ++needed;
+        size_t needed{0}, bytes{0};
+        for (const CBlockIndex* below{&index}; below && below->m_unchecked && !HoldsUnchecked(*below, source); below = below->pprev) {
+            ++needed;
+            bytes += m_unchecked.at(below).block_bytes;
+        }
         if (needed == 0) return;
-        if (!m_unchecked_sources.contains(source) || UncheckedHeld(source) + needed > sidechain::Hooks().UncheckedLimits().per_peer) {
+        if (!m_unchecked_sources.contains(source) || !FitsUncheckedBudget(*this, source, needed, bytes)) {
             Assume(!fresh);
             return;
         }
@@ -4371,6 +4373,35 @@ void ChainstateManager::HoldUnchecked(CBlockIndex& index, int64_t source)
     }
 }
 
+bool ChainstateManager::AdmitUncheckedBlock(CBlockIndex& index, size_t bytes, int64_t source)
+{
+    AssertLockHeld(cs_main);
+    if (!Assume(index.m_unchecked)) return true;
+    // Its sender holds the header (AcceptBlockHeader made it a holder, if its budget allowed) and has
+    // room for the block. The node's own: always.
+    if (source >= 0 && (!HoldsUnchecked(index, source) || !FitsUncheckedBudget(*this, source, 0, bytes))) return false;
+    // Charged to every holder: one it does not fit stops holding the header and those on it. (An
+    // honest peer holds the blocks of its own chain, which it would send itself.)
+    for (const int64_t holder : std::vector<int64_t>{m_unchecked.at(&index).holders}) {
+        if (holder < 0 || holder == source || FitsUncheckedBudget(*this, holder, 0, bytes)) continue;
+        std::vector<const CBlockIndex*> doomed;
+        for (const auto& [height, held] : std::set<std::pair<int, const CBlockIndex*>>{m_unchecked_held.at(holder)}) {
+            if (height < index.nHeight || held->GetAncestor(index.nHeight) != &index) continue;
+            UncheckedHeader& entry{m_unchecked.at(held)};
+            RemoveUncheckedHolder(*held, entry, holder);
+            if (entry.holders.empty()) doomed.push_back(held);
+        }
+        LogDebug(BCLog::VALIDATION, "peer=%d stops holding unchecked header %s and the %d on it: the block of %d bytes is over its budget\n", holder, index.GetBlockHash().ToString(), doomed.size(), bytes);
+        // (`index` stays: its sender holds it. Every header on it that no one holds now goes.)
+        if (!doomed.empty()) EraseUnchecked(std::move(doomed));
+    }
+    UncheckedHeader& entry{m_unchecked.at(&index)};
+    Assume(entry.block_bytes == 0);
+    entry.block_bytes = bytes;
+    for (const int64_t holder : entry.holders) m_unchecked_bytes[holder] += bytes;
+    return true;
+}
+
 void ChainstateManager::ReleaseUnchecked(CBlockIndex& index)
 {
     AssertLockHeld(cs_main);
@@ -4380,6 +4411,35 @@ void ChainstateManager::ReleaseUnchecked(CBlockIndex& index)
     m_unchecked.erase(&index);
     index.m_unchecked = false;
     m_blockman.m_dirty_blockindex.insert(&index);
+}
+
+bool ChainstateManager::PromoteUncheckedBlock(const CBlock& block, CBlockIndex& index)
+{
+    AssertLockHeld(cs_main);
+    const FlatFilePos old_pos{index.GetBlockPos()};
+    const FlatFilePos pos{m_blockman.WriteBlock(block, index.nHeight)};
+    if (pos.IsNull()) return false;
+    index.nFile = pos.nFile;
+    index.nDataPos = pos.nPos;
+    m_blockman.m_dirty_blockindex.insert(&index);
+    m_blockman.EraseVolatileBlock(old_pos);
+    // No longer charged to the holders: the block is the node's from now on.
+    UnchargeUncheckedBlock(index);
+    return true;
+}
+
+void ChainstateManager::UnchargeUncheckedBlock(const CBlockIndex& index)
+{
+    AssertLockHeld(cs_main);
+    const auto found{m_unchecked.find(&index)};
+    if (found == m_unchecked.end() || !found->second.block_bytes) return;
+    for (const int64_t holder : found->second.holders) {
+        auto bytes{m_unchecked_bytes.find(holder)};
+        if (!Assume(bytes != m_unchecked_bytes.end() && bytes->second >= found->second.block_bytes)) continue;
+        bytes->second -= found->second.block_bytes;
+        if (bytes->second == 0) m_unchecked_bytes.erase(bytes);
+    }
+    found->second.block_bytes = 0;
 }
 
 void ChainstateManager::UncheckedSourceGone(int64_t source)
@@ -4424,6 +4484,8 @@ void ChainstateManager::EraseUnchecked(std::vector<const CBlockIndex*> doomed)
             ++it;
         }
     }
+    // The entries of the batches before go first (beyond the bound): this one is kept whole.
+    while (m_erased_headers.size() > MAX_ERASED_HEADERS) m_erased_headers.pop_front();
     // Highest first: no entry is erased before those on top of it.
     std::ranges::sort(doomed, [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight > b->nHeight; });
     for (const CBlockIndex* index : doomed) {
@@ -4437,9 +4499,14 @@ void ChainstateManager::EraseUnchecked(std::vector<const CBlockIndex*> doomed)
             for (const int64_t holder : std::vector<int64_t>{found->second.holders}) RemoveUncheckedHolder(*index, found->second, holder);
             m_unchecked.erase(found);
         }
+        // Its block, stored apart (never in the block files), is deleted with it.
+        if (entry->nStatus & BLOCK_HAVE_DATA) {
+            const FlatFilePos pos{entry->GetBlockPos()};
+            if (node::BlockManager::IsVolatile(pos)) m_blockman.EraseVolatileBlock(pos);
+            entry->nStatus &= ~BLOCK_HAVE_DATA;
+        }
         m_erased_headers.push_back(m_blockman.m_block_index.extract(index->GetBlockHash()));
     }
-    while (m_erased_headers.size() > MAX_ERASED_HEADERS) m_erased_headers.pop_front();
     if (best_header_erased) RecalculateBestHeader();
 }
 
@@ -4447,7 +4514,10 @@ void ChainstateManager::CheckUnchecked() const
 {
     AssertLockHeld(cs_main);
     size_t flagged{0};
+    std::map<int64_t, size_t> bytes;
     for (const auto& [_, index] : m_blockman.m_block_index) {
+        // Only unchecked headers have their blocks stored apart.
+        if (index.nStatus & BLOCK_HAVE_DATA) assert(index.m_unchecked || !node::BlockManager::IsVolatile(index.GetBlockPos()));
         if (!index.m_unchecked) {
             assert(!m_unchecked.contains(&index));
             continue;
@@ -4464,22 +4534,21 @@ void ChainstateManager::CheckUnchecked() const
             const auto& below{m_unchecked.at(index.pprev).holders};
             for (const int64_t holder : holders) assert(std::ranges::find(below, holder) != below.end());
         }
+        // A stored block not yet connected is stored apart, and charged to the header's holders.
+        const size_t block_bytes{found->second.block_bytes};
+        assert((block_bytes > 0) == ((index.nStatus & BLOCK_HAVE_DATA) && node::BlockManager::IsVolatile(index.GetBlockPos())));
         const std::pair<int, const CBlockIndex*> key{index.nHeight, &index};
         for (const int64_t holder : holders) {
             assert(m_unchecked_held.at(holder).contains(key));
-            const auto sole{m_unchecked_sole.find(holder)};
-            assert((sole != m_unchecked_sole.end() && sole->second.contains(key)) == (holders.size() == 1));
+            if (block_bytes) bytes[holder] += block_bytes;
         }
     }
     assert(flagged == m_unchecked.size());
-    size_t pairs{0}, sole{0}, held{0}, alone{0};
-    for (const auto& [_, entry] : m_unchecked) {
-        pairs += entry.holders.size();
-        alone += entry.holders.size() == 1;
-    }
+    size_t pairs{0}, held{0};
+    for (const auto& [_, entry] : m_unchecked) pairs += entry.holders.size();
     for (const auto& [_, set] : m_unchecked_held) held += set.size();
-    for (const auto& [_, set] : m_unchecked_sole) sole += set.size();
-    assert(pairs == held && alone == sole);
+    assert(pairs == held);
+    assert(bytes == m_unchecked_bytes);
 }
 
 void Chainstate::ReplaceBlockExtension(CBlockIndex* pindex, const BlockHeaderExtension& ext)
@@ -4495,7 +4564,9 @@ void Chainstate::ReplaceBlockExtension(CBlockIndex* pindex, const BlockHeaderExt
     if (pindex->nStatus & BLOCK_HAVE_DATA) {
         CBlock block;
         if (m_blockman.ReadBlock(block, *pindex)) {
-            const FlatFilePos pos{m_blockman.WriteBlock(block, pindex->nHeight)};
+            // A block stored apart (its header unchecked) is written again in its own file, in place.
+            const FlatFilePos old_pos{pindex->GetBlockPos()};
+            const FlatFilePos pos{node::BlockManager::IsVolatile(old_pos) ? m_blockman.WriteVolatileBlock(block, old_pos) : m_blockman.WriteBlock(block, pindex->nHeight)};
             if (!pos.IsNull()) {
                 pindex->nFile = pos.nFile;
                 pindex->nDataPos = pos.nPos;
@@ -5312,6 +5383,17 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         m_options.signals->NewPoWValidBlock(pindex, pblock);
     }
 
+    // The block of an unchecked header is stored apart, in a file of its own, deleted with the header
+    // (or moved to the block files once connected), within the budget of its sender (it holds the
+    // header): a peer cannot fill the disk by sending blocks of headers it then takes away, nor by
+    // sending the same one again after reconnecting. Over the budget, it is not stored; no fault of
+    // the peer's.
+    const bool apart{pindex->m_unchecked && !dbp};
+    if (apart && !AdmitUncheckedBlock(*pindex, ::GetSerializeSize(TX_WITH_WITNESS(block)), source)) {
+        LogDebug(BCLog::VALIDATION, "%s: block %s of an unchecked header from peer=%d over the budget: not stored\n", __func__, pindex->GetBlockHash().ToString(), source);
+        return true;
+    }
+
     // Write block to history file
     if (fNewBlock) *fNewBlock = true;
     try {
@@ -5319,6 +5401,13 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         if (dbp) {
             blockPos = *dbp;
             m_blockman.UpdateBlockInfo(block, pindex->nHeight, blockPos);
+        } else if (apart) {
+            blockPos = m_blockman.WriteVolatileBlock(block);
+            if (blockPos.IsNull()) {
+                UnchargeUncheckedBlock(*pindex);
+                state.Error(strprintf("%s: Failed to write the block of an unchecked header", __func__));
+                return false;
+            }
         } else {
             blockPos = m_blockman.WriteBlock(block, pindex->nHeight);
             if (blockPos.IsNull()) {

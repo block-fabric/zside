@@ -304,6 +304,11 @@ private:
 
     const FlatFileSeq m_block_file_seq;
     const FlatFileSeq m_undo_file_seq;
+    //! The blocks of a sidechain's unchecked headers, a file each (WriteVolatileBlock): blocks/unchecked/unc?????.dat.
+    const FlatFileSeq m_volatile_file_seq;
+    //! Their file numbers free for a new block, and the next one never used.
+    std::set<int> m_volatile_free GUARDED_BY(::cs_main);
+    int m_volatile_next GUARDED_BY(::cs_main){0};
 
 protected:
     std::vector<CBlockFileInfo> m_blockfile_info;
@@ -396,6 +401,21 @@ public:
      *          in case of an error, an empty FlatFilePos
      */
     FlatFilePos WriteBlock(const CBlock& block, int nHeight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * A sidechain's block whose header is unchecked (ChainstateManager::m_unchecked) is stored apart from
+     * the block files, in a file of its own, deleted with the header (EraseVolatileBlock) or once the
+     * block is connected and written to the block files. Its position names a file number from
+     * VOLATILE_FILE_BASE up, which no block file has: readers read it like any block (OpenBlockFile),
+     * and the block files' accounting (sizes, pruning, undo data) never sees it. The files are deleted
+     * when the node starts: the headers are not kept across restarts.
+     */
+    static constexpr int VOLATILE_FILE_BASE{1 << 30};
+    static bool IsVolatile(const FlatFilePos& pos) { return pos.nFile >= VOLATILE_FILE_BASE; }
+    /** Store `block` in a file of its own (a free number), or again in place of the one at `in_place`. Null on failure. */
+    FlatFilePos WriteVolatileBlock(const CBlock& block, std::optional<FlatFilePos> in_place = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Delete the file of a block stored apart; its number is free again. */
+    void EraseVolatileBlock(const FlatFilePos& pos) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Update blockfile info while processing a block during reindex. The block must be available on disk.
      *

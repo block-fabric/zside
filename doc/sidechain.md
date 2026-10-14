@@ -237,7 +237,7 @@ checks.
 | `BlockExtensions` | once, at `SetHooks`: switches extended blocks on (`BLOCK_EXTENSION_BIT` in `nVersion`: a 32-byte `hashSections` and a 64-byte signature after the 80-byte header, and `vSections` after the transactions, in blocks, the block index, `headers` and compact blocks). The block hash does not cover the signature: a block for a header the node has must carry that header's extension, or it is a mutated block (`bad-blk-extension`; the header stays valid), and a compact block with another one is not reconstructed | off: the bit means nothing |
 | `Kind`, `CheckHeader` | `ContextualCheckBlockHeader`: a `PLUGIN` block has no proof of work and no BMM rule; the sidechain checks its header | every block is `BMM` |
 | `CheckBlock`, `SectionsHash` | `CheckBlock`; sections other than those the header commits to make the block mutated (`bad-sections-hash`) | no rules; tagged hash `sidechain/sections` |
-| `HeaderCheckable`, `UncheckedLimits` | `AcceptBlockHeader`: a header the node cannot check all of yet (a signature whose signer it knows only once it connected the chain below), and every header on top of one, is taken *unchecked*: held by the peers that send it, within their budget and the node's (`unchecked-budget`, not punished), never written to disk, and gone from the block index when no peer holds it; checked when its block is connected. See "Headers the node cannot check yet" | every header can be checked; budget 2000 a peer, 10000 in all |
+| `HeaderCheckable`, `UncheckedLimits` | `AcceptBlockHeader`: a header the node cannot check all of yet (a signature whose signer it knows only once it connected the chain below), and every header on top of one, is taken *unchecked*: held by the peers that send it, within each one's own budget (`unchecked-budget`, not punished), never written to the block index database, its block stored apart from the block files until connected, and both gone when no peer holds it; checked when its block is connected. See "Headers the node cannot check yet" | every header can be checked; budget 2000 headers and 32 MiB of blocks a peer |
 | `CheckOtherExtension`, `ExtensionFailure` | `AcceptBlockHeader`, `AcceptBlock`, `ProcessNewBlock`, compact blocks: a header or block for an extended header the node has, with another extension. `EQUIVALENT` (another valid signature of the same block): taken with the extension the node has, which it keeps, and the peer is not punished; `REPLACE` (valid, and the one the node has is not: taken unchecked): replaces it (`Chainstate::ReplaceBlockExtension`; the stored block is written again with it, and a failure of the block with the old one taken back); `UNKNOWN`: the block is the same block, taken with its header's extension. A block whose extension fails when it is connected (`ExtensionFailure`), its header unchecked: the copy's fault (see below) | `INVALID`: a mutated block (`bad-blk-extension`); no extension failures |
 | `MaxFutureBlockTime` | `ContextualCheckBlockHeader`: how far ahead of the node's clock a block's time may be (`time-too-new`, a header that may come later) | two hours, as Bitcoin |
 | `CustomChainOrder`, `ChainWork` | `nChainWork` when a header is added or the index loaded, and for a block and all above it when the record takes back its failure (`ReconsiderRecordFailure`: a key that reads the record may have changed); with a chain order of its own, headers presync (a minimum of work) is skipped, and so is the anti-DoS work threshold near the tip (a compact block whose parent has a lower key is not low-work) | most work |
@@ -271,18 +271,36 @@ chain that has them, and nothing for one that does not:
   its block is connected. Each has *holders*: the peers that sent it, in a headers
   message, a compact block or a block, or sent a header on top of it. The node
   (its own blocks, its disk, its operator) is a holder that never goes.
-- **Bounded, by header.** A peer holds at most `UncheckedLimits().per_peer`, the
-  node at most `UncheckedLimits().total` (but its own). Beyond the first, a header
-  is refused (`unchecked-budget`, `BLOCK_HEADER_LOW_WORK`: not punished, and the
-  peer is asked for its headers again once the tip moved). Beyond the second, the
-  peer that alone holds the most headers gives up its newest, if it alone holds
-  more than the sender; else the header is refused the same way.
-- **Volatile.** Unchecked headers are not written to disk, and leave the block
-  index, with their blocks, when no peer holds them (the last holder disconnected
-  or gave them up): a reconnection or a new address never leaves headers behind.
-  The entries go to a bounded list before they are freed, and the peers' pointers
-  into them (best known block, blocks in flight) move to the nearest block that
-  stays (`PeerManagerImpl::UncheckedErased`).
+- **Bounded, by peer.** A peer holds at most `UncheckedLimits().per_peer`
+  headers, and the blocks the node stored of the headers it holds weigh at most
+  `UncheckedLimits().block_bytes_per_peer`. Beyond either, a header is refused
+  (`unchecked-budget`, `BLOCK_HEADER_LOW_WORK`: not punished, and the peer is
+  asked for its headers again once the tip moved). Every connected peer has that
+  whole budget whatever the others hold or share: no peer's headers are dropped
+  to make room for another's. (A node-wide total cannot give that: attackers
+  holding the same headers in pairs, or many new connections, would take it from
+  an honest peer, as the adversarial review of the earlier design showed.) So the
+  memory taken is bounded by the peers the node is connected to, each with its
+  own budget.
+- **Volatile.** Unchecked headers are not written to the block index database,
+  and leave the block index when no peer holds them (the last holder
+  disconnected): a reconnection or a new address never leaves headers behind.
+  The entries go to a list before they are freed (the last batch whole, and up to
+  4096 before it), and the peers' pointers into them (best known block, blocks in
+  flight) move to the nearest block that stays
+  (`PeerManagerImpl::UncheckedErased`); what is read without `cs_main` is read
+  with it held (the locator of the best header, the header tip notified).
+- **Their blocks are stored apart.** The block of an unchecked header is stored
+  in a file of its own (`blocks/unchecked/unc?????.dat`,
+  `BlockManager::WriteVolatileBlock`), never in the block files, if its sender
+  holds the header and the block fits its byte budget (else it is not stored, no
+  fault of the peer's). It is charged to every holder of the header; a holder it
+  does not fit stops holding the header and those on it. The file is deleted
+  with the header, and the number reused, so sending the same block again after
+  reconnecting, or other blocks, never grows the disk past what the connected
+  peers hold. Once the block passes every rule as it is connected, it is written
+  to the block files (before its undo data) and its own file deleted. The
+  directory is emptied when the node starts; `-reindex` never sees these blocks.
 - **One extension a header.** The first that came, until another valid one
   replaces it (`REPLACE`); a block with another one the node cannot check is the
   same block, stored with its header's. No other extension is kept.
@@ -298,7 +316,8 @@ chain that has them, and nothing for one that does not:
 
 Nothing in it is a rule of a block: it decides only whether and when the node
 holds a header, and which copy of an extension it tries first. Tests:
-`sidechain_hooks_tests.cpp` (`unchecked_*`, `block_extension_unknown_taken`,
+`sidechain_hooks_tests.cpp` (`unchecked_*`, among them `unchecked_no_peer_drops_another`
+and `unchecked_blocks_stored_apart`, `block_extension_unknown_taken`,
 `extension_failure_not_the_peers_fault`) and the fuzz target
 `sidechain_unchecked`.
 

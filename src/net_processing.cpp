@@ -2998,13 +2998,14 @@ arith_uint256 PeerManagerImpl::GetAntiDoSWorkThreshold()
 void PeerManagerImpl::HandleUnconnectingHeaders(CNode& pfrom, Peer& peer,
         const std::vector<CBlockHeader>& headers)
 {
-    // Try to fill in the missing headers.
-    const CBlockIndex* best_header{WITH_LOCK(cs_main, return m_chainman.m_best_header)};
-    if (MaybeSendGetHeaders(pfrom, GetLocator(best_header), peer)) {
+    // Try to fill in the missing headers. (Read with cs_main held: a sidechain's unchecked best header
+    // may leave the block index as soon as the lock is released, ChainstateManager::EraseUnchecked.)
+    const auto [locator, best_height]{WITH_LOCK(cs_main, return std::make_pair(GetLocator(m_chainman.m_best_header), m_chainman.m_best_header ? m_chainman.m_best_header->nHeight : -1))};
+    if (MaybeSendGetHeaders(pfrom, locator, peer)) {
         LogDebug(BCLog::NET, "received header %s: missing prev block %s, sending getheaders (%d) to end (peer=%d)\n",
             headers[0].GetHash().ToString(),
             headers[0].hashPrevBlock.ToString(),
-            best_header->nHeight,
+            best_height,
             pfrom.GetId());
     }
 

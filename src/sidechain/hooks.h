@@ -120,16 +120,17 @@ public:
      * known from that chain's state) says no: the header is then taken *unchecked* (CheckHeader lets
      * it through), within the budget of the peer that sent it (UncheckedLimits), and its signature is
      * checked when its block is connected. Unchecked headers, and every header on top of one, belong
-     * to the peers that sent them (ChainstateManager::m_unchecked): they are not written to disk, and
-     * leave the block index when no peer holds them any more. See doc/sidechain.md, "Headers the node
+     * to the peers that sent them (ChainstateManager::m_unchecked): they are not written to the block
+     * index database, their blocks are stored apart from the block files until connected, and both go
+     * when no peer holds them any more. See doc/sidechain.md, "Headers the node
      * cannot check yet". By default every header can be checked. Called with cs_main held.
      */
     virtual bool HeaderCheckable(const CBlockHeader& header, const CBlockIndex& prev) const { return true; }
     struct UncheckedBudget {
         //! The unchecked headers a peer may hold.
         size_t per_peer{2000};
-        //! The unchecked headers the node holds, at most (but its own).
-        size_t total{10000};
+        //! The bytes of the stored blocks of the unchecked headers a peer holds.
+        size_t block_bytes_per_peer{size_t{32} << 20};
     };
     /** The budget of unchecked headers (HeaderCheckable). Not consensus. */
     virtual UncheckedBudget UncheckedLimits() const { return {}; }

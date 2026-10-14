@@ -842,6 +842,7 @@ void BlockManager::UnlinkPrunedFiles(const std::set<int>& setFilesToPrune) const
 
 AutoFile BlockManager::OpenBlockFile(const FlatFilePos& pos, bool fReadOnly) const
 {
+    if (IsVolatile(pos)) return AutoFile{m_volatile_file_seq.Open({pos.nFile - VOLATILE_FILE_BASE, pos.nPos}, fReadOnly), m_obfuscation};
     return AutoFile{m_block_file_seq.Open(pos, fReadOnly), m_obfuscation};
 }
 
@@ -853,6 +854,7 @@ AutoFile BlockManager::OpenUndoFile(const FlatFilePos& pos, bool fReadOnly) cons
 
 fs::path BlockManager::GetBlockPosFilename(const FlatFilePos& pos) const
 {
+    if (IsVolatile(pos)) return m_volatile_file_seq.FileName({pos.nFile - VOLATILE_FILE_BASE, pos.nPos});
     return m_block_file_seq.FileName(pos);
 }
 
@@ -1196,6 +1198,63 @@ FlatFilePos BlockManager::WriteBlock(const CBlock& block, int nHeight)
     return pos;
 }
 
+FlatFilePos BlockManager::WriteVolatileBlock(const CBlock& block, std::optional<FlatFilePos> in_place)
+{
+    AssertLockHeld(::cs_main);
+    int number;
+    if (in_place) {
+        if (!Assume(IsVolatile(*in_place))) return FlatFilePos();
+        number = in_place->nFile - VOLATILE_FILE_BASE;
+    } else if (!m_volatile_free.empty()) {
+        number = *m_volatile_free.begin();
+        m_volatile_free.erase(m_volatile_free.begin());
+    } else {
+        number = m_volatile_next++;
+    }
+    const FlatFilePos file_pos{number, 0};
+    const auto fail{[&] {
+        std::error_code ec;
+        fs::remove(m_volatile_file_seq.FileName(file_pos), ec);
+        if (!in_place) m_volatile_free.insert(number);
+        return FlatFilePos();
+    }};
+    // A new file each time (in place too: the block may be of another size).
+    {
+        std::error_code ec;
+        fs::remove(m_volatile_file_seq.FileName(file_pos), ec);
+    }
+    AutoFile file{m_volatile_file_seq.Open(file_pos, /*read_only=*/false), m_obfuscation};
+    if (file.IsNull()) {
+        LogError("Failed to open %s while writing the block of an unchecked header", fs::PathToString(m_volatile_file_seq.FileName(file_pos)));
+        return fail();
+    }
+    const unsigned int block_size{static_cast<unsigned int>(GetSerializeSize(TX_WITH_WITNESS(block)))};
+    try {
+        BufferedWriter fileout{file};
+        fileout << GetParams().MessageStart() << block_size;
+        fileout << TX_WITH_WITNESS(block);
+    } catch (const std::exception& e) {
+        LogError("Failed to write the block of an unchecked header: %s", e.what());
+        (void)file.fclose();
+        return fail();
+    }
+    if (file.fclose() != 0) {
+        LogError("Failed to close %s: %s", fs::PathToString(m_volatile_file_seq.FileName(file_pos)), SysErrorString(errno));
+        return fail();
+    }
+    return FlatFilePos{VOLATILE_FILE_BASE + number, STORAGE_HEADER_BYTES};
+}
+
+void BlockManager::EraseVolatileBlock(const FlatFilePos& pos)
+{
+    AssertLockHeld(::cs_main);
+    if (!Assume(IsVolatile(pos))) return;
+    const int number{pos.nFile - VOLATILE_FILE_BASE};
+    std::error_code ec;
+    fs::remove(m_volatile_file_seq.FileName({number, 0}), ec);
+    m_volatile_free.insert(number);
+}
+
 static auto InitBlocksdirXorKey(const BlockManager::Options& opts)
 {
     // Bytes are serialized without length indicator, so this is also the exact
@@ -1259,8 +1318,14 @@ BlockManager::BlockManager(const util::SignalInterrupt& interrupt, Options opts)
       m_opts{std::move(opts)},
       m_block_file_seq{FlatFileSeq{m_opts.blocks_dir, "blk", m_opts.fast_prune ? 0x4000 /* 16kB */ : BLOCKFILE_CHUNK_SIZE}},
       m_undo_file_seq{FlatFileSeq{m_opts.blocks_dir, "rev", UNDOFILE_CHUNK_SIZE}},
+      m_volatile_file_seq{FlatFileSeq{m_opts.blocks_dir / "unchecked", "unc", BLOCKFILE_CHUNK_SIZE}},
       m_interrupt{interrupt}
 {
+    // The blocks of unchecked headers are not kept across restarts (nor are their headers).
+    {
+        std::error_code ec;
+        fs::remove_all(m_opts.blocks_dir / "unchecked", ec);
+    }
     m_block_tree_db = std::make_unique<BlockTreeDB>(m_opts.block_tree_db_params);
 
     // The drivechain database lives next to the block index and is wiped together with it.
