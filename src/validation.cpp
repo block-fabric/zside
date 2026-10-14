@@ -3762,6 +3762,8 @@ void ChainstateManager::UpdateIBDStatus()
     m_cached_is_ibd.store(false, std::memory_order_relaxed);
 }
 
+std::function<void()> g_test_block_index_use;
+
 bool ChainstateManager::NotifyHeaderTip()
 {
     bool fNotify = false;
@@ -3974,10 +3976,19 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
 
 bool Chainstate::PreciousBlock(BlockValidationState& state, CBlockIndex* pindex)
 {
+    return PreciousBlock(state, pindex->GetBlockHash());
+}
+
+bool Chainstate::PreciousBlock(BlockValidationState& state, const uint256& hash)
+{
     AssertLockNotHeld(m_chainstate_mutex);
     AssertLockNotHeld(::cs_main);
     {
         LOCK(cs_main);
+        // (Looked up with the lock held: a sidechain's unchecked header may leave the block index
+        // whenever it is released, EraseUnchecked. Gone, there is nothing to do.)
+        CBlockIndex* const pindex{m_blockman.LookupBlockIndex(hash)};
+        if (!pindex) return true;
         if (pindex->nChainWork < m_chain.Tip()->nChainWork) {
             // Nothing to do, this block is not at the tip.
             return true;
@@ -4005,18 +4016,14 @@ bool Chainstate::PreciousBlock(BlockValidationState& state, CBlockIndex* pindex)
 
 bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const pindex, bool by_record)
 {
+    assert(pindex);
+    return InvalidateBlock(state, pindex->GetBlockHash(), by_record);
+}
+
+bool Chainstate::InvalidateBlock(BlockValidationState& state, const uint256& hash, bool by_record)
+{
     AssertLockNotHeld(m_chainstate_mutex);
     AssertLockNotHeld(::cs_main);
-
-    // Genesis block can't be invalidated
-    assert(pindex);
-    if (pindex->nHeight == 0) return false;
-
-    // On a sidechain the follower takes back what the record of the mainchain did, not what the operator
-    // did: a block the operator marked invalid stays so, whatever the record does later.
-    if (m_chainman.m_mainchain && !(by_record && m_chainman.m_mainchain->GetFailure(pindex->GetBlockHash()) == sidechain::Mainchain::Failure::MANUAL)) {
-        m_chainman.m_mainchain->NoteFailure(pindex->GetBlockHash(), by_record ? sidechain::Mainchain::Failure::RECORD : sidechain::Mainchain::Failure::MANUAL);
-    }
 
     // We do not allow ActivateBestChain() to run while InvalidateBlock() is
     // running, as that could cause the tip to change while we disconnect
@@ -4031,9 +4038,18 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
     // build a map once so that we can look up candidate blocks by chain
     // work as we go.
     std::multimap<const arith_uint256, CBlockIndex*> highpow_outofchain_headers;
-
-    {
-        LOCK(cs_main);
+    // A sidechain's unchecked header may leave the block index whenever cs_main is released
+    // (ChainstateManager::EraseUnchecked): pindex itself (until it is found in the active chain, which
+    // only checked headers are), and any entry of the map. So, each time the lock is taken again after
+    // headers left, pindex is looked up again by hash (gone: there is nothing to mark) and the map
+    // built again, rather than rely on the entries kept a while (m_erased_headers).
+    CBlockIndex* pindex{nullptr};
+    uint64_t erasures{0};
+    const auto find_again{[&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        erasures = m_chainman.m_unchecked_erasures.load();
+        pindex = m_blockman.LookupBlockIndex(hash);
+        highpow_outofchain_headers.clear();
+        if (!pindex) return false;
         for (auto& entry : m_blockman.m_block_index) {
             CBlockIndex& candidate = entry.second;
             // We don't need to put anything in our active chain into the
@@ -4047,6 +4063,20 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
                 highpow_outofchain_headers.insert({candidate.nChainWork, &candidate});
             }
         }
+        return true;
+    }};
+
+    {
+        LOCK(cs_main);
+        if (!find_again()) return state.Invalid(BlockValidationResult::BLOCK_MISSING_PREV, "block-not-found");
+        // Genesis block can't be invalidated
+        if (pindex->nHeight == 0) return false;
+
+        // On a sidechain the follower takes back what the record of the mainchain did, not what the operator
+        // did: a block the operator marked invalid stays so, whatever the record does later.
+        if (m_chainman.m_mainchain && !(by_record && m_chainman.m_mainchain->GetFailure(hash) == sidechain::Mainchain::Failure::MANUAL)) {
+            m_chainman.m_mainchain->NoteFailure(hash, by_record ? sidechain::Mainchain::Failure::RECORD : sidechain::Mainchain::Failure::MANUAL);
+        }
     }
 
     CBlockIndex* to_mark_failed = pindex;
@@ -4059,11 +4089,16 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
 
         // Make sure the queue of validation callbacks doesn't grow unboundedly.
         if (m_chainman.m_options.signals) LimitValidationInterfaceQueue(*m_chainman.m_options.signals);
+        TestBlockIndexUse();
 
         LOCK(cs_main);
         // Lock for as long as disconnectpool is in scope to make sure MaybeUpdateMempoolForReorg is
         // called after DisconnectTip without unlocking in between
         LOCK(MempoolMutex());
+        if (m_chainman.m_unchecked_erasures.load() != erasures && !find_again()) {
+            // An unchecked header (never in the active chain) that left: nothing to mark.
+            return true;
+        }
         if (!m_chain.Contains(*pindex)) break;
         pindex_was_in_chain = true;
         CBlockIndex* const disconnected_tip{m_chain.Tip()};
@@ -4133,9 +4168,15 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
     }
 
     m_chainman.CheckBlockIndex();
+    TestBlockIndexUse();
 
     {
         LOCK(cs_main);
+        // (to_mark_failed is pindex, or a block that was in the active chain: checked, it stays.)
+        if (m_chainman.m_unchecked_erasures.load() != erasures) {
+            if (!find_again()) return true;
+            if (!pindex_was_in_chain) to_mark_failed = pindex;
+        }
         if (m_chain.Contains(*to_mark_failed)) {
             // If the to-be-marked invalid block is in the active chain, something is interfering and we can't proceed.
             return false;
@@ -4536,6 +4577,15 @@ void ChainstateManager::EraseUnchecked(std::vector<const CBlockIndex*> doomed)
             entry->nStatus &= ~BLOCK_HAVE_DATA;
         }
         m_erased_headers.push_back(m_blockman.m_block_index.extract(index->GetBlockHash()));
+        if (m_test_poison_erased) {
+            CBlockIndex& dead{m_erased_headers.back().mapped()};
+            dead.nHeight = -1;
+            dead.nTime = 0;
+            dead.nStatus = BLOCK_FAILED_VALID;
+            dead.nChainWork = 0;
+            dead.pprev = nullptr;
+            dead.pskip = nullptr;
+        }
     }
     if (best_header_erased) RecalculateBestHeader();
 }
@@ -5270,6 +5320,10 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
 bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> headers, bool min_pow_checked, BlockValidationState& state, const CBlockIndex** ppindex, int64_t source)
 {
     AssertLockNotHeld(cs_main);
+    // (What is logged of the last header is read with the lock held: a sidechain's unchecked header may
+    // leave the block index as soon as it is released, EraseUnchecked. So may *ppindex: the caller looks
+    // it up again, by hash, if m_unchecked_erasures changed.)
+    std::optional<std::pair<int, NodeClock::time_point>> last_accepted;
     {
         LOCK(cs_main);
         for (const CBlockHeader& header : headers) {
@@ -5283,15 +5337,15 @@ bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> hea
             if (ppindex) {
                 *ppindex = pindex;
             }
+            if (pindex) last_accepted.emplace(pindex->nHeight, pindex->Time());
         }
     }
     if (NotifyHeaderTip()) {
-        if (IsInitialBlockDownload() && ppindex && *ppindex) {
-            const CBlockIndex& last_accepted{**ppindex};
-            int64_t blocks_left{(NodeClock::now() - last_accepted.Time()) / GetConsensus().PowTargetSpacing()};
+        if (IsInitialBlockDownload() && ppindex && *ppindex && last_accepted) {
+            int64_t blocks_left{(NodeClock::now() - last_accepted->second) / GetConsensus().PowTargetSpacing()};
             blocks_left = std::max<int64_t>(0, blocks_left);
-            const double progress{100.0 * last_accepted.nHeight / (last_accepted.nHeight + blocks_left)};
-            LogInfo("Synchronizing blockheaders, height: %d (~%.2f%%)\n", last_accepted.nHeight, progress);
+            const double progress{100.0 * last_accepted->first / (last_accepted->first + blocks_left)};
+            LogInfo("Synchronizing blockheaders, height: %d (~%.2f%%)\n", last_accepted->first, progress);
         }
     }
     return true;

@@ -1122,8 +1122,10 @@ btck_ChainstateManager* btck_chainstate_manager_create(
 
 const btck_BlockTreeEntry* btck_chainstate_manager_get_block_tree_entry_by_hash(const btck_ChainstateManager* chainman, const btck_BlockHash* block_hash)
 {
+    // (The entry is the caller's, without the lock: never a sidechain's unchecked header, which may leave
+    // the block index as soon as it is released, ChainstateManager::EraseUnchecked.)
     auto block_index = WITH_LOCK(btck_ChainstateManager::get(chainman).m_chainman->GetMutex(),
-                                 return btck_ChainstateManager::get(chainman).m_chainman->m_blockman.LookupBlockIndex(btck_BlockHash::get(block_hash)));
+                                 return btck_ChainstateManager::get(chainman).m_chainman->m_blockman.LookupCheckedBlockIndex(btck_BlockHash::get(block_hash)));
     if (!block_index) {
         LogDebug(BCLog::KERNEL, "A block with the given hash is not indexed.");
         return nullptr;
@@ -1134,7 +1136,14 @@ const btck_BlockTreeEntry* btck_chainstate_manager_get_block_tree_entry_by_hash(
 const btck_BlockTreeEntry* btck_chainstate_manager_get_best_entry(const btck_ChainstateManager* chainstate_manager)
 {
     auto& chainman = *btck_ChainstateManager::get(chainstate_manager).m_chainman;
-    return btck_BlockTreeEntry::ref(WITH_LOCK(chainman.GetMutex(), return chainman.m_best_header));
+    // (The entry is the caller's, without the lock: the best header's highest ancestor that is not a
+    // sidechain's unchecked header, which may leave the block index as soon as it is released,
+    // ChainstateManager::EraseUnchecked. Unchecked headers are the newest part of a branch.)
+    return btck_BlockTreeEntry::ref(WITH_LOCK(chainman.GetMutex(), {
+        const CBlockIndex* best{chainman.m_best_header};
+        while (best && best->m_unchecked) best = best->pprev;
+        return best;
+    }));
 }
 
 void btck_chainstate_manager_destroy(btck_ChainstateManager* chainman)

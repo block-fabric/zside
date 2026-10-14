@@ -385,6 +385,16 @@ public:
 
     CBlockIndex* LookupBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     const CBlockIndex* LookupBlockIndex(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /**
+     * LookupBlockIndex for code that goes on using the entry once it released cs_main: nullptr for a
+     * sidechain's unchecked header (CBlockIndex::m_unchecked), which may leave the block index, and be
+     * freed, as soon as the lock is released (ChainstateManager::EraseUnchecked). Every other entry stays
+     * as long as the node runs: only unchecked headers ever leave the block index, and a header that is
+     * checked stays so. Code that needs unchecked headers too holds cs_main as long as it uses them, or
+     * looks them up again by hash once it has the lock again.
+     */
+    CBlockIndex* LookupCheckedBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    const CBlockIndex* LookupCheckedBlockIndex(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Get block file info entry for one block file */
     CBlockFileInfo* GetBlockFileInfo(size_t n) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

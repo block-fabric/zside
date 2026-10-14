@@ -225,6 +225,20 @@ const CBlockIndex* BlockManager::LookupBlockIndex(const uint256& hash) const
     return it == m_block_index.end() ? nullptr : &it->second;
 }
 
+CBlockIndex* BlockManager::LookupCheckedBlockIndex(const uint256& hash)
+{
+    AssertLockHeld(cs_main);
+    CBlockIndex* index{LookupBlockIndex(hash)};
+    return index && !index->m_unchecked ? index : nullptr;
+}
+
+const CBlockIndex* BlockManager::LookupCheckedBlockIndex(const uint256& hash) const
+{
+    AssertLockHeld(cs_main);
+    const CBlockIndex* index{LookupBlockIndex(hash)};
+    return index && !index->m_unchecked ? index : nullptr;
+}
+
 CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header)
 {
     AssertLockHeld(cs_main);

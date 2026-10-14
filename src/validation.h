@@ -119,6 +119,18 @@ enum class SynchronizationState {
 /** Documentation for argument 'checklevel'. */
 extern const std::vector<std::string> CHECKLEVEL_DOC;
 
+/**
+ * Tests only: called where code goes on to use block index entries it looked up (getblockheader,
+ * getblock, getchaintips, the wallet's findBlock, InvalidateBlock between its steps). A test sets it to
+ * take unchecked headers out of the block index there, from another thread that takes cs_main only if
+ * it is free (ChainstateManager::EraseUnchecked): as any thread may whenever this one does not hold it.
+ */
+extern std::function<void()> g_test_block_index_use;
+inline void TestBlockIndexUse()
+{
+    if (g_test_block_index_use) g_test_block_index_use();
+}
+
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams);
 
 bool FatalError(kernel::Notifications& notifications, BlockValidationState& state, const bilingual_str& message);
@@ -974,6 +986,14 @@ public:
     bool PreciousBlock(BlockValidationState& state, CBlockIndex* pindex)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(::cs_main);
+    /**
+     * The block of this hash, looked up with cs_main held. (Code that looked a block up and released
+     * cs_main since passes its hash: a sidechain's unchecked header may have left the block index
+     * meanwhile, ChainstateManager::EraseUnchecked. Gone, there is nothing to do.)
+     */
+    bool PreciousBlock(BlockValidationState& state, const uint256& hash)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
+        LOCKS_EXCLUDED(::cs_main);
 
     /**
      * Mark a block as invalid.
@@ -982,6 +1002,16 @@ public:
      *                       not, the operator marked it, and it stays invalid until reconsidered.
      */
     bool InvalidateBlock(BlockValidationState& state, CBlockIndex* pindex, bool by_record = false)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
+        LOCKS_EXCLUDED(::cs_main);
+    /**
+     * The block of this hash, looked up with cs_main held (and again whenever unchecked headers left
+     * the block index while the lock was released). Code that looked the block up and released cs_main
+     * since passes its hash: a sidechain's unchecked header may have left the block index meanwhile
+     * (ChainstateManager::EraseUnchecked). Not found: "block-not-found"; one that leaves while it is
+     * marked: nothing to do.
+     */
+    bool InvalidateBlock(BlockValidationState& state, const uint256& hash, bool by_record = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(::cs_main);
 
@@ -1286,14 +1316,23 @@ public:
     //! Those of them that are inbound: the inbound budget, and at most UncheckedLimits().inbound_holders hold any.
     std::set<int64_t> m_unchecked_inbound GUARDED_BY(::cs_main);
     /**
-     * Entries taken out of the block index (EraseUnchecked), kept a while before they are freed: code
-     * that read a pointer to one before, and uses it without cs_main, reads a dead entry rather than
-     * freed memory. The last batch taken out is always kept whole (a peer that leaves may take
-     * per_peer at once), with up to MAX_ERASED_HEADERS of the batches before it: an entry is freed
-     * only once another batch was taken out after it.
+     * Entries taken out of the block index (EraseUnchecked), kept a while before they are freed. Only
+     * defence in depth: no code relies on it. Every path that may read an unchecked header uses it with
+     * cs_main held, or looks it up again by hash once it has the lock again (m_unchecked_erasures), or
+     * does not see unchecked headers at all (BlockManager::LookupCheckedBlockIndex): the RPCs, REST, the
+     * wallet's and the GUI's interfaces, the indexes and the validation interface (which tells of
+     * connected blocks only), net_processing, the follower; see doc/sidechain.md, "Pointers into the
+     * block index". Should one be missed, it reads a dead entry rather than freed memory, as long as
+     * fewer than this many headers left after it: the last batch taken out is always kept whole (a peer
+     * that leaves may take per_peer at once), with up to MAX_ERASED_HEADERS of the batches before it.
      */
     std::deque<node::BlockMap::node_type> m_erased_headers GUARDED_BY(::cs_main);
     static constexpr size_t MAX_ERASED_HEADERS{4096};
+    /**
+     * Tests only: overwrite the entries taken out of the block index (height -1, no data, failed, no
+     * work, no parent), so that a test sees any use of one after it left (TestBlockIndexUse).
+     */
+    bool m_test_poison_erased GUARDED_BY(::cs_main){false};
     /**
      * How many times unchecked headers were taken out of the block index (EraseUnchecked; changed with
      * cs_main held). Code that keeps a pointer into the block index across a release of cs_main (an
@@ -1638,7 +1677,10 @@ public:
      * @param[in]  headers The block headers themselves
      * @param[in]  min_pow_checked  True if proof-of-work anti-DoS checks have been done by caller for headers chain
      * @param[out] state This may be set to an Error state if any error occurred processing them
-     * @param[out] ppindex If set, the pointer will be set to point to the last new block index object for the given headers
+     * @param[out] ppindex If set, the pointer will be set to point to the last new block index object for the given headers.
+     *                     On a sidechain it may be an unchecked header, which may leave the block index as soon as
+     *                     cs_main is released (EraseUnchecked): read m_unchecked_erasures before, and look it up
+     *                     again by hash if that changed, before using it.
      * @returns false if AcceptBlockHeader fails on any of the headers, true otherwise (including if headers were already known)
      */
     bool ProcessNewBlockHeaders(std::span<const CBlockHeader> headers, bool min_pow_checked, BlockValidationState& state, const CBlockIndex** ppindex = nullptr, int64_t source = -1) LOCKS_EXCLUDED(cs_main);

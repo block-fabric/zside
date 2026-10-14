@@ -436,11 +436,12 @@ void Follower::Act()
     // (The blocks that rest on a commitment: the block of that hash, in the template.)
     for (const uint256& commitment : uncommitted) {
         for (const uint256& hash : Hooks().BlocksCommittedBy(commitment)) {
-            CBlockIndex* pindex{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(hash))};
-            if (!pindex) continue;
+            if (!WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(hash))) continue;
             LogInfo("Block %s lost its commitment on the mainchain", hash.ToString());
+            // (By hash: an unchecked header may leave the block index as soon as cs_main is released,
+            // ChainstateManager::EraseUnchecked.)
             BlockValidationState state;
-            chainman.ActiveChainstate().InvalidateBlock(state, pindex, /*by_record=*/true);
+            chainman.ActiveChainstate().InvalidateBlock(state, hash, /*by_record=*/true);
         }
     }
     {

@@ -364,7 +364,9 @@ static bool rest_spent_txouts(const std::any& context, HTTPRequest* req, const s
         return false;
     }
 
-    const CBlockIndex* pblockindex = WITH_LOCK(cs_main, return chainman->m_blockman.LookupBlockIndex(*hash));
+    // (Used once cs_main is released: not an unchecked header, which may leave the block index then,
+    // ChainstateManager::EraseUnchecked. It has no undo data anyway.)
+    const CBlockIndex* pblockindex = WITH_LOCK(cs_main, return chainman->m_blockman.LookupCheckedBlockIndex(*hash));
     if (!pblockindex) {
         return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not found");
     }
@@ -441,7 +443,9 @@ static bool rest_block(const std::any& context,
     {
         LOCK(cs_main);
         tip = chainman.ActiveChain().Tip();
-        pblockindex = chainman.m_blockman.LookupBlockIndex(*hash);
+        // (Used once cs_main is released: not an unchecked header, which may leave the block index then,
+        // its block deleted, ChainstateManager::EraseUnchecked.)
+        pblockindex = chainman.m_blockman.LookupCheckedBlockIndex(*hash);
         if (!pblockindex) {
             return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not found");
         }
@@ -691,7 +695,9 @@ static bool rest_block_filter(const std::any& context, HTTPRequest* req, const s
         if (!maybe_chainman) return false;
         ChainstateManager& chainman = *maybe_chainman;
         LOCK(cs_main);
-        block_index = chainman.m_blockman.LookupBlockIndex(*block_hash);
+        // (Used once cs_main is released: not an unchecked header, which may leave the block index then,
+        // ChainstateManager::EraseUnchecked. Never connected, it has no filter.)
+        block_index = chainman.m_blockman.LookupCheckedBlockIndex(*block_hash);
         if (!block_index) {
             return RESTERR(req, HTTP_NOT_FOUND, uri_parts[1] + " not found");
         }

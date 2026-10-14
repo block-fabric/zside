@@ -76,7 +76,9 @@ static RPCMethod gettxoutproof()
             if (!request.params[1].isNull()) {
                 LOCK(cs_main);
                 hashBlock = ParseHashV(request.params[1], "blockhash");
-                pblockindex = chainman.m_blockman.LookupBlockIndex(hashBlock);
+                // (Used once cs_main is released: not an unchecked header, which may leave the block
+                // index then, its block deleted, ChainstateManager::EraseUnchecked.)
+                pblockindex = chainman.m_blockman.LookupCheckedBlockIndex(hashBlock);
                 if (!pblockindex) {
                     throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
                 }

@@ -310,25 +310,62 @@ chain that has them, and nothing for one that does not:
   (about 25 MB, 41 MiB at 1 KiB each) and 672 MiB of blocks at the very worst; a chain sets its own
   (FastBlocks: see doc/fastblocks.md). Entries taken out of the block index are
   freed a batch later (the last batch whole, up to `per_peer`, and 4096
-  before it).
+  before it): defence in depth only (below).
 - **Volatile.** Unchecked headers are not written to the block index database,
   and leave the block index when no peer holds them (the last holder
   disconnected): a reconnection or a new address never leaves headers behind.
-  The entries go to a list before they are freed (the last batch whole, and up to
-  4096 before it), and the peers' pointers into them (best known block, blocks in
-  flight) move to the nearest block that stays
-  (`PeerManagerImpl::UncheckedErased`); what is read without `cs_main` is read
-  with it held (the locator of the best header, the header tip notified,
-  `getblockheader`, `getblockfrompeer`). Code that keeps a pointer into the block
-  index across a release of `cs_main` does not rely on that list: each removal
-  counts (`m_unchecked_erasures`), and once it has the lock again it looks the
-  entry up again by hash if any removal happened meanwhile (`ActivateBestChain`
-  finds its most-work chain again; a headers message or a compact block looks up
-  the last header again, and keeps the lock while it stores pointers to it; the
-  headers taken in once the mainchain commits to them are returned by hash,
-  `RetryBmmWaiting`). (Review of audit 6: a holder that left while
-  `ActivateBestChain` connected toward its headers made the node read a deleted
-  block, a fatal error.)
+  This is new to Bitcoin's code, where a block index entry, once made, lives as
+  long as the node: see the next point.
+- **Pointers into the block index.** Only unchecked headers ever leave the block
+  index, any time `cs_main` is free (a peer disconnects), and a header once
+  checked stays so. So no code may use an unchecked header's entry once it
+  released `cs_main` since it found it. Every path that can reach one does one of
+  three things:
+  - *holds `cs_main` while it uses it*: `getblockheader`, `getchaintips`,
+    `getblockfrompeer`, `getblock` of an unchecked header's block (the block of a
+    checked one is read without the lock, as ever), the wallet's `findBlock` and
+    the other `interfaces::Chain` lookups (the block of an unchecked header, or
+    read while the caller still uses one, read with the lock held), the locator
+    of the best header and the header tip notified, what a `block` message reads
+    of its parent, `RegenerateCommitments`, the log of `ProcessNewBlockHeaders`;
+  - *looks it up again by hash* once it has the lock again, if any header left
+    meanwhile (each removal counts, `m_unchecked_erasures`): `ActivateBestChain`
+    (its most-work chain), `InvalidateBlock` (the block, and its map of blocks
+    that may become the best header or a candidate, built again), the headers
+    and compact block handlers (the last header; the lock kept while pointers
+    to it are stored), `RetryBmmWaiting` (returns hashes). `PreciousBlock`,
+    `InvalidateBlock` and the follower's invalidation of a block that lost its
+    commitment take a hash, looked up under their own lock;
+    `ProcessNewBlockHeaders` hands back its last header with that contract
+    (`ppindex`);
+  - *never sees unchecked headers*: `BlockManager::LookupCheckedBlockIndex`, for
+    the code that uses what it finds without the lock: `getblockstats`,
+    `gettxoutsetinfo` and `dumptxoutset` by hash, `getblockfilter`,
+    `gettxoutproof`, `getrawtransaction` with a block hash, REST's `block`,
+    `spenttxouts` and `blockfilter`, the wallet interface's block filter match,
+    `getblocktxn` (the node announces only blocks it connected), and the kernel
+    library's lookups (its best entry is the best header's highest checked
+    ancestor). A low-work headers sync (`HeadersSyncState`, which keeps its start
+    without the lock) never starts on an unchecked header: headers on one are
+    taken if they have the work, and ignored otherwise.
+
+  The rest sees only checked entries: the active chain, the validation interface
+  (connected blocks; `NewPoWValidBlock` is called with `cs_main` held), the
+  indexes, ZMQ, the GUI (through RPCs and `interfaces::Node`, which reads the
+  header tip with the lock held), and every lookup used under the lock. The
+  peers' pointers (best known block, last common block, best header sent, the
+  header of the chain sync timeout, blocks in flight) move to the nearest block
+  that stays, under the same lock (`PeerManagerImpl::UncheckedErased`). The
+  entries taken out are freed a batch later (`m_erased_headers`: the last batch
+  whole, and up to 4096 before it), only as defence in depth: a path missed
+  would read a dead entry rather than freed memory. Tests:
+  `unchecked_erased_while_used` (a peer leaves exactly where each of these uses
+  an entry, from another thread when `cs_main` is free there, and the entries
+  that leave are overwritten so that a use shows; it failed on the code
+  before), `attack_holder_leaves_while_its_blocks_connect`. (Review of audit 6: a
+  holder that left while `ActivateBestChain` connected toward its headers made
+  the node read a deleted block, a fatal error; `InvalidateBlock` could make an
+  entry that left the best header, and `getblock` read a deleted block.)
 - **Waiting headers keep their sender** (`AddBmmWaiting`). A header that waits
   (for the commitment to it, say) is kept with the peer that sent it, whichever
   way it came (a headers message, a compact block, a block). One whose sender is
@@ -356,15 +393,22 @@ chain that has them, and nothing for one that does not:
   `extension-failed` for the headers on it), and taken back by any other
   extension (`REPLACE`, or any other one if the node still cannot check it). The
   node asks the peers that hold the block's header, or whose best chain has it,
-  for the headers from its parent (one pending `getheaders` a peer): an honest
-  peer's copy of the extension replaces the failed one. A failed block is never
-  asked for again.
+  for the headers from its parent (one pending `getheaders` a peer; with one
+  pending already, from the last block both share, whose answer has the peer's
+  copy of either): an honest peer's copy of the extension replaces the failed
+  one. A failed block is never asked for again, and nothing is kept for a
+  failure but that one pending request: unlike the bounded list of failed blocks
+  asked for again before (review of audit 6, item 8a), there is nothing an
+  attacker can fill (`extension_failure_asked_again_whatever_fails`: 300 blocks
+  of an attacker's own fail around an honest one's failure, whose peer is still
+  asked, and whose block connects).
 
 Nothing in it is a rule of a block: it decides only whether and when the node
 holds a header, and which copy of an extension it tries first. Tests:
 `sidechain_hooks_tests.cpp` (`unchecked_*`, among them `unchecked_no_peer_drops_another`,
 `unchecked_inbound_budget_and_holders` and `unchecked_blocks_stored_apart`, `block_extension_unknown_taken`,
-`extension_failure_not_the_peers_fault`) and the fuzz target
+`extension_failure_not_the_peers_fault`, `unchecked_erased_while_used`,
+`extension_failure_asked_again_whatever_fails`) and the fuzz target
 `sidechain_unchecked`.
 
 ## Limits to know

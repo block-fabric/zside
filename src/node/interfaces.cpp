@@ -450,8 +450,13 @@ public:
     NodeContext* m_context{nullptr};
 };
 
+/**
+ * The block data is read without cs_main, unless `keep_lock`: the caller still uses entries it looked up
+ * (one of them an unchecked header, which may leave the block index as soon as the lock is released,
+ * ChainstateManager::EraseUnchecked), or `index` is one.
+ */
 // NOLINTNEXTLINE(misc-no-recursion)
-bool FillBlock(const CBlockIndex* index, const FoundBlock& block, UniqueLock<RecursiveMutex>& lock, const CChain& active, const BlockManager& blockman) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+bool FillBlock(const CBlockIndex* index, const FoundBlock& block, UniqueLock<RecursiveMutex>& lock, const CChain& active, const BlockManager& blockman, bool keep_lock = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (!index) return false;
     if (block.m_hash) *block.m_hash = index->GetBlockHash();
@@ -461,9 +466,13 @@ bool FillBlock(const CBlockIndex* index, const FoundBlock& block, UniqueLock<Rec
     if (block.m_mtp_time) *block.m_mtp_time = index->GetMedianTimePast();
     if (block.m_in_active_chain) *block.m_in_active_chain = active[index->nHeight] == index;
     if (block.m_locator) { *block.m_locator = GetLocator(index); }
-    if (block.m_next_block) FillBlock(active[index->nHeight] == index ? active[index->nHeight + 1] : nullptr, *block.m_next_block, lock, active, blockman);
-    if (block.m_data) {
+    if (block.m_next_block) FillBlock(active[index->nHeight] == index ? active[index->nHeight + 1] : nullptr, *block.m_next_block, lock, active, blockman, keep_lock || index->m_unchecked);
+    if (block.m_data && (keep_lock || index->m_unchecked)) {
+        TestBlockIndexUse();
+        if (!blockman.ReadBlock(*block.m_data, *index)) block.m_data->SetNull();
+    } else if (block.m_data) {
         REVERSE_LOCK(lock, cs_main);
+        TestBlockIndexUse();
         if (!blockman.ReadBlock(*block.m_data, *index)) block.m_data->SetNull();
     }
     block.found = true;
@@ -600,7 +609,9 @@ public:
         if (!block_filter_index) return std::nullopt;
 
         BlockFilter filter;
-        const CBlockIndex* index{WITH_LOCK(::cs_main, return chainman().m_blockman.LookupBlockIndex(block_hash))};
+        // (Used once cs_main is released: not an unchecked header, which may leave the block index then,
+        // ChainstateManager::EraseUnchecked. Never connected, it has no filter.)
+        const CBlockIndex* index{WITH_LOCK(::cs_main, return chainman().m_blockman.LookupCheckedBlockIndex(block_hash))};
         if (index == nullptr || !block_filter_index->LookupFilter(index, filter)) return std::nullopt;
         return filter.GetFilter().MatchAny(filter_set);
     }
@@ -641,11 +652,14 @@ public:
         const CBlockIndex* block1 = chainman().m_blockman.LookupBlockIndex(block_hash1);
         const CBlockIndex* block2 = chainman().m_blockman.LookupBlockIndex(block_hash2);
         const CBlockIndex* ancestor = block1 && block2 ? LastCommonAncestor(block1, block2) : nullptr;
+        // (block1 and block2 are used after the ancestor is filled: the lock is kept while that reads
+        // a block if either is an unchecked header, ChainstateManager::EraseUnchecked.)
+        const bool keep_lock{(block1 && block1->m_unchecked) || (block2 && block2->m_unchecked)};
         // Using & instead of && below to avoid short circuiting and leaving
         // output uninitialized. Cast bool to int to avoid -Wbitwise-instead-of-logical
         // compiler warnings.
-        return int{FillBlock(ancestor, ancestor_out, lock, active, chainman().m_blockman)} &
-               int{FillBlock(block1, block1_out, lock, active, chainman().m_blockman)} &
+        return int{FillBlock(ancestor, ancestor_out, lock, active, chainman().m_blockman, keep_lock)} &
+               int{FillBlock(block1, block1_out, lock, active, chainman().m_blockman, keep_lock)} &
                int{FillBlock(block2, block2_out, lock, active, chainman().m_blockman)};
     }
     void findCoins(std::map<COutPoint, Coin>& coins) override { return FindCoins(m_node, coins); }

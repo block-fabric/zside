@@ -9,18 +9,27 @@
 #include <consensus/params.h>
 #include <consensus/validation.h>
 #include <hash.h>
+#include <net.h>
+#include <net_processing.h>
+#include <interfaces/chain.h>
 #include <interfaces/mining.h>
 #include <node/miner.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <protocol.h>
+#include <rpc/request.h>
+#include <rpc/server.h>
 #include <sidechain/hooks.h>
 #include <sidechain/mainchain.h>
 #include <sidechain/state.h>
 #include <sidechain/store.h>
 #include <streams.h>
+#include <sync.h>
+#include <test/util/net.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
+#include <univalue.h>
 #include <txmempool.h>
 #include <validation.h>
 #include <validationinterface.h>
@@ -34,6 +43,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 // The generic extension points of the template (sidechain/hooks.h): what they do by default, which
@@ -1966,6 +1976,320 @@ BOOST_FIXTURE_TEST_CASE(waiting_unchecked_header_is_never_the_nodes_own, Sidecha
     BOOST_CHECK(!chainman.m_blockman.LookupBlockIndex(known.GetHash()));
     BOOST_CHECK(chainman.m_unchecked.empty());
     chainman.CheckUnchecked();
+}
+
+namespace {
+/**
+ * Takes the unchecked headers `peer` holds out of the block index where code uses the entries it looked
+ * up (TestBlockIndexUse): from another thread, if cs_main is free there, as any thread may whenever the
+ * code does not hold it (FinalizeNode, in the socket handler). Once.
+ */
+struct EraseWhereUsed {
+    ChainstateManager& chainman;
+    const int64_t peer;
+    bool erased{false};
+    EraseWhereUsed(ChainstateManager& chainman_in, int64_t peer_in) : chainman{chainman_in}, peer{peer_in}
+    {
+        g_test_block_index_use = [this] {
+            if (erased) return;
+            std::thread other{[this] {
+                TRY_LOCK(::cs_main, locked);
+                if (!locked) return;
+                chainman.UncheckedSourceGone(peer);
+                erased = true;
+            }};
+            other.join();
+        };
+    }
+    ~EraseWhereUsed() { g_test_block_index_use = nullptr; }
+};
+
+UniValue CallRpc(node::NodeContext& node, const std::string& method, std::vector<UniValue> params)
+{
+    JSONRPCRequest request;
+    request.context = &node;
+    request.strMethod = method;
+    request.params = UniValue{UniValue::VARR};
+    for (UniValue& param : params) request.params.push_back(std::move(param));
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    return tableRPC.execute(request);
+}
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(unchecked_erased_while_used, SidechainSetup)
+{
+    // Unchecked headers leave the block index, and are freed, once no peer holds them: at any time
+    // cs_main is free (a peer disconnecting). No code may use one it looked up once it released the
+    // lock (the entries kept a while before they are freed, m_erased_headers, are only defence in
+    // depth). Here a peer leaves exactly where each RPC uses what it looked up, if cs_main is free
+    // there, and the entries that leave are overwritten (m_test_poison_erased): the RPCs that show
+    // unchecked headers hold the lock while they do (they show what is there), and InvalidateBlock,
+    // which releases it between its steps, finds them again.
+    InstallHooks installed{std::make_unique<LateCheckedHooks>()};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3e};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    constexpr int64_t peer{7};
+    WITH_LOCK(::cs_main, chainman.m_test_poison_erased = true);
+    const int height{WITH_LOCK(::cs_main, return chainman.ActiveChain().Height()) + 1};
+    // A block of an unchecked header (forged: it fails when connected, and stays, with its block,
+    // unchecked) and two headers on it.
+    CBlock forged{Build()};
+    forged.nVersion |= BLOCK_EXTENSION_BIT;
+    forged.ext.hashSections.SetNull();
+    forged.ext.sig.fill(9);
+    while (!CheckProofOfWork(forged.GetHash(), forged.nBits, chainman.GetConsensus())) ++forged.nNonce;
+    CBlockHeader later{forged};
+    later.nTime = forged.nTime + 1;
+    const std::vector<CBlockHeader> on{UncheckedChain(later, forged.GetHash(), 2, 0x92)};
+    const auto send{[&] {
+        WITH_LOCK(::cs_main, chainman.UncheckedSourceAdded(peer));
+        std::vector<CBlockHeader> headers{forged};
+        headers.insert(headers.end(), on.begin(), on.end());
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state, nullptr, peer), state.ToString());
+        BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(forged), /*force_processing=*/true, /*min_pow_checked=*/true, nullptr, peer));
+        LOCK(::cs_main);
+        const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(forged.GetHash())};
+        BOOST_REQUIRE(index && index->m_unchecked && (index->nStatus & BLOCK_HAVE_DATA));
+        BOOST_REQUIRE(chainman.m_blockman.LookupBlockIndex(on.back().GetHash()));
+    }};
+    const auto gone{[&] {
+        LOCK(::cs_main);
+        return !chainman.m_blockman.LookupBlockIndex(forged.GetHash()) && !chainman.m_blockman.LookupBlockIndex(on.back().GetHash());
+    }};
+
+    // getblockheader: the lock held throughout, nothing leaves while it shows the header.
+    send();
+    {
+        EraseWhereUsed leaves{chainman, peer};
+        const UniValue header{CallRpc(m_node, "getblockheader", {UniValue{on.back().GetHash().GetHex()}})};
+        BOOST_CHECK(!leaves.erased);
+        BOOST_CHECK_EQUAL(header["height"].getInt<int>(), height + 2);
+        BOOST_CHECK_EQUAL(header["previousblockhash"].get_str(), on.front().GetHash().GetHex());
+        BOOST_CHECK_EQUAL(header["time"].getInt<int64_t>(), on.back().nTime);
+    }
+    WITH_LOCK(::cs_main, chainman.UncheckedSourceGone(peer));
+    BOOST_REQUIRE(gone());
+
+    // getchaintips: likewise.
+    send();
+    {
+        EraseWhereUsed leaves{chainman, peer};
+        const UniValue tips{CallRpc(m_node, "getchaintips", {})};
+        BOOST_CHECK(!leaves.erased);
+        bool found{false};
+        for (const UniValue& tip : tips.getValues()) {
+            if (tip["hash"].get_str() != on.back().GetHash().GetHex()) continue;
+            found = true;
+            BOOST_CHECK_EQUAL(tip["height"].getInt<int>(), height + 2);
+            BOOST_CHECK_EQUAL(tip["branchlen"].getInt<int>(), 3);
+        }
+        BOOST_CHECK(found);
+    }
+    WITH_LOCK(::cs_main, chainman.UncheckedSourceGone(peer));
+    BOOST_REQUIRE(gone());
+
+    // getblock of the unchecked header's block: the lock held throughout (the block, stored apart, is
+    // deleted with the header).
+    send();
+    {
+        EraseWhereUsed leaves{chainman, peer};
+        const UniValue block{CallRpc(m_node, "getblock", {UniValue{forged.GetHash().GetHex()}, UniValue{1}})};
+        BOOST_CHECK(!leaves.erased);
+        BOOST_CHECK_EQUAL(block["height"].getInt<int>(), height);
+        BOOST_CHECK_EQUAL(block["hash"].get_str(), forged.GetHash().GetHex());
+        BOOST_CHECK_EQUAL(block["nTx"].getInt<int>(), forged.vtx.size());
+    }
+    // getblock of a checked block: read without the lock, as ever; the peer leaves meanwhile, which
+    // changes nothing for it (checked entries never leave).
+    {
+        EraseWhereUsed leaves{chainman, peer};
+        const uint256 tip{WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->GetBlockHash())};
+        const UniValue block{CallRpc(m_node, "getblock", {UniValue{tip.GetHex()}, UniValue{1}})};
+        BOOST_CHECK(leaves.erased);
+        BOOST_CHECK_EQUAL(block["height"].getInt<int>(), height - 1);
+    }
+    BOOST_REQUIRE(gone());
+    // The wallet's interface: the same (the block of an unchecked header read with the lock held).
+    send();
+    {
+        EraseWhereUsed leaves{chainman, peer};
+        CBlock read;
+        int found_height{-2};
+        BOOST_CHECK(m_node.chain->findBlock(forged.GetHash(), interfaces::FoundBlock().height(found_height).data(read)));
+        BOOST_CHECK(!leaves.erased);
+        BOOST_CHECK_EQUAL(found_height, height);
+        BOOST_CHECK(read.GetHash() == forged.GetHash());
+    }
+    WITH_LOCK(::cs_main, chainman.UncheckedSourceGone(peer));
+    BOOST_REQUIRE(gone());
+
+    // The RPCs that use what they look up without the lock do not see unchecked headers at all.
+    send();
+    {
+        EraseWhereUsed leaves{chainman, peer};
+        BOOST_CHECK_THROW(CallRpc(m_node, "getblockstats", {UniValue{forged.GetHash().GetHex()}}), UniValue);
+        BOOST_CHECK_THROW(CallRpc(m_node, "gettxoutproof", {UniValue{UniValue::VARR}, UniValue{forged.GetHash().GetHex()}}), UniValue);
+        BOOST_CHECK(!leaves.erased);
+    }
+    WITH_LOCK(::cs_main, chainman.UncheckedSourceGone(peer));
+    BOOST_REQUIRE(gone());
+
+    // InvalidateBlock releases cs_main between its steps, with a map of the blocks that may become
+    // the best header or a candidate: an unchecked branch with more work than the tip it takes back
+    // is among them. That branch leaves meanwhile (the peer goes as InvalidateBlock begins): it must
+    // not become the best header, nor a candidate (here, without overwriting the entries that left,
+    // which would hide it: it would point to an entry no longer in the block index).
+    WITH_LOCK(::cs_main, chainman.m_test_poison_erased = false);
+    const CBlock valid{Build()};
+    Take(valid);
+    // The branch: on the tip's parent, two unchecked headers (more work than the tip).
+    WITH_LOCK(::cs_main, chainman.UncheckedSourceAdded(peer));
+    const std::vector<CBlockHeader> branch{UncheckedChain(valid, valid.hashPrevBlock, 3, 0x93)};
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(branch, /*min_pow_checked=*/true, state, nullptr, peer), state.ToString());
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.m_best_header->GetBlockHash()) == branch.back().GetHash());
+    {
+        EraseWhereUsed leaves{chainman, peer};
+        BOOST_CHECK(chainman.ActiveChainstate().InvalidateBlock(state, valid.GetHash()));
+        BOOST_CHECK(leaves.erased);
+    }
+    LOCK(::cs_main);
+    BOOST_CHECK(chainman.ActiveChain().Tip()->GetBlockHash() == valid.hashPrevBlock);
+    for (const CBlockHeader& header : branch) BOOST_CHECK(!chainman.m_blockman.LookupBlockIndex(header.GetHash()));
+    const CBlockIndex* best{chainman.m_best_header};
+    BOOST_CHECK(best && chainman.m_blockman.LookupBlockIndex(best->GetBlockHash()) == best);
+    for (const CBlockIndex* candidate : chainman.ActiveChainstate().setBlockIndexCandidates) {
+        BOOST_CHECK(chainman.m_blockman.LookupBlockIndex(candidate->GetBlockHash()) == candidate);
+    }
+    chainman.CheckBlockIndex();
+    chainman.CheckUnchecked();
+}
+
+namespace {
+/** A peer of the node's (PeerManager), whose messages the test sends. */
+struct TestPeer {
+    CNode node;
+    TestPeer(NodeId id, ConnmanTestMsg& connman) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+        : node{id, /*sock=*/nullptr, CAddress{CService{CNetAddr{in_addr{htonl(0x0a000001 + static_cast<uint32_t>(id))}}, 8333}, NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0, /*nLocalHostNonceIn=*/0, CAddress{}, /*addrNameIn=*/"", ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false, /*network_key=*/0}
+    {
+        connman.Handshake(node, /*successfully_connected=*/true, ServiceFlags(NODE_NETWORK | NODE_WITNESS), ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+                          PROTOCOL_VERSION, /*relay_txs=*/false);
+    }
+    void Send(ConnmanTestMsg& connman, CSerializedNetMsg&& msg) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+    {
+        // (What the node sent the peer is dropped: the transport takes one message at a time.)
+        connman.FlushSendBuffer(node);
+        (void)connman.ReceiveMsgFrom(node, std::move(msg));
+        node.fPauseSend = false;
+        while (connman.ProcessMessagesOnce(node)) {}
+        connman.FlushSendBuffer(node);
+    }
+    void Headers(ConnmanTestMsg& connman, const std::vector<CBlockHeader>& headers) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+    {
+        std::vector<CBlock> blocks;
+        for (const CBlockHeader& header : headers) blocks.emplace_back(header);
+        Send(connman, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(blocks)));
+    }
+    void Block(ConnmanTestMsg& connman, const CBlock& block) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+    {
+        Send(connman, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(block)));
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(extension_failure_asked_again_whatever_fails, SidechainSetup)
+{
+    // Review of audit 6, item 8a: the blocks that failed with a forged extension were asked for again
+    // from a list of at most 64 (m_extension_reask); an attacker filled it with blocks of its own that
+    // failed so, and an honest block's failure was then never asked for again: its branch stalled. That
+    // list is gone (a failure asks the peers that hold the header, or whose best chain has it, for its
+    // headers again, one pending request a peer, from where the pending one and the new one meet), and
+    // nothing is kept for a failure that an attacker could fill. Here an attacker makes 150 blocks of
+    // its own fail before, and 150 after, the honest block's failure (the forged copy of its header
+    // the attacker sent first): the honest peer is still asked, and its answer connects the block.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    InstallHooks installed{std::make_unique<LateCheckedHooks>()};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3e};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    connman.SetPeerConnectTimeout(99999s);
+    // (As the node does: the test setup does not.)
+    m_node.validation_signals->RegisterValidationInterface(m_node.peerman.get());
+    TestPeer honest{0, connman};
+    TestPeer attacker{1, connman};
+    const uint256 tip{WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->GetBlockHash())};
+
+    CBlock block{Build()};
+    block.nVersion |= BLOCK_EXTENSION_BIT;
+    block.ext.hashSections.SetNull();
+    block.ext.sig.fill(5);
+    CBlockHeader forged{block};
+    forged.ext.sig.fill(9);
+    // Blocks of the attacker's own on the tip, each failing for its forged extension when connected.
+    int tag{0};
+    const auto fail_own{[&](int count) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        for (int i{0}; i < count; ++i) {
+            CBlock own{Build(block.nTime + 1 + tag)};
+            CMutableTransaction coinbase{*own.vtx[0]};
+            ++tag;
+            coinbase.vin[0].scriptSig << std::vector<unsigned char>{static_cast<unsigned char>(tag), static_cast<unsigned char>(tag >> 8), 0xa7};
+            own.vtx[0] = MakeTransactionRef(std::move(coinbase));
+            own.nVersion |= BLOCK_EXTENSION_BIT;
+            own.ext.hashSections.SetNull();
+            own.ext.sig.fill(9);
+            own.hashMerkleRoot = BlockMerkleRoot(own);
+            while (!CheckProofOfWork(own.GetHash(), own.nBits, chainman.GetConsensus())) ++own.nNonce;
+            attacker.Block(connman, own);
+            LOCK(::cs_main);
+            const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(own.GetHash())};
+            BOOST_REQUIRE(index && chainman.UncheckedExtensionFailed(*index));
+        }
+    }};
+    fail_own(150);
+    // The attacker sends the honest header with a forged signature first; the honest peer its own
+    // (another signature the node cannot check: it keeps the first), then the block, which fails.
+    attacker.Headers(connman, {forged});
+    honest.Headers(connman, {block});
+    honest.Block(connman, block);
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(block.GetHash())};
+        BOOST_REQUIRE(index && chainman.UncheckedExtensionFailed(*index));
+        BOOST_REQUIRE(chainman.HoldsUnchecked(*index, honest.node.GetId()));
+        BOOST_CHECK(chainman.ActiveChain().Tip()->GetBlockHash() == tip);
+    }
+    fail_own(150);
+    // The honest peer is asked for the headers after the tip (the block's parent).
+    std::optional<CBlockLocator> asked;
+    const auto capture_orig{CaptureMessage};
+    m_node.connman->SetCaptureMessages(true);
+    CaptureMessage = [&](const CAddress&, const std::string& msg_type, std::span<const unsigned char> data, bool is_incoming) {
+        if (is_incoming || msg_type != NetMsgType::GETHEADERS) return;
+        CBlockLocator locator;
+        SpanReader{data} >> locator;
+        asked = locator;
+    };
+    // (Past the wait between two getheaders to one peer.)
+    SetMockTime(std::chrono::seconds{GetTime() + 5 * 60});
+    m_node.peerman->SendMessages(honest.node);
+    CaptureMessage = capture_orig;
+    m_node.connman->SetCaptureMessages(false);
+    BOOST_REQUIRE(asked && !asked->vHave.empty());
+    BOOST_CHECK(asked->vHave.front() == tip);
+    // Its answer: its own signature replaces the forged one, and the block is connected.
+    honest.Headers(connman, {block});
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->GetBlockHash()) == block.GetHash());
+    BOOST_CHECK(!honest.node.fDisconnect);
+    m_node.peerman->FinalizeNode(honest.node);
+    m_node.peerman->FinalizeNode(attacker.node);
+    m_node.validation_signals->UnregisterValidationInterface(m_node.peerman.get());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

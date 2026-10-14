@@ -2438,13 +2438,23 @@ void PeerManagerImpl::BlockChecked(const std::shared_ptr<const CBlock>& block, c
         mapBlockSource.erase(it);
     // An unchecked header's extension failure (the copy's fault): the peers that hold the header, or
     // whose best chain has it, are asked for its headers again, for their copy of the extension, which
-    // replaces the node's (AcceptBlockHeader). One pending request a peer.
+    // replaces the node's (AcceptBlockHeader). One pending request a peer, from the last block both
+    // failures share if one is pending already: the peer's answer (its headers after the fork of that
+    // point with its best chain) has its copy of whichever it has, so no failure crowds out another
+    // (unlike the bounded list of blocks asked for again before, which an attacker could fill: review
+    // of audit 6, item 8a). Nothing else is kept, so there is nothing to fill.
     if (state.IsInvalid() && block->IsExtended() && sidechain::Hooks().ExtensionFailure(state.GetRejectReason())) {
         const CBlockIndex* index{m_chainman.m_blockman.LookupBlockIndex(hash)};
         if (index && index->pprev && m_chainman.UncheckedExtensionFailed(*index)) {
             for (auto& [node_id, node_state] : m_node_states) {
                 if (m_chainman.HoldsUnchecked(*index, node_id) || (node_state.pindexBestKnownBlock && node_state.pindexBestKnownBlock->GetAncestor(index->nHeight) == index)) {
-                    node_state.m_reask_headers_from = index->pprev->GetBlockHash();
+                    const CBlockIndex* from{index->pprev};
+                    if (node_state.m_reask_headers_from) {
+                        if (const CBlockIndex* pending{m_chainman.m_blockman.LookupBlockIndex(*node_state.m_reask_headers_from)}) {
+                            from = LastCommonAncestor(pending, from);
+                        }
+                    }
+                    node_state.m_reask_headers_from = from->GetBlockHash();
                 }
             }
         }
@@ -3383,7 +3393,14 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     }
 
     // Do these headers connect to something in our block index?
-    const CBlockIndex *chain_start_header{WITH_LOCK(::cs_main, return m_chainman.m_blockman.LookupBlockIndex(headers[0].hashPrevBlock))};
+    // (A sidechain's unchecked header may leave the block index as soon as cs_main is released,
+    // ChainstateManager::EraseUnchecked: one is not used without the lock, below.)
+    bool chain_start_unchecked{false};
+    const CBlockIndex *chain_start_header{WITH_LOCK(::cs_main, {
+        const CBlockIndex* start{m_chainman.m_blockman.LookupBlockIndex(headers[0].hashPrevBlock)};
+        chain_start_unchecked = start && start->m_unchecked;
+        return start;
+    })};
     bool headers_connect_blockindex{chain_start_header != nullptr};
 
     if (!headers_connect_blockindex) {
@@ -3419,6 +3436,21 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     // Nor on a sidechain whose chain order is not work: a minimum of it would mean nothing. Its own
     // header rules (a commitment or a signature per block) are what keep headers in check.
     if (sidechain::Hooks().CustomChainOrder()) {
+        already_validated_work = true;
+    }
+
+    // A low-work headers sync keeps its start, a block index entry, without cs_main (HeadersSyncState):
+    // never from an unchecked header, which may leave the block index meanwhile. Headers on one are
+    // processed if they have the work, and ignored otherwise, as a low-work chain too short for a sync.
+    if (!already_validated_work && chain_start_unchecked) {
+        const bool enough_work{WITH_LOCK(::cs_main, {
+            const CBlockIndex* start{m_chainman.m_blockman.LookupBlockIndex(headers[0].hashPrevBlock)};
+            return start && start->nChainWork + CalculateClaimedHeadersWork(headers) >= GetAntiDoSWorkThreshold();
+        })};
+        if (!enough_work) {
+            LogDebug(BCLog::NET, "Ignoring low-work chain on an unchecked header from peer=%d\n", pfrom.GetId());
+            return;
+        }
         already_validated_work = true;
     }
 
@@ -4775,7 +4807,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         {
             LOCK(cs_main);
 
-            const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(req.blockhash);
+            // (Not the block of an unchecked header: it is read without cs_main, and may be deleted
+            // meanwhile, ChainstateManager::EraseUnchecked. The node announces only blocks it connected.)
+            const CBlockIndex* pindex = m_chainman.m_blockman.LookupCheckedBlockIndex(req.blockhash);
             if (!pindex || !(pindex->nStatus & BLOCK_HAVE_DATA)) {
                 LogDebug(BCLog::NET, "Peer %d sent us a getblocktxn for a block we don't have\n", pfrom.GetId());
                 return;
@@ -5343,11 +5377,19 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         LogDebug(BCLog::NET, "received block %s peer=%d\n", pblock->GetHash().ToString(), pfrom.GetId());
 
-        const CBlockIndex* prev_block{WITH_LOCK(m_chainman.GetMutex(), return m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock))};
+        // (What is needed of the parent is read with the lock held: a sidechain's unchecked header may
+        // leave the block index as soon as it is released, ChainstateManager::EraseUnchecked.)
+        std::optional<std::pair<bool, arith_uint256>> prev_block;
+        {
+            LOCK(m_chainman.GetMutex());
+            if (const CBlockIndex* prev{m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock)}) {
+                prev_block.emplace(DeploymentActiveAfter(prev, m_chainman, Consensus::DEPLOYMENT_SEGWIT), prev->nChainWork);
+            }
+        }
 
         // Check for possible mutation if it connects to something we know so we can check for DEPLOYMENT_SEGWIT being active
         if (prev_block && IsBlockMutated(/*block=*/*pblock,
-                           /*check_witness_root=*/DeploymentActiveAfter(prev_block, m_chainman, Consensus::DEPLOYMENT_SEGWIT))) {
+                           /*check_witness_root=*/prev_block->first)) {
             LogDebug(BCLog::NET, "Received mutated block from peer=%d\n", peer.m_id);
             Misbehaving(peer, "mutated block");
             WITH_LOCK(cs_main, RemoveBlockRequest(pblock->GetHash(), peer.m_id));
@@ -5369,7 +5411,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
 
             // Check claimed work on this block against our anti-dos thresholds.
-            if (prev_block && prev_block->nChainWork + GetBlockProof(*pblock) >= GetAntiDoSWorkThreshold()) {
+            if (prev_block && prev_block->second + GetBlockProof(*pblock) >= GetAntiDoSWorkThreshold()) {
                 min_pow_checked = true;
             }
         }

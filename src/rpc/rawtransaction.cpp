@@ -315,7 +315,9 @@ static RPCMethod getrawtransaction()
         LOCK(cs_main);
 
         uint256 blockhash = ParseHashV(request.params[2], "parameter 3");
-        blockindex = chainman.m_blockman.LookupBlockIndex(blockhash);
+        // (Used once cs_main is released: not an unchecked header, which may leave the block index
+        // then, its block deleted, ChainstateManager::EraseUnchecked.)
+        blockindex = chainman.m_blockman.LookupCheckedBlockIndex(blockhash);
         if (!blockindex) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block hash not found");
         }

@@ -183,7 +183,9 @@ static const CBlockIndex* ParseHashOrHeight(const UniValue& param, ChainstateMan
         return active_chain[height];
     } else {
         const uint256 hash{ParseHashV(param, "hash_or_height")};
-        const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(hash);
+        // (Its callers use it once cs_main is released: not an unchecked header, which may leave the
+        // block index then. None of them could use one: none is connected.)
+        const CBlockIndex* pindex = chainman.m_blockman.LookupCheckedBlockIndex(hash);
 
         if (!pindex) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
@@ -700,6 +702,7 @@ static RPCMethod getblockheader()
     if (!pblockindex) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
     }
+    TestBlockIndexUse();
 
     if (!fVerbose)
     {
@@ -892,6 +895,28 @@ static RPCMethod getblock()
     const CBlockIndex* pblockindex;
     const CBlockIndex* tip;
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    const auto show{[&]() -> UniValue {
+        TestBlockIndexUse();
+        const std::vector<std::byte> block_data{GetRawBlockChecked(chainman.m_blockman, *pblockindex)};
+
+        if (verbosity <= 0) {
+            return HexStr(block_data);
+        }
+
+        CBlock block{};
+        SpanReader{block_data} >> TX_WITH_WITNESS(block);
+
+        TxVerbosity tx_verbosity;
+        if (verbosity == 1) {
+            tx_verbosity = TxVerbosity::SHOW_TXID;
+        } else if (verbosity == 2) {
+            tx_verbosity = TxVerbosity::SHOW_DETAILS;
+        } else {
+            tx_verbosity = TxVerbosity::SHOW_DETAILS_AND_PREVOUT;
+        }
+
+        return blockToJSON(chainman.m_blockman, block, *tip, *pblockindex, tx_verbosity, chainman.GetConsensus().powLimit);
+    }};
     {
         LOCK(cs_main);
         pblockindex = chainman.m_blockman.LookupBlockIndex(hash);
@@ -900,27 +925,12 @@ static RPCMethod getblock()
         if (!pblockindex) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
+        // A sidechain's unchecked header may leave the block index, its block deleted, as soon as cs_main
+        // is released (ChainstateManager::EraseUnchecked): shown with the lock held throughout. (Any other
+        // entry stays: its block is read without the lock, as ever.)
+        if (pblockindex->m_unchecked) return show();
     }
-
-    const std::vector<std::byte> block_data{GetRawBlockChecked(chainman.m_blockman, *pblockindex)};
-
-    if (verbosity <= 0) {
-        return HexStr(block_data);
-    }
-
-    CBlock block{};
-    SpanReader{block_data} >> TX_WITH_WITNESS(block);
-
-    TxVerbosity tx_verbosity;
-    if (verbosity == 1) {
-        tx_verbosity = TxVerbosity::SHOW_TXID;
-    } else if (verbosity == 2) {
-        tx_verbosity = TxVerbosity::SHOW_DETAILS;
-    } else {
-        tx_verbosity = TxVerbosity::SHOW_DETAILS_AND_PREVOUT;
-    }
-
-    return blockToJSON(chainman.m_blockman, block, *tip, *pblockindex, tx_verbosity, chainman.GetConsensus().powLimit);
+    return show();
 },
     };
 }
@@ -1673,6 +1683,9 @@ static RPCMethod getchaintips()
 
     // Always report the currently active tip.
     setTips.insert(active_chain.Tip());
+    // (cs_main is held throughout: a sidechain's unchecked headers may leave the block index as soon as it
+    // is released, ChainstateManager::EraseUnchecked.)
+    TestBlockIndexUse();
 
     /* Construct the output array.  */
     UniValue res(UniValue::VARR);
@@ -1733,19 +1746,19 @@ static RPCMethod preciousblock()
         [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
     uint256 hash(ParseHashV(request.params[0], "blockhash"));
-    CBlockIndex* pblockindex;
 
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
     {
         LOCK(cs_main);
-        pblockindex = chainman.m_blockman.LookupBlockIndex(hash);
-        if (!pblockindex) {
+        if (!chainman.m_blockman.LookupBlockIndex(hash)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
     }
 
+    // (By hash: a sidechain's unchecked header may leave the block index as soon as cs_main is released,
+    // ChainstateManager::EraseUnchecked.)
     BlockValidationState state;
-    chainman.ActiveChainstate().PreciousBlock(state, pblockindex);
+    chainman.ActiveChainstate().PreciousBlock(state, hash);
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.ToString());
@@ -1758,15 +1771,15 @@ static RPCMethod preciousblock()
 
 void InvalidateBlock(ChainstateManager& chainman, const uint256 block_hash) {
     BlockValidationState state;
-    CBlockIndex* pblockindex;
     {
         LOCK(chainman.GetMutex());
-        pblockindex = chainman.m_blockman.LookupBlockIndex(block_hash);
-        if (!pblockindex) {
+        if (!chainman.m_blockman.LookupBlockIndex(block_hash)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
     }
-    chainman.ActiveChainstate().InvalidateBlock(state, pblockindex);
+    // (By hash: a sidechain's unchecked header may leave the block index as soon as cs_main is released,
+    // ChainstateManager::EraseUnchecked.)
+    chainman.ActiveChainstate().InvalidateBlock(state, block_hash);
 
     if (state.IsValid()) {
         chainman.ActiveChainstate().ActivateBestChain(state);
@@ -3043,6 +3056,11 @@ static RPCMethod getblockfilter()
         block_index = chainman.m_blockman.LookupBlockIndex(block_hash);
         if (!block_index) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+        }
+        // (Used once cs_main is released: not an unchecked header, which may leave the block index then,
+        // ChainstateManager::EraseUnchecked. Never connected, it has no filter.)
+        if (block_index->m_unchecked) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Filter not found. Block was not connected to active chain.");
         }
         block_was_connected = block_index->IsValid(BLOCK_VALID_SCRIPTS);
     }

@@ -101,8 +101,12 @@ void RegenerateCommitments(CBlock& block, ChainstateManager& chainman)
     tx.vout.erase(tx.vout.begin() + GetWitnessCommitmentIndex(block));
     block.vtx.at(0) = MakeTransactionRef(tx);
 
-    const CBlockIndex* prev_block = WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock));
-    chainman.GenerateCoinbaseCommitment(block, prev_block);
+    {
+        // (With the lock held: a sidechain's unchecked header may leave the block index as soon as it
+        // is released, ChainstateManager::EraseUnchecked.)
+        LOCK(::cs_main);
+        chainman.GenerateCoinbaseCommitment(block, chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock));
+    }
 
     block.hashMerkleRoot = BlockMerkleRoot(block);
 }
