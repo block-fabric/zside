@@ -4538,7 +4538,7 @@ void ChainstateManager::EraseUnchecked(std::vector<const CBlockIndex*> doomed)
     std::vector<std::pair<const CBlockIndex*, const CBlockIndex*>> moved;
     moved.reserve(doomed.size());
     for (const CBlockIndex* index : doomed) {
-        Assume(index->m_unchecked && !(index->nStatus & BLOCK_VALID_SCRIPTS));
+        Assume(index->m_unchecked && !index->IsValid(BLOCK_VALID_SCRIPTS));
         const CBlockIndex* stays{index->pprev};
         while (stays && erased.contains(stays)) stays = stays->pprev;
         moved.emplace_back(index, stays);
@@ -7267,7 +7267,7 @@ double ChainstateManager::GuessVerificationProgress(const CBlockIndex* pindex) c
     const int64_t nNow{TicksSinceEpoch<std::chrono::seconds>(NodeClock::now())};
     // With a chain order of a sidechain's own, the header of the most work may be lower than the tip
     // (a sidechain's key need not grow with the height alone): not a bug then.
-    const auto best_header_above{[&] {
+    const auto best_header_above{[&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         return sidechain::Hooks().CustomChainOrder() ? m_best_header->nHeight >= pindex->nHeight : Assume(m_best_header->nHeight >= pindex->nHeight);
     }};
     const auto block_time{

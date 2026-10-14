@@ -209,7 +209,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         const CTransactionRef& withdrawal{drivechain_additions.withdrawals[i]};
         // A withdrawal that does not fit waits for the next block.
         if (nBlockWeight + GetTransactionWeight(*withdrawal) >= *Assert(m_options.block_max_weight)) continue;
-        if (nBlockSigOpsCost + WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*withdrawal) >= chainparams.GetConsensus().MaxBlockSigOpsCost()) continue;
+        if (nBlockSigOpsCost + WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*withdrawal) >= static_cast<uint64_t>(chainparams.GetConsensus().MaxBlockSigOpsCost())) continue;
         pblock->vtx.push_back(withdrawal);
         pblocktemplate->vTxFees.push_back(drivechain_additions.withdrawal_fees[i]);
         pblocktemplate->vTxSigOpsCost.push_back(WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*withdrawal));
@@ -450,7 +450,7 @@ bool BlockAssembler::TestChunkBlockLimits(int64_t chunk_weight, int64_t chunk_si
     if (nBlockWeight + chunk_weight >= m_options.block_max_weight) {
         return false;
     }
-    if (nBlockSigOpsCost + chunk_sigops_cost >= chainparams.GetConsensus().MaxBlockSigOpsCost()) {
+    if (nBlockSigOpsCost + chunk_sigops_cost >= static_cast<uint64_t>(chainparams.GetConsensus().MaxBlockSigOpsCost())) {
         return false;
     }
     return true;

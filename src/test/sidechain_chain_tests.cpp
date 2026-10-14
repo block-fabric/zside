@@ -689,7 +689,7 @@ BOOST_AUTO_TEST_CASE(disconnect_without_undo_data)
     // taken back, the sidechain state of the block before it being derived from nowhere. It stays.
     Mine();
     const CBlock tip{Mine()};
-    Chainman().m_blockman.m_drivechain_db->EraseBlockUndo(tip.GetHash());
+    WITH_LOCK(::cs_main, Chainman().m_blockman.m_drivechain_db->EraseBlockUndo(tip.GetHash()));
     CBlockIndex* index{WITH_LOCK(::cs_main, return Chainman().m_blockman.LookupBlockIndex(tip.GetHash()))};
     BlockValidationState state;
     {

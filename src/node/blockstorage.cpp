@@ -1226,7 +1226,7 @@ FlatFilePos BlockManager::WriteVolatileBlock(const CBlock& block, std::optional<
         number = m_volatile_next++;
     }
     const FlatFilePos file_pos{number, 0};
-    const auto fail{[&] {
+    const auto fail{[&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         std::error_code ec;
         fs::remove(m_volatile_file_seq.FileName(file_pos), ec);
         if (!in_place) m_volatile_free.insert(number);

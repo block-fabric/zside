@@ -3519,7 +3519,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
             // On a sidechain, a header can come before the mainchain block that commits to it
             // is on record. It is tried again then; remember that this peer has the block.
             if (sidechain::Hooks().IsWaitReason(state.GetRejectReason())) {
-                LOCK(::cs_main);
+                AssertLockHeld(::cs_main);
                 // The headers after the first one without a commitment were not looked at. Keep them
                 // too, to be taken in when the mainchain commits to them: the peer sends them only once,
                 // and a node that has only the first would not know the rest of the chain to fetch.
@@ -3543,7 +3543,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 // fault (a header too far ahead of the node's clock, one a sidechain cannot check yet,
                 // a branch it does not need) are the peer's: without this, a node catching up whose
                 // last header from each peer fails so would fetch no block below it.
-                LOCK(::cs_main);
+                AssertLockHeld(::cs_main);
                 UpdateBlockAvailability(pfrom.GetId(), pindexLast->GetBlockHash());
             }
             if (state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK && (sidechain::Hooks().CustomChainOrder() || state.GetRejectReason() == "unchecked-budget")) {
@@ -3551,7 +3551,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 // unchecked headers, of which a peer holds so many: those whose blocks the node connected
                 // since make room). Without this, a node that had all a peer had room for would not ask
                 // it for more before it announced a new block.
-                peer.m_headers_retry_after = WITH_LOCK(::cs_main, return m_chainman.ActiveChain().Tip()->GetBlockHash());
+                peer.m_headers_retry_after = m_chainman.ActiveChain().Tip()->GetBlockHash();
             }
             MaybePunishNodeForBlock(pfrom.GetId(), state, via_compact_block, "invalid header received");
             return;

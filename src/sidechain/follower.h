@@ -58,13 +58,13 @@ public:
      * Must not be called with cs_main held.
      * @return false, with `error` set, if the mainchain node could not be asked.
      */
-    bool Sync(std::string& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
+    bool Sync(std::string& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex, !m_act_mutex);
     /**
      * Bring the record up to date if no other thread is doing so, and leave
      * acting on the changes to the thread of the follower. For callers that
      * hold cs_main.
      */
-    void Poll() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
+    void Poll() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex, !m_act_mutex);
 
     struct Status {
         bool connected{false};
@@ -83,7 +83,7 @@ public:
      * Build a block that pays its fees to `coinbase_script`, and keep it until
      * the mainchain commits to it or moves on.
      */
-    std::optional<Candidate> CreateCandidate(const CScript& coinbase_script, std::string& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
+    std::optional<Candidate> CreateCandidate(const CScript& coinbase_script, std::string& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex, !m_act_mutex);
     /** Ask the wallet of the mainchain node to pay `amount` for a commitment to `candidate`. @return the id of its transaction */
     std::optional<std::string> RequestCommitment(const Candidate& candidate, CAmount amount, std::string& error) const;
     /**
@@ -140,7 +140,7 @@ public:
     void AllowDeepReorg(bool allow = true) { m_allow_deep_reorg = allow; }
 
 private:
-    void Run() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
+    void Run() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex, !m_act_mutex);
     /** Update the record. @return whether it changed */
     /**
      * @param[in] may_drop  whether to follow the mainchain back when it dropped blocks on record;
@@ -154,7 +154,7 @@ private:
     void CheckSlot(bool record_changed) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Do what the changes of the record call for. */
     void Act() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    void Mine() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
+    void Mine() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex, !m_act_mutex);
     void SendBundle() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Whether this node is still catching up with its chain: in initial block download, or behind the commitments on record. */
     bool CatchingUp() const;

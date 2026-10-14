@@ -156,7 +156,7 @@ BOOST_AUTO_TEST_CASE(failed_disconnect_keeps_the_sidechain_database)
     BOOST_REQUIRE(at_tip.GetSlot(0)->has_ctip);
     {
         auto broken{BreakTipCoins()};
-        LOCK(m_node.mempool->cs);
+        LOCK(chainstate.MempoolMutex());
         BlockValidationState state;
         {
             ASSERT_DEBUG_LOG("DisconnectTip(): DisconnectBlock " + tip->GetBlockHash().ToString() + " failed");
@@ -178,7 +178,7 @@ BOOST_AUTO_TEST_CASE(failed_disconnect_keeps_the_sidechain_database)
     DrivechainDB().WriteBlock(tip->GetBlockHash(), tip->nHeight, wrong, {}, chainstate.m_scdb);
     {
         auto broken{BreakTipCoins()};
-        LOCK(m_node.mempool->cs);
+        LOCK(chainstate.MempoolMutex());
         BlockValidationState state;
         {
             ASSERT_DEBUG_LOG("the sidechain database cannot be brought back to " + tip->GetBlockHash().ToString() + " (bad-dc-inactive-sidechain)");
@@ -725,7 +725,7 @@ BOOST_AUTO_TEST_CASE(deep_chain_without_old_undo_data)
     const CBlockIndex* top{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
     const SidechainDB at_top{WITH_LOCK(::cs_main, return chainstate.m_scdb)};
     {
-        LOCK2(::cs_main, m_node.mempool->cs);
+        LOCK2(::cs_main, chainstate.MempoolMutex());
         while (DrivechainDB().HasBlockUndo(chainstate.m_chain.Tip()->GetBlockHash())) {
             BlockValidationState state;
             BOOST_REQUIRE(chainstate.DisconnectTip(state, nullptr));

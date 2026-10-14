@@ -66,7 +66,7 @@ UniValue MainClient::Call(const std::string& method, const UniValue& params, boo
         const auto deadline{SteadyClock::now() + TIMEOUT};
         char buffer[65536];
         while (true) {
-            Sock::Event occurred;
+            Sock::Event occurred{0};
             const auto remaining{std::chrono::duration_cast<std::chrono::milliseconds>(deadline - SteadyClock::now())};
             if (remaining <= 0ms || !sock->Wait(remaining, Sock::RecvEvent, &occurred)) throw std::runtime_error("timeout");
             if (!(occurred & Sock::RecvEvent)) continue;

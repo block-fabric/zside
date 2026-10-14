@@ -196,10 +196,9 @@ BOOST_AUTO_TEST_CASE(database_reads_in_order)
     DbStore store{db, B({'T', 0})};
     std::map<StoreBytes, StoreBytes> model;
     const auto expect{[&](std::span<const unsigned char> from, std::span<const unsigned char> prefix) -> std::optional<std::pair<StoreBytes, StoreBytes>> {
-        for (auto it{model.lower_bound(StoreBytes(from.begin(), from.end()))}; it != model.end(); ++it) {
-            if (it->first.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), it->first.begin())) return *it;
-            return std::nullopt;
-        }
+        // The first key at or after `from`, if it has the prefix (a seek does not skip keys).
+        const auto it{model.lower_bound(StoreBytes(from.begin(), from.end()))};
+        if (it != model.end() && it->first.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), it->first.begin())) return *it;
         return std::nullopt;
     }};
     for (int round{0}; round < 50; ++round) {
