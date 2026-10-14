@@ -442,8 +442,9 @@ class SidechainTest(BitcoinTestFramework):
         # A transaction with a fee does.
         txid = side.sendtoaddress(side.getnewaddress(), 1)
         fee = -side.gettransaction(txid)["fee"]
-        # The request reaches the mainchain mempool a moment before the node notes it.
-        self.wait_until(lambda: len(main.getrawmempool()) == 1 and side.getbmminfo()["lastfees"] == fee)
+        # The request reaches the mainchain mempool a moment before the node notes it (no "lastfees" before
+        # the first request).
+        self.wait_until(lambda: len(main.getrawmempool()) == 1 and side.getbmminfo().get("lastfees") == fee)
         mining = side.getbmminfo()
         assert_equal(mining["idle"], False)
         assert_equal(mining["lastfees"], fee)
