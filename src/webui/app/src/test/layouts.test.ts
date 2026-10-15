@@ -154,7 +154,7 @@ describe('the commands', () => {
     const groups = [...MENU_GROUPS] as string[];
     expect(groups.indexOf('Chains')).toBeLessThan(groups.indexOf('Tools'));
     const chains = all.filter((c) => c.group === 'Chains').map((c) => c.label);
-    for (const label of SIDECHAIN ? ['Peg', 'Deposit…', 'Withdraw…', 'Merged mining', 'Block explorer'] : ['Sidechains', 'Sidechain nodes', 'Solo mine', 'Block explorer']) expect(chains).toContain(label);
+    for (const label of SIDECHAIN ? ['Drivechains', 'Deposit…', 'Withdraw…', 'Merged mining', 'Block explorer'] : ['Sidechains', 'Sidechain nodes', 'Solo mine', 'Block explorer']) expect(chains).toContain(label);
     // A sidechain has none of the items of the sidechains of the mainchain.
     if (SIDECHAIN) for (const label of MAINCHAIN_ONLY) expect(all.map((c) => c.label), label).not.toContain(label);
   });
@@ -495,7 +495,7 @@ describe('the layouts', () => {
     go('home');
     render(Shell);
     // A sidechain has its own home (views/home/SideHome.svelte): the peg and merged mining.
-    const titles = SIDECHAIN ? ['Balance', 'Network', 'Peg', 'Merged mining'] : ['Balance', 'Network', 'Sidechains', 'Mining', 'Wallet balance', 'Blind merged mining'];
+    const titles = SIDECHAIN ? ['Balance', 'Network', 'Drivechains', 'Merged mining'] : ['Balance', 'Network', 'Sidechains', 'Mining', 'Wallet balance', 'Blind merged mining'];
     for (const title of titles) {
       expect(screen.getByRole('heading', { name: title })).toBeTruthy();
     }

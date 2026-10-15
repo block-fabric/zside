@@ -194,7 +194,7 @@ describe.runIf(SIDECHAIN)('the chain of a sidechain, in one place (chain.json)',
     const sections = menuSections(buildCommands());
     const chain = sections.find((s) => s.group === 'Chains')!;
     expect(chain.title).toBe(CHAIN.name);
-    expect(chain.items.map((c) => c.label)).toEqual(['Peg', 'Deposit…', 'Withdraw…', 'Withdrawal bundle', 'Merged mining', ...(LOCAL_COMMANDS as readonly LocalCommand[]).map((c) => c.label), 'Block explorer']);
+    expect(chain.items.map((c) => c.label)).toEqual(['Drivechains', 'Deposit…', 'Withdraw…', 'Withdrawal bundle', 'Merged mining', ...(LOCAL_COMMANDS as readonly LocalCommand[]).map((c) => c.label), 'Block explorer']);
     chain.items.find((c) => c.label === 'Withdraw…')!.run();
     expect([nav.page, nav.tab]).toEqual(['peg', 'withdraw']);
     go('overview');
@@ -349,10 +349,10 @@ describe.runIf(SIDECHAIN)('the pages of a sidechain', () => {
   it('the home: the cards of the balance, the network, the peg and merged mining', async () => {
     go('home');
     render(SideHome);
-    for (const title of ['Balance', 'Network', 'Peg', 'Merged mining', 'Wallet balance', `Blocks of ${CHAIN.mainchain?.name}`]) {
+    for (const title of ['Balance', 'Network', 'Drivechains', 'Merged mining', 'Wallet balance', `Blocks of ${CHAIN.mainchain?.name}`]) {
       expect(screen.getByRole('heading', { name: title }), title).toBeTruthy();
     }
-    const peg = screen.getByRole('heading', { name: 'Peg' }).closest('section')!;
+    const peg = screen.getByRole('heading', { name: 'Drivechains' }).closest('section')!;
     await waitFor(() => expect(within(peg).getByText('3 / 30 votes')).toBeTruthy());
     await fireEvent.click(within(peg).getByRole('button', { name: /Deposit/ }));
     expect([nav.page, nav.tab]).toEqual(['peg', 'deposit']);

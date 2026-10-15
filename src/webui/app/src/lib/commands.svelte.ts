@@ -209,7 +209,7 @@ export function menuSections(all: readonly Command[]): { title: string; group: M
 /** The menu items of a sidechain: its peg (deposit, withdraw, the bundle) and merged mining, before the explorer. */
 function sidechainCommands(noWallet: boolean, to: (page: PageId, tab?: string) => (() => void) & { page: PageId }): Command[] {
   return [
-    { id: 'peg.open', group: 'Chains', label: 'Peg', run: to('peg'), shortcut: 'Alt+5', keywords: 'mainchain deposit withdraw bundle', tip: t('Deposit from %1, withdraw to it, and follow the withdrawal bundles', CHAIN.mainchain?.name ?? '') },
+    { id: 'peg.open', group: 'Chains', label: 'Drivechains', run: to('peg'), shortcut: 'Alt+5', keywords: 'mainchain deposit withdraw bundle', tip: t('Deposit from %1, withdraw to it, and follow the withdrawal bundles', CHAIN.mainchain?.name ?? '') },
     { id: 'peg.deposit', group: 'Chains', label: 'Deposit…', run: to('peg', 'deposit'), disabled: noWallet, keywords: 'mainchain deposit address', tip: t('A deposit address of this wallet, to give the wallet of %1', CHAIN.mainchain?.name ?? '') },
     { id: 'peg.withdraw', group: 'Chains', label: 'Withdraw…', run: to('peg', 'withdraw'), disabled: noWallet, keywords: 'mainchain withdrawal refund', tip: t('Withdraw coins to an address of %1', CHAIN.mainchain?.name ?? '') },
     { id: 'peg.bundle', group: 'Chains', label: 'Withdrawal bundle', run: to('peg', 'bundle'), keywords: 'votes score mainchain', tip: 'The bundle of withdrawals the miners of the mainchain vote on, and the ones before it' },

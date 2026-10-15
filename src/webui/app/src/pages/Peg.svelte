@@ -64,7 +64,7 @@
       depositAddress = r.depositaddress;
       depositFor = r.address;
     } catch (e) {
-      await inform(t('Peg'), errorText(e), 'warning');
+      await inform(t('Drivechains'), errorText(e), 'warning');
     } finally {
       gettingAddress = false;
     }
@@ -93,11 +93,11 @@
   });
   async function depositFromMainchain() {
     if (!depositAddress) {
-      await inform(t('Peg'), t('Get a deposit address first: the deposit is credited to it.'), 'warning');
+      await inform(t('Drivechains'), t('Get a deposit address first: the deposit is credited to it.'), 'warning');
       return;
     }
     if (helperAmount === null || helperAmount <= 0n) {
-      await inform(t('Peg'), t('Enter the amount to deposit.'), 'warning');
+      await inform(t('Drivechains'), t('Enter the amount to deposit.'), 'warning');
       return;
     }
     // The host asks the user on the desktop, with the amount first: the wallet of the mainchain node pays.
@@ -157,7 +157,7 @@
     try {
       mainAddress = await peg.call<string>('getnewaddress', ['withdrawal']);
     } catch (e) {
-      await inform(t('Peg'), errorText(e), 'warning');
+      await inform(t('Drivechains'), errorText(e), 'warning');
     }
   }
   async function withdraw() {
@@ -295,7 +295,7 @@
     <div class="panel side-stat"><span class="muted">Mainchain blocks on record</span><strong class="num">{info && info.height >= 0 ? formatCount(info.height) : '–'}</strong><span class="faint">{side.main.error ? 'not reachable' : 'followed by this node'}</span></div>
   </section>
 
-  <div class="tabs" role="tablist" aria-label="Peg">
+  <div class="tabs" role="tablist" aria-label="Drivechains">
     {#each TABS as tb (tb.id)}
       <button type="button" role="tab" aria-selected={tab === tb.id} onclick={() => (nav.tab = tb.id)}>
         {t(tb.label)}

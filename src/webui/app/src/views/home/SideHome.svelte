@@ -278,7 +278,7 @@
       {/snippet}
     </Card>
 
-    <Card title="Peg" icon="peg" open={() => go('peg')} openLabel="Open the peg" stat>
+    <Card title="Drivechains" icon="peg" open={() => go('peg')} openLabel="Open Drivechains" stat>
       <span class="value"><span class="state" class:ok={connected} class:bad={info !== null && !connected}><Icon name={connected ? 'check' : 'offline'} size={16} /> {#if info === null}Starting…{:else if connected}{mainName} connected{:else}Not reachable{/if}</span></span>
       <dl class="pairs">
         <dt>Deposits on their way</dt><dd class="num">{pendingDeposits.length}</dd>

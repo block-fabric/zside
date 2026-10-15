@@ -76,7 +76,8 @@ export const PAGES: Record<PageId, PageInfo> = {
   home: { id: 'home', title: 'Home', icon: 'home', summary: 'Live cards of the wallet, the chain, the sidechains and the node', parity: [], ready: true },
   // The pages of a sidechain (doc/webui.md): the peg (deposits from the mainchain, withdrawals to it and
   // their bundles) and blind merged mining. Only in the app of a sidechain (pageAvailable).
-  peg: { id: 'peg', title: 'Peg', icon: 'peg', summary: 'Deposit from the mainchain, withdraw to it, and follow the withdrawal bundles and their votes', parity: ['S01', 'S02', 'S03'], shortcut: 'Alt+5', ready: true },
+  // Shown as Drivechains (user decision, 2026-10-15); its id stays peg.
+  peg: { id: 'peg', title: 'Drivechains', icon: 'peg', summary: 'Deposit from the mainchain, withdraw to it, and follow the withdrawal bundles and their votes', parity: ['S01', 'S02', 'S03'], shortcut: 'Alt+5', ready: true },
   bmm: { id: 'bmm', title: 'Merged mining', icon: 'merged', summary: 'Have the miners of the mainchain mine the blocks of this chain, for its fees (blind merged mining)', parity: ['S04'], ready: true },
   ...(Object.fromEntries(
     (LOCAL_PAGES as readonly LocalPage[]).map((p) => [p.id, { id: p.id, title: p.title, icon: p.icon, summary: p.summary, wallet: p.wallet, shortcut: p.shortcut, parity: [], ready: true }]),
