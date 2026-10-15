@@ -47,7 +47,9 @@
       await sleep(800);
       await check(`${theme}: drawn in its colours`, token('bg') === base && token('accent') === accent && document.documentElement.style.colorScheme === 'dark', `${token('bg')} ${token('accent')} ${bodyBg()}`);
       await snapshot(`theme-${theme}-home`);
-      for (const [page, tab] of [['send', ''], ['transactions', ''], ['sidechains', ''], ['node', 'peers'], ['settings', 'display']]) {
+      // The page of the chain's sidechains: Sidechains on Chains, Peg on a sidechain (which has no Sidechains page).
+      const chainPage = T().PAGES.peg ? 'peg' : 'sidechains';
+      for (const [page, tab] of [['send', ''], ['transactions', ''], [chainPage, ''], ['node', 'peers'], ['settings', 'display']]) {
         T().go(page, tab);
         await sleep(900);
         await snapshot(`theme-${theme}-${page}`);
