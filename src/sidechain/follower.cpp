@@ -494,7 +494,10 @@ void Follower::CheckActiveChain()
     Mainchain& record{*Assert(chainman.m_mainchain)};
     // Blocks that lost their commitment are dropped as soon as the record changes, but a node that
     // stopped in between, or that was down meanwhile, starts with them on its active chain. The
-    // mainchain commits to the blocks of a chain in order: the uncommitted ones are at the top.
+    // mainchain committed to the blocks of a chain in order, but the reorg that dropped a commitment
+    // may have committed again, lower, to a block above it (review 8): not only those at the top.
+    // The lowest one without a commitment goes, with all above it, as acting on the change at once
+    // takes back each block that lost its commitment (Act); as far as a reorg could reach.
     CBlockIndex* lowest{nullptr};
     CBlockIndex* moved{nullptr};
     {
@@ -503,7 +506,10 @@ void Follower::CheckActiveChain()
         for (CBlockIndex* pindex{chainman.ActiveChain().Tip()}; pindex && pindex->nHeight > 0; pindex = pindex->pprev) {
             const auto commitment{Hooks().CommitmentOf(*pindex)};
             if (!commitment) continue;
-            if (record.CommittedHeight(*commitment)) break;
+            if (const auto height{record.CommittedHeight(*commitment)}) {
+                if (*height < record.Height() - MOVED_CHECK_DEPTH) break;
+                continue;
+            }
             lowest = pindex;
         }
         // Each block was checked against what the mainchain did up to the block before its
