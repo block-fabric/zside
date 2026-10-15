@@ -7,12 +7,20 @@
 #include <netbase.h>
 #include <rpc/protocol.h>
 #include <rpc/request.h>
+#include <support/cleanse.h>
 #include <util/sock.h>
 #include <util/strencodings.h>
 #include <util/threadinterrupt.h>
 #include <util/time.h>
+#include <util/translation.h>
 
 #include <fstream>
+
+#ifndef WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace sidechain {
 namespace {
@@ -33,6 +41,52 @@ std::string PercentEncode(const std::string& text)
     return encoded;
 }
 } // namespace
+
+util::Result<std::string> ReadPasswordFile(const fs::path& path)
+{
+    //! A password is one short line; a larger file is not one.
+    constexpr size_t MAX_SIZE{4096};
+    const std::string name{fs::PathToString(path)};
+    std::string content;
+#ifndef WIN32
+    const int fd{open(path.c_str(), O_RDONLY | O_NOCTTY | O_CLOEXEC)};
+    if (fd < 0) return util::Error{Untranslated(strprintf("Cannot open the password file %s", name))};
+    struct stat st;
+    char buffer[MAX_SIZE + 1];
+    const auto fail{[&](const std::string& why) {
+        close(fd);
+        memory_cleanse(buffer, sizeof(buffer));
+        return util::Error{Untranslated(strprintf("The password file %s %s", name, why))};
+    }};
+    if (fstat(fd, &st) != 0) return fail("cannot be read");
+    if (!S_ISREG(st.st_mode)) return fail("is not a regular file");
+    if (st.st_uid != geteuid()) return fail("is not owned by this user");
+    if (st.st_mode & (S_IRWXG | S_IRWXO)) return fail("can be read or written by other users: make it readable by its owner only (chmod 600)");
+    ssize_t total{0};
+    while (total <= static_cast<ssize_t>(MAX_SIZE)) {
+        const ssize_t n{read(fd, buffer + total, sizeof(buffer) - total)};
+        if (n < 0) return fail("cannot be read");
+        if (n == 0) break;
+        total += n;
+    }
+    close(fd);
+    content.assign(buffer, total);
+    // Do not leave a copy of the password on the stack.
+    memory_cleanse(buffer, sizeof(buffer));
+#else
+    std::ifstream file{path.std_path(), std::ios::binary};
+    if (!file.is_open()) return util::Error{Untranslated(strprintf("Cannot open the password file %s", name))};
+    content.resize(MAX_SIZE + 1);
+    file.read(content.data(), content.size());
+    content.resize(file.gcount());
+#endif
+    if (content.size() > MAX_SIZE) return util::Error{Untranslated(strprintf("The password file %s is too large to hold a password", name))};
+    const size_t end{content.find_first_of("\r\n")};
+    std::string password{content.substr(0, end)};
+    memory_cleanse(content.data(), content.size());
+    if (password.empty()) return util::Error{Untranslated(strprintf("The password file %s holds no password on its first line", name))};
+    return password;
+}
 
 UniValue MainClient::Call(const std::string& method, const UniValue& params, bool wallet) const
 {

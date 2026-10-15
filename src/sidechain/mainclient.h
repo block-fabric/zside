@@ -7,6 +7,7 @@
 
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/result.h>
 
 #include <cstdint>
 #include <stdexcept>
@@ -56,6 +57,17 @@ public:
 private:
     const Options m_options;
 };
+
+/**
+ * Read the password for the mainchain node from a file (-mainchainrpcpasswordfile), so that it is never
+ * on the command line, where any local user can read it.
+ *
+ * The password is the first line of the file, without its line ending. On Unix the file must be a regular
+ * file owned by this user and readable by no one else (no group or other permission bit), or it is refused.
+ * On Windows its access list is not checked: keep it in a directory only this user can read (the data
+ * directory is). Errors name the file but never contain what it holds.
+ */
+util::Result<std::string> ReadPasswordFile(const fs::path& path);
 
 } // namespace sidechain
 

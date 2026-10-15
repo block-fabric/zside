@@ -69,6 +69,7 @@
 #include <sidechain/follower.h>
 #include <sidechain/hooks.h>
 #include <sidechain/mainclient.h>
+#include <support/cleanse.h>
 #include <node/mining_args.h>
 #include <node/mining_types.h>
 #include <node/peerman_args.h>
@@ -757,7 +758,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-mainchainrpcconnect=<ip>", "Address of the mainchain node that this sidechain node follows (default: 127.0.0.1)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchainrpcport=<port>", "JSON-RPC port of the mainchain node (default: 9554, testnet: 19554, signet: 39554, regtest: 29554)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchainrpcuser=<user>", "Username for the JSON-RPC connection to the mainchain node. Without it the cookie file of the mainchain node is used.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::CONNECTION);
-    argsman.AddArg("-mainchainrpcpassword=<pw>", "Password for the JSON-RPC connection to the mainchain node", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::CONNECTION);
+    argsman.AddArg("-mainchainrpcpassword=<pw>", "Password for the JSON-RPC connection to the mainchain node. Any local user can read the command line: prefer -mainchainrpcpasswordfile, or the cookie file", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::CONNECTION);
+    argsman.AddArg("-mainchainrpcpasswordfile=<file>", "Read the password for the JSON-RPC connection to the mainchain node from the first line of <file>, once at startup. Use with -mainchainrpcuser. On Unix the file must be owned by this user and readable by no one else (chmod 600), or the node refuses to start; on Windows its access list is not checked, so keep it in a directory only you can read. Relative paths are prefixed by the net-specific data directory", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchainrpccookiefile=<file>", "Cookie file of the mainchain node (default: the .cookie file in the data directory of the mainchain node)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchaindatadir=<dir>", "Data directory of the mainchain node, where its cookie file is looked for (default: ~/.chains)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchainrpcwallet=<name>", "Wallet of the mainchain node that pays for blind merged mining (default: its only loaded wallet)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
@@ -1551,6 +1553,21 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         return InitError(strprintf(_("Unable to parse -maxuploadtarget: '%s'"), args.GetArg("-maxuploadtarget", "")));
     }
 
+    // The password for the mainchain node, if read from a file: read once, here, so that a wrong file stops
+    // the node before it loads anything. Never logged.
+    std::optional<std::string> mainchain_password;
+    if (args.IsArgSet("-mainchainrpcpasswordfile")) {
+        if (args.IsArgSet("-mainchainrpcpassword")) {
+            return InitError(Untranslated("Set -mainchainrpcpassword or -mainchainrpcpasswordfile, not both"));
+        }
+        if (!args.IsArgSet("-mainchainrpcuser")) {
+            return InitError(Untranslated("-mainchainrpcpasswordfile needs -mainchainrpcuser"));
+        }
+        auto password{sidechain::ReadPasswordFile(AbsPathForConfigVal(args, args.GetPathArg("-mainchainrpcpasswordfile")))};
+        if (!password) return InitError(util::ErrorString(password));
+        mainchain_password = std::move(*password);
+    }
+
     // ********************************************************* Step 4a: application initialization
     if (!CreatePidFile(args)) {
         // Detailed error printed inside CreatePidFile().
@@ -2224,7 +2241,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         const ChainType chain_type{chainman.GetParams().GetChainType()};
         options.host = args.GetArg("-mainchainrpcconnect", "127.0.0.1");
         options.port = static_cast<uint16_t>(args.GetIntArg("-mainchainrpcport", chain_type == ChainType::MAIN ? 9554 : chain_type == ChainType::TESTNET ? 19554 : chain_type == ChainType::SIGNET ? 39554 : 29554));
-        if (args.IsArgSet("-mainchainrpcuser")) options.credentials = args.GetArg("-mainchainrpcuser", "") + ":" + args.GetArg("-mainchainrpcpassword", "");
+        if (args.IsArgSet("-mainchainrpcuser")) {
+            options.credentials = args.GetArg("-mainchainrpcuser", "") + ":" + (mainchain_password ? *mainchain_password : args.GetArg("-mainchainrpcpassword", ""));
+        }
+        if (mainchain_password) memory_cleanse(mainchain_password->data(), mainchain_password->size());
         if (args.IsArgSet("-mainchainrpccookiefile")) {
             options.cookie_file = fs::absolute(args.GetPathArg("-mainchainrpccookiefile"));
         } else {

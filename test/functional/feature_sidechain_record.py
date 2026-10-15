@@ -29,6 +29,7 @@ from decimal import Decimal
 
 from test_framework.sidechain_standin import OUTBID, StandInMainchain
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_node import ErrorMatch
 from test_framework.authproxy import JSONRPCException
 from test_framework.util import assert_equal, assert_raises_rpc_error, rpc_port
 
@@ -394,6 +395,33 @@ class SidechainRecordTest(BitcoinTestFramework):
         assert_equal(node.getmainchaininfo()["connected"], True)
         self.restart_node(0, extra_args=self.connection_args + [f"-mainchainrpccookiefile={cookie}.missing"])
         self.sync_error("no credentials: set -mainchainrpcuser and -mainchainrpcpassword, or check that the cookie file")
+
+        self.log.info("The password in a file, never on the command line")
+        password_file = os.path.join(self.options.tmpdir, "mainchain.rpcpass")
+        with open(password_file, "w") as f:
+            f.write("from-a-file\n")
+        main.credentials = "main:from-a-file"
+        file_args = self.connection_args + ["-mainchainrpcuser=main", f"-mainchainrpcpasswordfile={password_file}"]
+        self.stop_node(0)
+        if os.name != "nt":
+            for mode in (0o640, 0o604, 0o620):
+                os.chmod(password_file, mode)
+                node.assert_start_raises_init_error(file_args, f"Error: The password file {password_file} can be read or written by other users", match=ErrorMatch.PARTIAL_REGEX)
+            os.chmod(password_file, 0o600)
+        node.assert_start_raises_init_error(file_args + ["-mainchainrpcpassword=other"], "Error: Set -mainchainrpcpassword or -mainchainrpcpasswordfile, not both")
+        node.assert_start_raises_init_error(self.connection_args + [f"-mainchainrpcpasswordfile={password_file}"], "Error: -mainchainrpcpasswordfile needs -mainchainrpcuser")
+        self.start_node(0, extra_args=file_args)
+        node.syncmainchain()
+        assert_equal(node.getmainchaininfo()["connected"], True)
+        # The password is in no log line and not on the command line of the node.
+        with open(os.path.join(node.chain_path, "debug.log"), encoding="utf-8", errors="replace") as f:
+            assert "from-a-file" not in f.read()
+        cmdline = f"/proc/{node.process.pid}/cmdline"
+        if os.path.exists(cmdline):
+            with open(cmdline, "rb") as f:
+                argv = f.read()
+            assert b"-mainchainrpcpasswordfile=" in argv
+            assert b"from-a-file" not in argv
 
 
 if __name__ == '__main__':
