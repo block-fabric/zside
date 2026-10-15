@@ -147,6 +147,22 @@
     await go('home');
     await sleep(2000);
     await shot('sc-home-funded');
+    // The balance whole, its unit too (audit port-2 #14: "39.70000000 C…"); the tables of Home cards in a narrow
+    // panel, every cell in view (they scrolled sideways, columns hidden).
+    const balance = $('.value.fit');
+    await check('the balance of Home whole, its unit in view', !!balance && balance.scrollWidth <= balance.clientWidth + 1 && /CHN/.test(balance.textContent),
+      JSON.stringify({ text: balance?.textContent, scroll: balance?.scrollWidth, client: balance?.clientWidth }));
+    const scroll = $('#home-panel');
+    await waitFor('the transactions of Home', () => $('table', scroll), 30000);
+    scroll.style.width = '440px';
+    await sleep(300);
+    const homeCells = $$('td', scroll).filter((td) => getComputedStyle(td).display !== 'none');
+    const homeHidden = homeCells.filter((td) => td.getBoundingClientRect().right > scroll.getBoundingClientRect().right + 1);
+    await check('at 440 px the tables of Home are cards, every cell in view',
+      scroll.scrollWidth <= scroll.clientWidth + 1 && homeHidden.length === 0 && getComputedStyle($('thead', scroll)).display === 'none',
+      JSON.stringify({ scroll: scroll.scrollWidth, client: scroll.clientWidth, hidden: homeHidden.length }));
+    await shot('sc-home-440');
+    scroll.style.width = '';
 
     // --- Withdraw to an address of the mainchain wallet ---
     await go('peg', 'withdraw');
