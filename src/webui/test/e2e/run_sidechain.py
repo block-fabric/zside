@@ -15,6 +15,10 @@ on the way. The test then checks on the mainchain that the withdrawal was paid.
 
     run_sidechain.py --app build/bin/<stem>-app --tmp <dir> --shots <dir> [--mainchain-bin <dir>]
 
+A sidechain made from the template runs its own page script the same way: --script <its .js, in this
+folder>, with --app-arg for options of the app and --js-var NAME=VALUE for values the script reads
+(window.__E2E_<NAME>). Only sidechain.js makes a withdrawal, checked here on the mainchain.
+
 Nothing outside --tmp is touched; the nodes use ports of their own (--port and the three after it).
 """
 
@@ -107,6 +111,9 @@ def main():
     parser.add_argument("--mainchain-bin", type=Path, default=os.environ.get("MAINCHAIN_BIN_DIR"), help="folder of chainsd (default: $MAINCHAIN_BIN_DIR)")
     parser.add_argument("--port", type=int, default=29640)
     parser.add_argument("--interval", type=float, default=1.0, help="seconds between two blocks of the mainchain")
+    parser.add_argument("--script", default="sidechain.js", help="the page script, in this folder (default: sidechain.js)")
+    parser.add_argument("--app-arg", action="append", default=[], help="an option given to the app (repeat for more)")
+    parser.add_argument("--js-var", action="append", default=[], help="NAME=VALUE: window.__E2E_<NAME> = VALUE (JSON) for the page script")
     args = parser.parse_args()
 
     if shutil.which("xvfb-run") is None:
@@ -147,13 +154,17 @@ def main():
         password_file.chmod(0o600)
         datadir = base / "datadir"
         datadir.mkdir()
-        page_script = base / "sidechain.js"
+        page_script = base / args.script
         chain = json.loads((Path(__file__).resolve().parents[2] / "app/src/chain/chain.json").read_text())
-        page_script.write_text(script("sidechain.js", f"window.__E2E_SLOT = {SLOT};\nwindow.__E2E_MAINCHAIN = {json.dumps(chain['mainchain']['name'])};\n"))
+        prelude = f"window.__E2E_SLOT = {SLOT};\nwindow.__E2E_MAINCHAIN = {json.dumps(chain['mainchain']['name'])};\n"
+        for var in args.js_var:
+            name, value = var.split("=", 1)
+            prelude += f"window.__E2E_{name} = {value};\n"
+        page_script.write_text(script(args.script, prelude))
         cmd = ["-regtest", f"-sidechainslot={SLOT}", f"-port={args.port + 2}", f"-rpcport={args.port + 3}", "-listen=0", "-dnsseed=0", "-fixedseeds=0",
                "-fallbackfee=0.0002", f"-datadir={datadir}", f"-mainchainrpcport={args.port}", f"-mainchainrpcuser={USER}",
                f"-mainchainrpcpasswordfile={password_file}", "-mainchainrpcwallet=miner",
-               f"-webuiconfig={base / 'app.json'}", f"-webuitestshots={args.shots.resolve()}", f"-webuitestscript={page_script}"]
+               f"-webuiconfig={base / 'app.json'}", f"-webuitestshots={args.shots.resolve()}", f"-webuitestscript={page_script}"] + args.app_arg
         app = App(args.app, cmd, env, base / "sidechain.log")
         code = app.wait(1800)
         result = app.result()
@@ -163,7 +174,9 @@ def main():
 
         # The withdrawal, paid on the mainchain to the address of its wallet the page chose.
         paid_to = app.events.get("WITHDRAWN")
-        if not paid_to:
+        if args.script != "sidechain.js":
+            pass
+        elif not paid_to:
             failures.append("the page made no withdrawal")
         else:
             address, amount = paid_to.split(" ")[1:3]

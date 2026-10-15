@@ -65,6 +65,19 @@ if(WEBUI_SIDECHAIN)
         --shots ${CMAKE_CURRENT_BINARY_DIR}/e2e-shots
     )
     set_tests_properties(webui_e2e_sidechain PROPERTIES TIMEOUT 2400 RUN_SERIAL TRUE)
+    # A page script of the chain's own pages (zSide: zside.js, the shielded wallet).
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/e2e/zside.js)
+      add_test(NAME webui_e2e_zside
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_sidechain.py
+          --app $<TARGET_FILE:chains-app>
+          --mainchain-bin ${WEBUI_MAINCHAIN_BIN_DIR}
+          --tmp ${CMAKE_CURRENT_BINARY_DIR}/e2e-zside
+          --shots ${CMAKE_CURRENT_BINARY_DIR}/e2e-shots
+          --port 29760
+          --script zside.js
+      )
+      set_tests_properties(webui_e2e_zside PROPERTIES TIMEOUT 2400 RUN_SERIAL TRUE)
+    endif()
   endif()
 elseif(WEBUI_TEST_HOOKS AND XVFB_RUN_EXECUTABLE AND Python3_Interpreter_FOUND)
   add_test(NAME webui_e2e_smoke
