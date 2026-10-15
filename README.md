@@ -166,7 +166,9 @@ How it works: [doc/zside.md](doc/zside.md).
 Shielded, on the node: `getshieldedinfo`.
 
 Shielded, in the wallet: `getshieldedaddress`, `getshieldedbalance`, `listshieldednotes`,
-`shieldcoins`, `sendshielded`, `listshieldedtransactions`; melt & cast: `meltcoins`, `castcoins`,
+`shieldcoins`, `sendshielded`, `unshieldcoins`, `bumpshieldedfee`, `listshieldedtransactions`;
+viewing keys: `exportshieldedviewingkey`, `importshieldedviewingkey` (into a wallet without private
+keys, watch-only); melt & cast: `meltcoins`, `castcoins`,
 `listmeltcast`, `cancelmeltcast`.
 
 Sidechain, on the node: `getmainchaininfo`, `syncmainchain`, `setbmm`, `getbmminfo`, `requestbmmblock`, `createbmmblock`, `listwithdrawals`, `getwithdrawalbundle`.
@@ -177,10 +179,10 @@ Sidechain, in the wallet: `getdepositaddress`, `createwithdrawal`, `refundwithdr
 
 The pages of zside-app: Overview, Send, Receive, Transactions, **Peg** (deposits, withdrawals, the
 bundle), **Merged mining**, and those of the shielded wallet: **Private** (the shielded and transparent
-balances, paying privately with a memo, shielding and unshielding, the proving of each payment shown as
-it goes), **Memos** (the memos received), **Melt & cast** (the plan and its steps) and **Notes** (the
-notes of the shielded account, and the pool). Every balance, address and transaction says whether it is
-private or public. What each page of zside-qt became: [doc/webui-parity.md](doc/webui-parity.md).
+balances, paying privately with a memo, shielding and unshielding, shielded addresses, viewing keys; each
+proof shown as it goes), **Memos** (the memos received), **Private activity** (the shielded transactions
+and notes, a fee bump), **Melt & cast** (the plan and its steps) and **Shielded pool**. Every balance,
+address and transaction says whether it is private or public. What each page of zside-qt became: [doc/webui-parity.md](doc/webui-parity.md).
 
 ## Credits
 

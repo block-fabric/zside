@@ -12,8 +12,14 @@ integrated title bar: [webui-layouts.md](webui-layouts.md).
 This document says how to build and run it, and how it is made, so that the
 sidechains can take it over for their own apps.
 
-> **In this tree (the sidechain template).** The kit is the one of `chains-app`, made configurable: the
-> program is `<stem>-app` (here `sidechain-app`, and `test_sidechain-app`), and what the app shows of its
+> **In this tree (zSide).** `zside-app` is the app of the sidechain template with the pages of zSide's
+> shielded wallet: the transparent and shielded balances, private payments with memos, shielding and
+> unshielding, the memos received, the viewing keys, melt & cast, the shielded pool. They are described in
+> [The pages of zSide](#the-pages-of-zside); their inventory against the Qt GUI of zSide is section ZS of
+> [webui-parity.md](webui-parity.md).
+>
+> **From the sidechain template.** The kit is the one of `chains-app`, made configurable: the
+> program is `<stem>-app` (here `zside-app`, and `test_zside-app`), and what the app shows of its
 > chain is in one file, `src/webui/app/src/chain/chain.json`. The app of a sidechain has pages of its own
 > (Peg, Merged mining, its home, the Mainchain tab of Settings) in place of those of the mainchain
 > (Sidechains, Sidechain nodes, Solo mine). How, and how a sidechain adds its own pages so that the
@@ -395,6 +401,45 @@ the chain); its tests go in `src/chain/` too (`*.test.ts` are found anywhere und
 `lib/`, `components/`, `pages/` or `views/` needs to change; when a page needs something the kit does
 not offer, make it a change of the template (generic, behind `chain.json`), and merge it.
 
+### The pages of zSide
+
+In `src/webui/app/src/chain`: `local.ts` lists them (Private, Memos, Private activity and Melt & cast in
+the Wallet section, after the kit's wallet pages; Shielded pool in the Chain section, before the explorer
+and the tools), `LocalPages.svelte` shows them, `LocalCards.svelte` puts their cards on the home of the
+dashboard, `icons.ts` draws their icons; `pages/` holds the pages, `zs/` what they share (`model.ts`,
+`store.svelte.ts`, the privacy indicator `Privacy.svelte`, `ProvingPanel.svelte`, `ZAddressInput.svelte`,
+`zs.css`). `src/webui/local.cpp` adds the RPC methods of the shielded pool and wallet to the page's
+allowlist; those that prove a bundle (sendshielded, shieldcoins, unshieldcoins, bumpshieldedfee) and the
+import of a viewing key (a rescan) run on the long lane; those that need the keys (the four that prove,
+meltcoins, and getshieldedaddress, which sets the account up the first time) are keyed methods.
+
+| Page | What it does |
+|---|---|
+| Private (Alt+6) | Overview: the transparent and the shielded balances side by side, each with its privacy indicator, the moves between them, how much of the wallet is shielded (a ring), the latest of the shielded account. Pay: privately, to one to ten recipients (shielded or transparent: `ZAddressInput` tells which, and a transparent one is said to unshield, in public, with no memo), a memo counted in bytes as the node counts them (512 at most), the fee chosen or not; confirmed in the page, then proved. Shield & unshield: transparent coins into the pool (all of it but a little for the fee; to the wallet's account or another shielded address; a memo), and out of it (an amount or all, the fee taken out or not; to a new address of the wallet or one typed). Receive: the default shielded address with its QR code, new ones nobody can link to it (`getshieldedaddress true`). Viewing keys: the key of the account, shown only after a warning whose box is ticked, blurred until asked; a viewing key watched in a wallet without private keys (`importshieldedviewingkey`, from a block) |
+| Memos | The inbox: every memo a shielded payment brought the account (never those of its change), newest first, unread ones marked (for this viewer: browser storage), searched, read in a pane of their own, as text (SafeText); copied, marked unread, or opened in their transaction |
+| Private activity | The transactions of the shielded account in words (shielded, received privately, paid privately, unshielded), each with its privacy, its memos and whom it paid, filtered (received, paid, public) and searched; one waiting for a block pays a higher fee (`bumpshieldedfee`). The notes: amount, kind (received, change, watched, watch-only), memo, confirmations, spent or not |
+| Melt & cast | The plan the wallet carries out as blocks come (`listmeltcast`): what is to go, soonest first, with its block and why it waits, then what went; a step or all cancelled. Melt (every transparent coin alone over the blocks chosen), cast (an amount as standard bills, the bills shown as it is typed, what stays in the pool). An encrypted wallet is told that a step waits while it is locked |
+| Shielded pool | `getshieldedinfo`: what the pool holds, the notes made, the nullifiers revealed, the root of the tree, and whether the index of the whole tree (-orchardindex) is synced with it; what the chain shows and what it does not |
+| Home | Cards: Private (both balances with their privacy, the ring, Pay privately, Shield), Memos (unread, the latest three), Melt & cast (while it has steps to go) |
+
+**Proofs off the UI thread.** A payment out of the pool proves its bundle with Halo 2 in the node
+(seconds). The page sends the call on the long lane of the bridge (`Bridge::Thread::LONG`) and stays
+usable; `ProvingPanel` shows the proof under way, its steps and the time left, estimated from the earlier
+proofs of the same kind on this computer (browser storage; a guess of 6 s at first), and never says done
+before the node answers. The node itself proves without the wallet's lock (`SendShielded`), so the
+other pages keep reading the wallet meanwhile.
+
+**Privacy, said everywhere.** Every balance, address and transaction of these pages carries the
+privacy indicator (`zs/Privacy.svelte`): Private (a shield, in the colour of the chain's mark) or Public
+(an eye, in the warning colour), with a sentence that says why. A shielding and an unshielding are
+public (the amount that goes in or out shows on the chain); a payment inside the pool is private.
+
+**Viewing keys.** `exportshieldedviewingkey` gives the full viewing key of the account (`zview1…`,
+`tzview1…`, `rzview1…`); `importshieldedviewingkey <key> ( height )` watches one, only in a wallet
+without private keys (so that what it sees is not mixed with an account the wallet spends from), and
+scans the blocks again from the height given. The key is kept with the keys of retired accounts
+(version `KEY_VIEW_ONLY`); its notes are watch-only (`viewonly` in `listshieldednotes`).
+
 ## Tests
 
 | Test | What it covers |
@@ -412,6 +457,8 @@ not offer, make it a change of the template (generic, behind `chain.json`), and 
 | `e2e/run_sidechain.py` | A sidechain (`webui_e2e_sidechain`, with `WEBUI_MAINCHAIN_BIN_DIR` or `MAINCHAIN_BIN_DIR` naming the folder of `chainsd`): a regtest mainchain started and mining a block every second, the sidechain activated in its slot, the app following it with a user name and a password file; through the page: a deposit address, the deposit made by the helper, merged mining on, the deposit credited, a withdrawal to an address of the mainchain wallet, its bundle voted on and paid (checked on the mainchain); pictures of the pages of the sidechain in the layouts and looks |
 | `e2e/run_release.py` | The release as a user gets it (`deploy-app`, built with `WEBUI_TEST_HOOKS=OFF`; `--windows` for the zip, run on the Windows of the machine): what the package holds and SHA256SUMS, no hooks of the tests in the app; the app run with no test script on regtest against a live mainchain, its node answering the command line program of the package, following the mainchain in its slot, and stopping cleanly |
 | `test_<stem>-app`: chainconfig_tests, sidechainapi_tests | chain.json against the chain parameters (names, unit, ports, prefixes); the methods of the mainchain the pages may call, the deposit helper refusing what is not a deposit address of this sidechain, the RPC policy of a sidechain |
+| `npm test`: chain/zside.test.ts | zSide: shielded addresses and viewing keys of each network, memos in bytes, the history told in words with its privacy, the memos of the inbox, the bills of a cast, the plan in order, the estimate of a proof; the pages in the Wallet and Chain sections, the menus, Alt+6; the pages driven against a pretend node: the balances with their privacy, a private payment with a memo, a payment to a transparent address that unshields, shielding and unshielding, new addresses, the viewing key exported only once the warning is ticked and one watched only in a wallet without keys, the inbox, a fee bump, the notes, melt & cast, the pool, the proof under way, the cards of the home, a wallet to unlock once |
+| `e2e/run_sidechain.py --script zside.js` (`webui_e2e_zside`) | zSide on regtest against a live mainchain, through its pages: coins shielded with a memo (the proof shown while the page answers), a private payment with a memo to a second wallet whose inbox shows it, an unshielding, the viewing key exported after its warning and watched in a wallet without keys, a cast planned and cancelled; pictures of every page in Dashboard and Workspace, Midnight and Light |
 | `npm test`: test/sidechain.test.ts | The chain of chain.json (units, URIs, addresses of both chains), the pages dropped, Peg and Merged mining in the Chain section and the menus, the events of the mainchain kept up to date across a reorganisation, the bundles, deposits and commitments, the log of merged mining, and the pages driven: the deposit helper, a withdrawal and its refund, the votes of the bundle, merged mining on and off and one block by hand, the cards of the home, the Mainchain settings |
 
 Each e2e script takes `--app build/bin/chains-app --tmp <dir> --shots <dir>`;

@@ -260,3 +260,51 @@ GUI" commit>^:src/qt/...`). Its inventory, item by item, and where the app of a 
 L01–L05 (the sidechains of the mainchain, its proposals and votes, the sidechain nodes, solo mining)
 are the mainchain's: not in the app of a sidechain (S07). L06–L10 and every other section above hold
 for the app of a sidechain as they are.
+
+## ZS. zSide (its Qt GUI, `zside-qt`: the Private page)
+
+`zside-qt` had the GUI of the template (section S) and one page more, Private (`src/qt/shieldedpage.{h,cpp}`,
+838 lines, the action in `bitcoingui.cpp`, `walletframe.cpp`, `walletview.cpp`; its tests in
+`src/qt/test/sidechaintests.cpp`, "every control of the shielded page, and the Private action"), removed by
+the commit "Remove the Qt GUI" of this tree. Its functions, item by item, in the pages of `zside-app`
+(`src/webui/app/src/chain/pages`, `chain/zs`; doc/webui.md, "The pages of zSide"). Tests:
+`chain/zside.test.ts` (`npm test`) and the end-to-end `e2e/zside.js` (run_sidechain.py `--script
+zside.js`, `webui_e2e_zside`).
+
+| ID | Qt | Source | zside-app |
+|----|----|--------|-----------|
+| ZS01 | The Private action: in the sidebar and the menu, Alt+6, its status tip; on only with a wallet | `bitcoingui.cpp` `shieldedAction`, `gotoShieldedPage` | [x] Private in the Wallet section of both layouts, the palette and the menus (Pay privately…, Shield or unshield…, Shielded address, Viewing keys…), Alt+6 (`lib/keyboard.ts`: a chain's own page that names Alt+6 and on); a page that needs a wallet says so (NoWallet) |
+| ZS02 | The title, and a sentence on what the pool hides | `ShieldedPage` (header) | [x] Private → Overview; the privacy indicator says it on every balance, address and transaction (ZS16) |
+| ZS03 | The balance strip: Shielded (available; pending or the count of notes; "scanning the blocks from n again"), Transparent (getbalance), The whole pool (value, notes) | `refresh` (getshieldedbalance, getbalance, getshieldedinfo) | [x] Private → Overview: the two balances side by side (the transparent one with what waits or matures), each with its indicator, the moves between them, the share shielded (a ring); the rescan in a note over every tab; the pool on the Shielded pool page (ZS13); the home's Private card |
+| ZS04 | Receive tab: the shielded address, its QR code, Copy, New address (one per payer), the sentence that they all pay the same balance | `showAddress`, `fresh` (getshieldedaddress true) | [x] Private → Receive: the same, the addresses made listed to show again or copy; a wallet without keys says it has no address of its own |
+| ZS05 | Pay tab: To, Amount, Memo (512 bytes), the hint (private, or "this unshields": the memo off), Pay after a confirmation, "Proving the payment…", "Paid: … with the next block" | `send` (sendshielded), `updateSendHint` | [x] Private → Pay: the same, the address checked at once (shielded by its prefix and checksum, transparent offline then by the node), the memo counted in bytes as the node counts them, one to ten recipients (one memo for the shielded ones), the fee chosen or not, All; the proof shown (ZS14) |
+| ZS06 | Shield card: amount, All (less 0.001 for the fee), a note to yourself, Shield after a confirmation, "spendable after the next block" | `shield` (shieldcoins) | [x] Private → Shield & unshield: the same, and to another shielded address (the address argument of shieldcoins, which zside-qt did not offer), the memo counted |
+| ZS07 | Unshield card: amount, All (the whole balance in blocks, the fee out of it; typing undoes it), To (empty: a new address of the wallet), the confirmation that the amount and the address become public, the address and amount it went to | `unshield` (unshieldcoins) | [x] Private → Shield & unshield: the same, "Take the fee out of the amount" (subtractfeefromamount), a shielded address refused there, "Cast as bills instead" |
+| ZS08 | Melt & cast tab: the explanation; Melt my transparent coins (about 36 blocks; the coins locked) after a confirmation | `melt` (meltcoins) | [x] Melt & cast → Melt: the same, the number of blocks chosen; the explanation drawn (coins → pool → bills) |
+| ZS09 | Cast: an amount, the bills it comes out as and what stays, its limits (0.01 at least, 20971.51 at most), after a confirmation | `cast`, `updateCastBills` (castcoins) | [x] Melt & cast → Cast: the bills as chips while typing, what stays shielded, the limits and the balance checked, the windows to choose from (spread) |
+| ZS10 | The plan: step, amount, status (planned, waiting, sent, done), when (now, at block n in k blocks, the error), the transaction; the coin of a melt in a tooltip; to go first, then what went; Cancel the selected step, Cancel all | `showPlan`, `cancel` (listmeltcast, cancelmeltcast) | [x] Melt & cast → The plan: the same, a Cancel on each step to go; an encrypted wallet told that its steps wait while it is locked; the home's Melt & cast card |
+| ZS11 | History tab: when, what (Shielded, Paid …, Unshielded, Received), amount, memos, confirmations ("waiting"), the transaction in a tooltip; "Nothing yet" | `showHistory` (listshieldedtransactions 200) | [x] Private activity → Transactions: the same in words with the privacy of each, filters (received, paid, public), search (memos, addresses, transactions), a transaction opened (its memos, whom it paid and with what memo, its fee, its id to copy); 500 transactions; Private → Overview shows the latest five |
+| ZS12 | Notes tab: amount, memo, kind (change, received), confirmations, transaction | `showNotes` (listshieldednotes) | [x] Private activity → Notes: the same, spent ones on request, the kinds of a watched key and of a retired account, the unspent total |
+| ZS13 | The pool: its value and notes (in the strip) | `refresh` (getshieldedinfo) | [x] new page Shielded pool (Chain section): the value, the notes made, the nullifiers revealed, the root of the tree, the index of the whole tree synced or not (a node without -orchardindex is told its wallets cannot spend), what the chain shows and what it does not |
+| ZS14 | Calls off the GUI thread; buttons off while a proof runs; the lists not refreshed while a call runs | `callAsync`, `callThen`, `refresh` | [x] every call goes through the bridge, never on the UI thread; the proving calls on the long lane (local.cpp); the proof shown with its steps, the time it has taken and the time left as estimated from the earlier proofs, the page usable meanwhile (`zs/ProvingPanel.svelte`, checked end to end); the state read again one round at a time with each block and transaction (`zs/store.svelte.ts`) |
+| ZS15 | The status line: what went, in green; errors, in red | `say` | [x] notices (toasts) and dialogs of the kit, errors of the node as they are (SafeText) |
+| ZS16 | (none: the privacy of a balance, an address or a transaction was said only in the sentences of the forms) | | [x] new: the privacy indicator (`zs/Privacy.svelte`) on every balance, address and transaction of the pages and cards: Private or Public, with why |
+| ZS17 | (none: memos were a column of the history) | | [x] new: Memos, the inbox (unread marked, search, a reading pane, as text), the home's Memos card |
+| ZS18 | (none: no RPC either) | | [x] new: viewing keys, in the wallet (`exportshieldedviewingkey`, `importshieldedviewingkey`, functional test `feature_zside_viewingkey.py`) and in Private → Viewing keys: the key exported only once its warning is ticked, blurred until asked; one watched in a wallet without private keys, watch-only |
+| ZS19 | (none: `bumpshieldedfee` had no control) | | [x] new: Private activity → a payment waiting for a block, "Pay a higher fee" (the new fee chosen or the least that replaces it) |
+| ZS20 | The page's own colours (green, amber, red, purple) and styles | `ShieldedPage` (setStyleSheet) | [x] the colour tokens of the themes (Midnight by default, Light, Dark, Ocean Teal, Classic Dark, Matrix Green, System); private in the colour of the chain's mark (chain.json), public in the warning colour |
+| ZS21 | Read-only tables that take no input method (the Wayland crash of Qt) | `ViewTable` (ItemViews::Table) | [–] Qt only |
+| ZS22 | Tests: every control of the page, the Private action, through calls off the GUI thread | `src/qt/test/sidechaintests.cpp` | [x] `chain/zside.test.ts` (the pages against a pretend node), `e2e/zside.js` (against a live mainchain) |
+
+The RPC methods of zSide's wallet and pool, and where the app calls them:
+
+| RPC | zside-app |
+|-----|-----------|
+| getshieldedinfo | Shielded pool; Private → Overview (state) |
+| getshieldedaddress | Private → Receive (default and new); "Unlock to set up" (keyed) |
+| getshieldedbalance, listshieldedtransactions, listshieldednotes, listmeltcast | every page of zSide and the cards (`zs/store.svelte.ts`) |
+| sendshielded | Private → Pay (keyed, long lane) |
+| shieldcoins, unshieldcoins | Private → Shield & unshield (keyed, long lane) |
+| bumpshieldedfee | Private activity (keyed, long lane) |
+| meltcoins (keyed), castcoins, cancelmeltcast | Melt & cast |
+| exportshieldedviewingkey, importshieldedviewingkey (long lane) | Private → Viewing keys |
