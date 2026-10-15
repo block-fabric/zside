@@ -97,7 +97,7 @@ const SIDECHAIN_AREAS: readonly Area[] = [
     id: 'chain',
     label: 'Chain',
     icon: 'block',
-    tabs: [{ page: 'peg' }, { page: 'bmm' }, ...localPages('chain').map((page) => ({ page })), { page: 'explorer', label: 'Explorer' }],
+    tabs: [{ page: 'peg' }, ...localPages('chain').map((page) => ({ page })), { page: 'explorer', label: 'Explorer' }],
   },
   { id: 'tools', label: 'Tools', icon: 'hash', tabs: [{ page: 'tools' }, ...localPages('tools').map((page) => ({ page }))] },
   {
@@ -251,7 +251,7 @@ export const HOME_QUICK_ACTIONS: readonly QuickAction[] = SIDECHAIN
 export const NAV_SECTIONS: readonly NavSection[] = [
   { title: 'Wallet', pages: ['overview', 'send', 'receive', 'transactions', 'wallets', 'advanced', ...localPages('wallet')] },
   // What concerns the chain before the tools: on a sidechain its peg and merged mining.
-  { title: 'Chain', pages: SIDECHAIN ? ['peg', 'bmm', ...localPages('chain'), 'explorer'] : ['sidechains', 'mine', 'explorer'] },
+  { title: 'Chain', pages: SIDECHAIN ? ['peg', ...localPages('chain'), 'explorer'] : ['sidechains', 'mine', 'explorer'] },
   { title: 'Tools', pages: ['tools', ...localPages('tools')] },
   { title: 'Node', pages: ['node', 'settings', 'kit'] },
 ];

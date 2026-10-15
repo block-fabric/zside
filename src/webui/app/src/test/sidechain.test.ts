@@ -188,8 +188,9 @@ describe.runIf(SIDECHAIN)('the chain of a sidechain, in one place (chain.json)',
   it('has its peg and merged mining in the Chain section, before the tools, and Alt+5 opens the peg', () => {
     // The pages of the chain of its own (chain/local.ts) in the Chain section go between them and the explorer.
     const own = (LOCAL_PAGES as readonly LocalPage[]).filter((p) => p.section === 'chain').map((p) => p.id);
-    expect(NAV_SECTIONS.find((s) => s.title === 'Chain')!.pages).toEqual(['peg', 'bmm', ...own, 'explorer']);
-    expect(AREAS.find((a) => a.id === 'chain')!.tabs.map((t) => t.page)).toEqual(['peg', 'bmm', ...own, 'explorer']);
+    // Merged mining is a tab of Drivechains (user decision, 2026-10-15), not a page of the sidebar.
+    expect(NAV_SECTIONS.find((s) => s.title === 'Chain')!.pages).toEqual(['peg', ...own, 'explorer']);
+    expect(AREAS.find((a) => a.id === 'chain')!.tabs.map((t) => t.page)).toEqual(['peg', ...own, 'explorer']);
     expect(chainBeforeTools(HOME_QUICK_ACTIONS.map((q) => q.page), (p) => p)).toBeNull();
     const sections = menuSections(buildCommands());
     const chain = sections.find((s) => s.group === 'Chains')!;
@@ -197,6 +198,8 @@ describe.runIf(SIDECHAIN)('the chain of a sidechain, in one place (chain.json)',
     expect(chain.items.map((c) => c.label)).toEqual(['Drivechains', 'Deposit…', 'Withdraw…', 'Withdrawal bundle', 'Merged mining', ...(LOCAL_COMMANDS as readonly LocalCommand[]).map((c) => c.label), 'Block explorer']);
     chain.items.find((c) => c.label === 'Withdraw…')!.run();
     expect([nav.page, nav.tab]).toEqual(['peg', 'withdraw']);
+    chain.items.find((c) => c.label === 'Merged mining')!.run();
+    expect([nav.page, nav.tab]).toEqual(['peg', 'bmm']);
     go('overview');
     handleShortcut(new KeyboardEvent('keydown', { key: '5', altKey: true }));
     expect(nav.page).toBe('peg');
@@ -289,6 +292,15 @@ describe.runIf(SIDECHAIN)('the pages of a sidechain', () => {
     expect(cells[3].dataset.label).toBe('Amount');
     const css = readFileSync(join(__dirname, '../styles/side.css'), 'utf8');
     expect(css).toMatch(/@container \(max-width: 36rem\)[\s\S]*td\[data-label\]::before/);
+    // As the other long lists (user decision): rows per page and how many of the latest are kept.
+    expect([...(screen.getByLabelText('Rows per page') as HTMLSelectElement).options].map((o) => o.value)).toEqual(['25', '50', '100']);
+    const latest = screen.getByLabelText('How many of the latest deposits') as HTMLSelectElement;
+    expect([...latest.options].map((o) => o.value)).toEqual(['25', '50', '100', '250', '500', '1000', '0']);
+    expect(latest.options[latest.options.length - 1].textContent).toBe('All');
+    await fireEvent.change(latest, { target: { value: '25' } });
+    await waitFor(() => expect(within(screen.getByRole('table', { name: 'Deposits to this chain' })).getAllByText('yours').length).toBe(2));
+    // Merged mining: a tab of Drivechains, next to Bundle (user decision).
+    expect(screen.getAllByRole('tab').map((x) => x.textContent?.trim().replace(/\d+$/, '').trim())).toEqual(['Deposit', 'Withdraw', 'Bundle', 'Merged mining']);
   });
 
   it('Peg → Withdraw: to an address of the mainchain, confirmed; the withdrawals, the ones of the wallet taken back', async () => {

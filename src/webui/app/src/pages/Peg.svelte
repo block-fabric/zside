@@ -27,12 +27,16 @@
   import { coinsToSats, formatAmount, satsToCoins } from '../lib/units';
   import { bundleCanPass, bundleHistory, declined, depositsOf, depositTarget, ownWithdrawals, peg, voteProgress, withdrawalKey, type Withdrawal } from '../lib/side';
   import { refreshSide, side, startSide } from '../lib/sidestate.svelte';
+  import Bmm from './Bmm.svelte';
+  import Pager from '../components/Pager.svelte';
 
   const mainName = CHAIN.mainchain?.name ?? '';
   const TABS = [
     { id: 'deposit', label: 'Deposit' },
     { id: 'withdraw', label: 'Withdraw' },
     { id: 'bundle', label: 'Bundle' },
+    // Merged mining is a tab of Drivechains (user decision, 2026-10-15); go('bmm') leads here.
+    { id: 'bmm', label: 'Merged mining' },
   ];
   const tab = $derived(TABS.some((x) => x.id === nav.tab) ? nav.tab : 'deposit');
 
@@ -118,6 +122,15 @@
 
   const deposits = $derived(depositsOf(side.main.events, info?.tipheight ?? -1));
   const pendingDeposits = $derived(deposits.filter((d) => !d.credited));
+  // The deposits as the other long lists (user decision, 2026-10-15): 25, 50 or 100 a page, and how many of
+  // the latest are kept (0: all of the mainchain blocks on record).
+  const DEPOSIT_SIZES = [25, 50, 100] as const;
+  const DEPOSIT_POINTS = [25, 50, 100, 250, 500, 1000, 0] as const;
+  let depositPage = $state(0);
+  let depositSize = $state(25);
+  let depositPoints = $state<number>(100);
+  const depositsKept = $derived(depositPoints === 0 ? deposits : deposits.slice(0, depositPoints));
+  const depositRows = $derived(depositsKept.slice(depositPage * depositSize, (depositPage + 1) * depositSize));
   /** The deposits to an address of this wallet. */
   let ownTargets = $state<Set<string>>(new Set());
   const addressMine = new Map<string, boolean>();
@@ -306,7 +319,9 @@
     {/each}
   </div>
 
-  {#if tab === 'deposit'}
+  {#if tab === 'bmm'}
+    <Bmm embedded />
+  {:else if tab === 'deposit'}
     <div class="side-cols">
       <section class="panel">
         <div class="panel-head"><h2>Deposit address</h2></div>
@@ -354,7 +369,18 @@
     </div>
 
     <section class="panel">
-      <div class="panel-head"><h2>Deposits to this chain</h2><span class="muted small">the last {formatCount(side.main.events.length)} blocks of {mainName}</span></div>
+      <div class="panel-head">
+        <h2>Deposits to this chain</h2>
+        <span class="row deposits-ctl">
+          <span class="muted small">in the last {formatCount(side.main.events.length)} blocks of {mainName}</span>
+          <label class="points">
+            <span class="faint small">Latest</span>
+            <select aria-label="How many of the latest deposits" value={depositPoints} onchange={(e) => { depositPoints = Number((e.currentTarget as HTMLSelectElement).value); depositPage = 0; }}>
+              {#each DEPOSIT_POINTS as n (n)}<option value={n}>{n === 0 ? t('All') : formatCount(n)}</option>{/each}
+            </select>
+          </label>
+        </span>
+      </div>
       {#if deposits.length === 0}
         <p class="side-empty">{side.main.error ? side.main.error : `No deposit to this chain in the blocks of ${mainName} on record.`}</p>
       {:else}
@@ -362,7 +388,7 @@
           <table class="side-table" use:stacked aria-label="Deposits to this chain">
             <thead><tr><th>State</th><th>Mainchain block</th><th>Time</th><th class="end">Amount</th><th>Destination</th><th>Transaction</th></tr></thead>
             <tbody>
-              {#each deposits.slice(0, 100) as d (`${d.txid}:${d.burnindex}`)}
+              {#each depositRows as d (`${d.txid}:${d.burnindex}`)}
                 <tr>
                   <td><span class="status {d.credited ? 'ok' : 'wait'}">{d.credited ? 'Credited' : 'On its way'}</span>{#if ownTargets.has(`${d.txid}:${d.burnindex}`)} <span class="badge accent">yours</span>{/if}</td>
                   <td class="num">{formatCount(d.height)}</td>
@@ -375,6 +401,7 @@
             </tbody>
           </table>
         </div>
+        <Pager total={depositsKept.length} bind:page={depositPage} bind:size={depositSize} sizes={DEPOSIT_SIZES} label="deposits" />
       {/if}
     </section>
   {:else if tab === 'withdraw'}
@@ -538,5 +565,20 @@
   .wrap {
     overflow-wrap: anywhere;
     min-width: 0;
+  }
+  .deposits-ctl {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.8rem;
+  }
+  .points {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .points select {
+    width: auto;
+    min-height: 1.9rem;
   }
 </style>

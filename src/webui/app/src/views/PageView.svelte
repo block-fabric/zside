@@ -18,7 +18,6 @@
   import Home from './home/Home.svelte';
   import SideHome from './home/SideHome.svelte';
   import Peg from '../pages/Peg.svelte';
-  import Bmm from '../pages/Bmm.svelte';
   import LocalPages from '../chain/LocalPages.svelte';
   import { SIDECHAIN } from '../chain/config';
   import { LOCAL_PAGES } from '../chain/local';
@@ -60,8 +59,6 @@
     <Tools />
   {:else if nav.page === 'peg'}
     <Peg />
-  {:else if nav.page === 'bmm'}
-    <Bmm />
   {:else if local && !(page.wallet && noWallet)}
     <LocalPages page={nav.page} />
   {:else if (page.wallet && noWallet) || (!walletsOn && nav.page === 'wallets')}

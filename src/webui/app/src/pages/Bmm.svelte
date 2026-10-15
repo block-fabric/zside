@@ -20,6 +20,9 @@
   import { bmmBlocks, bmmHost, bmmShare, declined, type BmmRequest } from '../lib/side';
   import { noteManualRequest, refreshSide, side, startSide, type BmmLogEntry } from '../lib/sidestate.svelte';
 
+  // Shown as a tab of Drivechains (embedded): without its own page title.
+  let { embedded = false }: { embedded?: boolean } = $props();
+
   const mainName = CHAIN.mainchain?.name ?? '';
   /** Mainchain blocks shown as marks, and in the table. */
   const MARKS = 48;
@@ -160,8 +163,8 @@
   }
 </script>
 
-<div class="page bmm">
-  <header class="page-head"><h1>{t(PAGES.bmm.title)}</h1></header>
+<div class="bmm" class:page={!embedded}>
+  {#if !embedded}<header class="page-head"><h1>{t(PAGES.bmm.title)}</h1></header>{/if}
   <p class="side-note">
     The blocks of this chain are mined by the miners of {mainName}, who commit to them in their own blocks for a fee, which the wallet of the {mainName} node pays (blind merged mining). Automatic mining asks for a block whenever
     there are transactions whose fees pay for one: it offers the miners of {mainName} 99% of those fees, and you keep the fees, so one hundredth is yours. Without fees it asks for nothing and costs nothing.
