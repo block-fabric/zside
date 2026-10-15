@@ -5,12 +5,26 @@ import { host } from './rpc';
 import { prefs, savePrefs, wallets } from './state.svelte';
 import { clampFontAdjust } from './themes';
 import { SIDECHAIN } from '../chain/config';
+import { LOCAL_PAGES, type LocalPage } from '../chain/local';
 
 /** Ctrl+letter: the tabs of the node window (the Window menu of chains-qt). */
 const NODE_TABS: Record<string, string> = { i: 'info', t: 'console', n: 'traffic', p: 'peers' };
 // Alt+5: the sidechains of the mainchain, the peg of a sidechain.
-const PAGE_KEYS: Record<string, PageId> = { '1': 'overview', '2': 'send', '3': 'receive', '4': 'transactions', '5': SIDECHAIN ? 'peg' : 'sidechains' };
-const WALLET_PAGES = new Set<PageId>(['send', 'receive', 'transactions']);
+// Alt+6 and on: the pages of a chain of its own that name one (chain/local.ts), never over those of the kit.
+const PAGE_KEYS: Record<string, PageId> = {
+  ...Object.fromEntries(
+    (LOCAL_PAGES as readonly LocalPage[]).flatMap((p) => {
+      const m = /^Alt\+(\d)$/.exec(p.shortcut ?? '');
+      return m ? [[m[1], p.id as PageId]] : [];
+    }),
+  ),
+  '1': 'overview',
+  '2': 'send',
+  '3': 'receive',
+  '4': 'transactions',
+  '5': SIDECHAIN ? 'peg' : 'sidechains',
+};
+const WALLET_PAGES = new Set<PageId>(['send', 'receive', 'transactions', ...(LOCAL_PAGES as readonly LocalPage[]).filter((p) => p.wallet).map((p) => p.id as PageId)]);
 
 /** Close what is on top: the newest open dialog (as Escape does), else the node window. */
 export function closeTop(): boolean {
