@@ -35,7 +35,7 @@ import {
   type PlanStep,
   type ShieldedTxRaw,
 } from './zs/model';
-import { HISTORY_COUNT, isRead, prove, proving, READ_KEEP, READ_PREF, readKeyOf, resetZs, zs, zsView } from './zs/store.svelte';
+import { HISTORY_COUNT, HISTORY_POINTS, isRead, prove, proving, READ_KEEP, READ_PREF, readKeyOf, resetZs, zs, zsView } from './zs/store.svelte';
 import { setTransport, type BridgeRequest } from '../lib/bridge';
 import { buildCommands, menuSections } from '../lib/commands.svelte';
 import { dialogs } from '../lib/dialogs.svelte';
@@ -450,7 +450,9 @@ describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
     await waitFor(() => expect(screen.getByText(new RegExp(`The memos of the newest ${TXS.length} shielded transactions are listed; older ones are not`))).toBeTruthy());
     calls.length = 0;
     await fireEvent.click(screen.getByRole('button', { name: 'Show older' }));
-    await waitFor(() => expect(called('listshieldedtransactions').some((c) => (c.params as number[])[0] === TXS.length + HISTORY_COUNT)).toBe(true));
+    // The next of the counts the user can choose (HISTORY_POINTS) above what is read.
+    const next = HISTORY_POINTS.find((n) => n === 0 || n > TXS.length);
+    await waitFor(() => expect(called('listshieldedtransactions').some((c) => (c.params as number[])[0] === next)).toBe(true));
     expect(READ_KEEP).toBeLessThanOrEqual(1000);
   });
 
@@ -485,6 +487,31 @@ describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
     expect(zsView.spent).toBe(true);
     nav.tab = 'transactions';
     await waitFor(() => expect(zsView.spent).toBe(false));
+  });
+
+  it('Private activity: a table of pages (25, 50, 100 rows) and how many of the newest to read (25 to all)', async () => {
+    render(ZHistory);
+    render(DialogHost);
+    await loaded();
+    const table = await waitFor(() => screen.getByRole('table', { name: 'Shielded transactions' }));
+    expect(within(table).getAllByRole('columnheader').map((h) => h.textContent?.trim())).toEqual(['Details', 'Type', 'Date', 'Memos', 'Privacy', 'Confirmations', 'Amount']);
+    expect(within(table).getAllByRole('row').length).toBe(1 + TXS.length);
+    expect([...(screen.getByLabelText('Rows per page') as HTMLSelectElement).options].map((o) => o.value)).toEqual(['25', '50', '100']);
+    const points = screen.getByLabelText('How many of the newest transactions to read') as HTMLSelectElement;
+    expect([...points.options].map((o) => o.value)).toEqual(['25', '50', '100', '250', '500', '1000', '10000', '25000', '0']);
+    expect(points.options[points.options.length - 1].textContent).toBe('All');
+    expect(points.value).toBe(String(HISTORY_COUNT));
+    // A row opens to its details, by its button or a click on the row.
+    await fireEvent.click(screen.getByRole('button', { name: `Details of ${id('2').slice(0, 8)}…${id('2').slice(-8)}` }));
+    await waitFor(() => expect(screen.getByText('for the coffee')).toBeTruthy());
+    calls.length = 0;
+    await fireEvent.change(points, { target: { value: '25' } });
+    await waitFor(() => expect(called('listshieldedtransactions').some((c) => (c.params as number[])[0] === 25)).toBe(true));
+    // All: every transaction, asked as the largest count the node takes.
+    await fireEvent.change(points, { target: { value: '0' } });
+    await waitFor(() => expect(called('listshieldedtransactions').some((c) => (c.params as number[])[0] === 2147483647)).toBe(true));
+    expect(zsView.historyCount).toBe(0);
+    expect(screen.queryByText(/older ones are not/)).toBeNull();
   });
 
   it('Melt & cast: the plan, a melt, a cast with its bills, a step cancelled', async () => {

@@ -22,7 +22,9 @@
   import ProvingPanel from '../zs/ProvingPanel.svelte';
   import { describeTx, type ShieldedTx } from '../zs/model';
   import OlderNote from '../zs/OlderNote.svelte';
-  import { prove, proving, setSpentNotes, startZs, zs } from '../zs/store.svelte';
+  import { HISTORY_POINTS, prove, proving, setHistoryCount, setSpentNotes, startZs, zs, zsView } from '../zs/store.svelte';
+  import Pager from '../../components/Pager.svelte';
+  import { formatCount } from '../../lib/format';
 
   $effect(() => startZs());
 
@@ -48,6 +50,17 @@
       if (!q) return true;
       return x.txid.includes(q) || x.memos.some((m) => m.toLowerCase().includes(q)) || x.to.some((p) => p.address.includes(q) || p.memo.toLowerCase().includes(q));
     });
+  });
+  // A table of pages (user decision): 25, 50 or 100 rows; how many of the newest are read: HISTORY_POINTS.
+  const PAGE_SIZES = [25, 50, 100] as const;
+  let page = $state(0);
+  let pageSize = $state(25);
+  const pageRows = $derived(shown.slice(page * pageSize, (page + 1) * pageSize));
+  // Another filter or search: from the first page.
+  $effect(() => {
+    void filter;
+    void query;
+    page = 0;
   });
   let openTx = $state('');
   $effect(() => {
@@ -123,6 +136,13 @@
           {/each}
         </div>
         <input type="search" class="grow" placeholder="Search memos, addresses, transactions" aria-label="Search memos, addresses, transactions" bind:value={query} />
+        <label class="points">
+          <span class="faint small">Latest</span>
+          <select aria-label="How many of the newest transactions to read" value={zsView.historyCount} onchange={(e) => { setHistoryCount(Number((e.currentTarget as HTMLSelectElement).value)); page = 0; }}>
+            {#each HISTORY_POINTS as n (n)}<option value={n}>{n === 0 ? t('All') : formatCount(n)}</option>{/each}
+            {#if !(HISTORY_POINTS as readonly number[]).includes(zsView.historyCount)}<option value={zsView.historyCount}>{formatCount(zsView.historyCount)}</option>{/if}
+          </select>
+        </label>
       </div>
 
       <OlderNote what="transactions" />
@@ -132,64 +152,67 @@
         {:else if shown.length === 0}
           <p class="muted pad">No transaction matches.</p>
         {:else}
-          <ul class="zs-list txs">
-            {#each shown as tx (tx.txid)}
-              {@const isOpen = openTx === tx.txid}
-              <li class:open={isOpen}>
-                <button type="button" class="row-btn" aria-expanded={isOpen} onclick={() => (openTx = isOpen ? '' : tx.txid)}>
-                  <span class="ico {tx.kind}"><Icon name={kindIcon(tx.kind)} size={16} /></span>
-                  <span class="what">
-                    <strong>{kindWord(tx.kind)}</strong>
-                    <span class="faint small meta">
-                      <span>{formatTime(tx.time, true)}</span>
-                      {#if tx.memos.length + tx.to.filter((p) => p.memo).length > 0}<span class="memos-count"><Icon name="memo" size={13} />{tn('%n memo(s)', tx.memos.length + tx.to.filter((p) => p.memo).length)}</span>{/if}
-                    </span>
-                  </span>
-                  <Privacy kind={tx.public ? 'public' : 'private'} why={tx.kind === 'shield' ? t('A shielding: the amount that went into the pool shows on the chain, and the transparent coins it came from.') : tx.kind === 'unshield' ? t('An unshielding: the amount and the transparent address show on the chain; where the coins came from does not.') : ''} />
-                  <span class="conf small" class:wait={tx.confirmations === 0}>{tx.confirmations === 0 ? t('waiting') : tn('%n conf.', tx.confirmations)}</span>
-                  <span class="num end"><Amount sats={tx.amount} plus /></span>
-                </button>
+          <table class="txs" aria-label="Shielded transactions" use:stacked>
+            <thead>
+              <tr><th class="ex"><span class="sr-only">Details</span></th><th>Type</th><th>Date</th><th>Memos</th><th>Privacy</th><th class="end">Confirmations</th><th class="end">Amount</th></tr>
+            </thead>
+            <tbody>
+              {#each pageRows as tx (tx.txid)}
+                {@const isOpen = openTx === tx.txid}
+                {@const memoCount = tx.memos.length + tx.to.filter((p) => p.memo).length}
+                <tr class:open={isOpen} onclick={() => (openTx = isOpen ? '' : tx.txid)}>
+                  <td class="ex"><button type="button" class="btn small ghost icon expand" class:on={isOpen} aria-expanded={isOpen} aria-label={t('Details of %1', shortHash(tx.txid, 8))} onclick={(e) => { e.stopPropagation(); openTx = isOpen ? '' : tx.txid; }}><Icon name="chevron-right" size={15} /></button></td>
+                  <td><span class="kind"><span class="ico {tx.kind}"><Icon name={kindIcon(tx.kind)} size={15} /></span><strong>{kindWord(tx.kind)}</strong></span></td>
+                  <td class="small">{formatTime(tx.time, true)}</td>
+                  <td>{#if memoCount > 0}<span class="memos-count"><Icon name="memo" size={13} />{tn('%n memo(s)', memoCount)}</span>{:else}<span class="faint">–</span>{/if}</td>
+                  <td><Privacy kind={tx.public ? 'public' : 'private'} why={tx.kind === 'shield' ? t('A shielding: the amount that went into the pool shows on the chain, and the transparent coins it came from.') : tx.kind === 'unshield' ? t('An unshielding: the amount and the transparent address show on the chain; where the coins came from does not.') : ''} /></td>
+                  <td class="end small conf" class:wait={tx.confirmations === 0}>{tx.confirmations === 0 ? t('waiting') : formatCount(tx.confirmations)}</td>
+                  <td class="end num"><Amount sats={tx.amount} plus /></td>
+                </tr>
                 {#if isOpen}
+                  <tr class="detail-row"><td colspan="7">
                   <div class="detail">
-                    {#if tx.memos.length}
-                      <div>
-                        <h3>Memos received</h3>
-                        {#each tx.memos as m, i (i)}<p class="memo"><SafeText class="zs-memo" text={m} /></p>{/each}
+                        {#if tx.memos.length}
+                          <div>
+                            <h3>Memos received</h3>
+                            {#each tx.memos as m, i (i)}<p class="memo"><SafeText class="zs-memo" text={m} /></p>{/each}
+                          </div>
+                        {/if}
+                        {#if tx.to.length}
+                          <div>
+                            <h3>Paid to</h3>
+                            <table class="paid" use:stacked>
+                              <thead><tr><th>Address</th><th class="end">Amount</th><th>Memo</th></tr></thead>
+                              <tbody>
+                                {#each tx.to as p, i (i)}
+                                  <tr>
+                                    <td class="mono"><SafeText text={shortHash(p.address, 14)} title={p.address} /> <CopyButton text={p.address} label="Copy the address" /></td>
+                                    <td class="end num"><Amount sats={p.amount} /></td>
+                                    <td><SafeText class="zs-memo" text={p.memo} /></td>
+                                  </tr>
+                                {/each}
+                              </tbody>
+                            </table>
+                          </div>
+                        {/if}
+                        <dl class="facts">
+                          <dt>Transaction</dt><dd class="mono"><SafeText text={tx.txid} /> <CopyButton text={tx.txid} label="Copy the transaction id" /></dd>
+                          {#if tx.kind === 'pay'}<dt>Fee</dt><dd><Amount sats={tx.fee} /></dd>{/if}
+                          <dt>Confirmations</dt><dd class="num">{tx.confirmations}</dd>
+                        </dl>
+                        {#if tx.confirmations === 0 && (tx.kind === 'pay' || tx.kind === 'unshield')}
+                          <div class="bump">
+                            <AmountInput id={`zs-bump-${tx.txid}`} label="New fee (empty: the least that replaces it)" bind:value={bumpFee} disabled={busy} />
+                            <button type="button" class="btn" disabled={busy} onclick={() => bump(tx)}><Icon name="up" size={15} /> Pay a higher fee</button>
+                          </div>
+                        {/if}
                       </div>
-                    {/if}
-                    {#if tx.to.length}
-                      <div>
-                        <h3>Paid to</h3>
-                        <table class="paid" use:stacked>
-                          <thead><tr><th>Address</th><th class="end">Amount</th><th>Memo</th></tr></thead>
-                          <tbody>
-                            {#each tx.to as p, i (i)}
-                              <tr>
-                                <td class="mono"><SafeText text={shortHash(p.address, 14)} title={p.address} /> <CopyButton text={p.address} label="Copy the address" /></td>
-                                <td class="end num"><Amount sats={p.amount} /></td>
-                                <td><SafeText class="zs-memo" text={p.memo} /></td>
-                              </tr>
-                            {/each}
-                          </tbody>
-                        </table>
-                      </div>
-                    {/if}
-                    <dl class="facts">
-                      <dt>Transaction</dt><dd class="mono"><SafeText text={tx.txid} /> <CopyButton text={tx.txid} label="Copy the transaction id" /></dd>
-                      {#if tx.kind === 'pay'}<dt>Fee</dt><dd><Amount sats={tx.fee} /></dd>{/if}
-                      <dt>Confirmations</dt><dd class="num">{tx.confirmations}</dd>
-                    </dl>
-                    {#if tx.confirmations === 0 && (tx.kind === 'pay' || tx.kind === 'unshield')}
-                      <div class="bump">
-                        <AmountInput id={`zs-bump-${tx.txid}`} label="New fee (empty: the least that replaces it)" bind:value={bumpFee} disabled={busy} />
-                        <button type="button" class="btn" disabled={busy} onclick={() => bump(tx)}><Icon name="up" size={15} /> Pay a higher fee</button>
-                      </div>
-                    {/if}
-                  </div>
+                  </td></tr>
                 {/if}
-              </li>
-            {/each}
-          </ul>
+              {/each}
+            </tbody>
+          </table>
+          <Pager total={shown.length} bind:page bind:size={pageSize} sizes={PAGE_SIZES} label="transactions" />
         {/if}
       </section>
     {:else}
@@ -262,24 +285,6 @@
     padding: 1rem;
     margin: 0;
   }
-  .row-btn {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto auto minmax(7rem, auto);
-    gap: 0.8rem;
-    align-items: center;
-    width: 100%;
-    padding: 0.7rem 1rem;
-    border: 0;
-    background: none;
-    color: var(--text);
-    font: inherit;
-    text-align: start;
-    cursor: pointer;
-  }
-  .row-btn:hover,
-  .open .row-btn {
-    background: var(--raised);
-  }
   .ico {
     display: inline-grid;
     place-items: center;
@@ -294,19 +299,63 @@
     background: color-mix(in srgb, var(--warning) 16%, transparent);
     color: var(--warning);
   }
-  .what {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-  }
   .conf {
     color: var(--text-muted);
   }
-  .meta {
+  table.txs {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.92rem;
+  }
+  table.txs th {
+    padding: 0.55rem 0.6rem;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 0.82rem;
+    text-align: left;
+    border-bottom: 1px solid var(--line);
+  }
+  table.txs td {
+    padding: 0.45rem 0.6rem;
+    border-bottom: 1px solid var(--line);
+    vertical-align: middle;
+  }
+  table.txs tbody tr:not(.detail-row) {
+    cursor: pointer;
+  }
+  table.txs tbody tr:not(.detail-row):hover,
+  table.txs tr.open {
+    background: var(--surface-2);
+  }
+  table.txs .ex {
+    width: 2.2rem;
+  }
+  table.txs th.end {
+    text-align: right;
+  }
+  .kind {
     display: inline-flex;
-    flex-wrap: wrap;
     align-items: center;
-    gap: 0.25rem 0.7rem;
+    gap: 0.45rem;
+    white-space: nowrap;
+  }
+  .expand :global(svg) {
+    transition: transform 0.15s;
+  }
+  .expand.on :global(svg) {
+    transform: rotate(90deg);
+  }
+  .detail-row > td {
+    background: var(--bg);
+    cursor: default;
+  }
+  .points {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .points select {
+    width: auto;
   }
   .memos-count {
     display: inline-flex;
@@ -366,12 +415,6 @@
     align-items: flex-end;
   }
   @media (max-width: 760px) {
-    .row-btn {
-      grid-template-columns: auto minmax(0, 1fr) auto;
-    }
-    .row-btn .conf {
-      display: none;
-    }
     .detail {
       padding-left: 1rem;
     }

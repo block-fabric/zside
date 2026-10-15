@@ -5,7 +5,7 @@
   import Icon from '../../components/Icon.svelte';
   import { formatCount } from '../../lib/format';
   import { t } from '../../lib/i18n.svelte';
-  import { historyCut, MAX_HISTORY, showOlder, zsView } from './store.svelte';
+  import { historyCut, showOlder, zsView } from './store.svelte';
 
   let { what }: { what: 'memos' | 'transactions' } = $props();
 </script>
@@ -14,7 +14,7 @@
   <p class="zs-older muted small" role="status">
     <Icon name="info" size={14} />
     {#if what === 'memos'}{t('The memos of the newest %1 shielded transactions are listed; older ones are not.', formatCount(zsView.historyCount))}{:else}{t('The newest %1 shielded transactions are listed; older ones are not.', formatCount(zsView.historyCount))}{/if}
-    {#if zsView.historyCount < MAX_HISTORY}<button type="button" class="btn ghost small" onclick={showOlder}>Show older</button>{/if}
+    {#if zsView.historyCount !== 0}<button type="button" class="btn ghost small" onclick={showOlder}>Show older</button>{/if}
   </p>
 {/if}
 

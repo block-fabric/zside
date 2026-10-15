@@ -12,9 +12,12 @@ import { node, wallets } from '../../lib/state.svelte';
 import { WalletError } from '../../lib/wallet';
 import { memosOf, proofEstimate, type NoteRaw, type PlanStep, type PoolInfo, type ShieldedBalanceRaw, type ShieldedTxRaw } from './model';
 
-/** How many transactions of the account the pages show at first (listshieldedtransactions), and at most. */
+/** How many transactions of the account the pages read at first (listshieldedtransactions). */
 export const HISTORY_COUNT = 500;
-export const MAX_HISTORY = 5000;
+/** How many the user can choose to read (user decision, 2026-10-15); 0 is all of them. */
+export const HISTORY_POINTS = [25, 50, 100, 250, 500, 1000, 10000, 25000, 0] as const;
+/** The count asked of the node for "all" (listshieldedtransactions takes a count). */
+const ALL_HISTORY = 2147483647;
 
 /**
  * What the pages ask of the account beyond the usual (audit port-2 #10): more of its history ("Show older",
@@ -25,13 +28,19 @@ export const zsView = $state({ historyCount: HISTORY_COUNT, spent: false });
 
 /** Whether the history read may have left older transactions out (it holds as many as were asked for). */
 export function historyCut(): boolean {
-  return zs.txs.length >= zsView.historyCount;
+  return zsView.historyCount !== 0 && zs.txs.length >= zsView.historyCount;
 }
 
-/** Read HISTORY_COUNT more of the history (up to MAX_HISTORY). */
-export function showOlder(): void {
-  zsView.historyCount = Math.min(MAX_HISTORY, zsView.historyCount + HISTORY_COUNT);
+/** Read this many of the newest transactions (0: all of them). */
+export function setHistoryCount(count: number): void {
+  if (zsView.historyCount === count) return;
+  zsView.historyCount = count;
   void refreshZs();
+}
+
+/** Read more of the history: the next of HISTORY_POINTS above what is read now (all, at the end). */
+export function showOlder(): void {
+  setHistoryCount(HISTORY_POINTS.find((n) => n === 0 || n > zsView.historyCount) ?? 0);
 }
 
 /** The spent notes too, while a page shows them. */
@@ -84,7 +93,7 @@ async function round(): Promise<void> {
   const opts = { wallet };
   const [balance, txs, notes, plan, address, balances, poolInfo] = await Promise.allSettled([
     rpc.raw<ShieldedBalanceRaw>('getshieldedbalance', [], opts),
-    rpc.raw<ShieldedTxRaw[]>('listshieldedtransactions', [zsView.historyCount], opts),
+    rpc.raw<ShieldedTxRaw[]>('listshieldedtransactions', [zsView.historyCount === 0 ? ALL_HISTORY : zsView.historyCount], opts),
     rpc.raw<NoteRaw[]>('listshieldednotes', [zsView.spent], opts),
     rpc.raw<PlanStep[]>('listmeltcast', [], opts),
     zs.address && zs.wallet === wallet ? Promise.resolve(zs.address) : rpc.raw<string>('getshieldedaddress', [], opts),
