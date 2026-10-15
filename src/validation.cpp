@@ -5237,6 +5237,18 @@ static const char* PardonedFailure(const ChainstateManager& chainman, const CBlo
     return nullptr;
 }
 
+bool ChainstateManager::SpareWanted(const CBlockHeader& header, const CBlockIndex& prev, int64_t source) const
+{
+    AssertLockHeld(cs_main);
+    const arith_uint256 work{sidechain::Hooks().CustomChainOrder() ? sidechain::Hooks().ChainWork(&prev, header) : prev.nChainWork + GetBlockProof(header)};
+    // The most work (or, with the chain's own order, the best key: more anchors, say): the best header.
+    if (m_best_header && work > m_best_header->nChainWork) return true;
+    // An announcement from an outbound peer: a tip better than the active chain's.
+    const bool outbound{m_unchecked_sources.contains(source) && !m_unchecked_inbound.contains(source)};
+    const CBlockIndex* tip{ActiveChain().Tip()};
+    return outbound && tip && work > tip->nChainWork;
+}
+
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked, int64_t source, bool continued)
 {
     AssertLockHeld(cs_main);
@@ -5307,10 +5319,13 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
             return false;
         }
         if (spare) {
-            // Alone, nothing builds on it: refused (not the peer's fault). With a header on top of it
-            // (the branch a block builds on, which the node may need), taken as an unchecked one: the
-            // peer's, within its budget, and kept for good only once its block is connected.
-            if (!continued) {
+            // Alone, nothing builds on it: refused (not the peer's fault) -- unless the node may need it
+            // now: it would be the node's best header (more work than any it has: the chain the node
+            // would follow, its block once it has it), or it is the tip an outbound peer (one the node
+            // chose) announces, of a branch with more work than the active chain. Those, and one with a
+            // header on top of it (the branch a block builds on), are taken as unchecked headers: the
+            // peer's, within its budget, and kept for good only once the block is connected.
+            if (!continued && !SpareWanted(block, *pindexPrev, source)) {
                 LogDebug(BCLog::VALIDATION, "%s: spare header %s from peer=%d, alone (header-spare)\n", __func__, hash.ToString(), source);
                 return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "header-spare", "the node keeps no more headers like this one, but on the branch of a header on top of it");
             }

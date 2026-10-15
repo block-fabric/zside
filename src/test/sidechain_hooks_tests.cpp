@@ -1131,6 +1131,8 @@ BOOST_FIXTURE_TEST_CASE(spare_headers_only_on_a_branch, SidechainSetup)
     // A spare header (the block index has as many like it as the chain can need) from a peer: alone,
     // refused, not the peer's fault; with a header on top of it in the same message, taken unchecked
     // (the peer's, gone with it), and kept for good once its block is connected. The node's own: taken.
+    // (From inbound peers: an outbound peer's announcement of a better tip is taken alone too, see
+    // spare_header_announced_by_an_outbound_peer.)
     auto owned{std::make_unique<SpareHooks>()};
     SpareHooks& hooks{*owned};
     InstallHooks installed{std::move(owned)};
@@ -1140,8 +1142,8 @@ BOOST_FIXTURE_TEST_CASE(spare_headers_only_on_a_branch, SidechainSetup)
     ChainstateManager& chainman{*m_node.chainman};
     {
         LOCK(::cs_main);
-        chainman.UncheckedSourceAdded(5);
-        chainman.UncheckedSourceAdded(6);
+        chainman.UncheckedSourceAdded(5, /*inbound=*/true);
+        chainman.UncheckedSourceAdded(6, /*inbound=*/true);
     }
     const auto extended{[](CBlock block) {
         block.nVersion |= BLOCK_EXTENSION_BIT;
@@ -1219,6 +1221,76 @@ BOOST_FIXTURE_TEST_CASE(spare_headers_only_on_a_branch, SidechainSetup)
     BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{a3}}, /*min_pow_checked=*/true, state), state.ToString());
     BOOST_CHECK(WITH_LOCK(::cs_main, return !Assert(chainman.m_blockman.LookupBlockIndex(a3.GetHash()))->m_unchecked));
     BOOST_CHECK_EQUAL(hooks.kept[tip].size(), 3U);
+}
+
+BOOST_FIXTURE_TEST_CASE(spare_header_announced_by_an_outbound_peer, SidechainSetup)
+{
+    // A spare header alone that the node may need now is taken (unchecked, the peer's, within its
+    // budget) all the same: the tip an outbound peer announces, of a chain better than the active one
+    // (the first headers of a slot may have been junk its signer signed, and the block the network
+    // builds on is announced alone), or one that would be the best header. Not one from an inbound peer
+    // that is no better than the best header, nor one of an outbound peer below the active tip.
+    auto owned{std::make_unique<SpareHooks>()};
+    SpareHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3e};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    {
+        LOCK(::cs_main);
+        chainman.UncheckedSourceAdded(5, /*inbound=*/true);
+        chainman.UncheckedSourceAdded(7);
+    }
+    const auto extended{[](CBlock block) {
+        block.nVersion |= BLOCK_EXTENSION_BIT;
+        block.ext.hashSections.SetNull();
+        block.ext.sig.fill(5);
+        return block;
+    }};
+    const CBlock model{Build()};
+    const uint256 tip{model.hashPrevBlock};
+    const CBlock a1{extended(model)};
+    const CBlock a2{extended(Build(model.nTime + 1))};
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{a1}}, /*min_pow_checked=*/true, state, nullptr, /*source=*/5), state.ToString());
+    BOOST_CHECK_EQUAL(hooks.kept[tip].size(), 1U);
+    // From the inbound peer, alone: refused (no more work than the best header, a1).
+    {
+        BlockValidationState spare;
+        BOOST_CHECK(!chainman.ProcessNewBlockHeaders({{a2}}, /*min_pow_checked=*/true, spare, nullptr, /*source=*/5));
+        BOOST_CHECK_EQUAL(spare.GetRejectReason(), "header-spare");
+    }
+    // Announced alone by the outbound peer (a tip better than the active chain's): taken unchecked, its.
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{a2}}, /*min_pow_checked=*/true, state, nullptr, /*source=*/7), state.ToString());
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(a2.GetHash())};
+        BOOST_REQUIRE(index);
+        BOOST_CHECK(index->m_unchecked && chainman.HoldsUnchecked(*index, 7));
+    }
+    // Its block, alone too, from that peer: taken, and connected (the first has no block).
+    {
+        BlockValidationState block_state;
+        bool new_block{false};
+        BOOST_REQUIRE_MESSAGE(WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(a2), block_state, nullptr, true, nullptr, &new_block, true, /*source=*/7)), block_state.ToString());
+        BOOST_CHECK(new_block);
+    }
+    BOOST_REQUIRE(chainman.ActiveChainstate().ActivateBestChain(state));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->GetBlockHash()) == a2.GetHash());
+    BOOST_CHECK_EQUAL(hooks.kept[tip].size(), 2U);
+    // Below the active tip now: a further one alone from the outbound peer is refused.
+    const CBlock a3{extended(Build(model.nTime + 2))};
+    CBlock below{a3};
+    below.hashPrevBlock = tip;
+    below.nTime = model.nTime + 3;
+    below.hashMerkleRoot = BlockMerkleRoot(below);
+    {
+        BlockValidationState spare;
+        BOOST_CHECK(!chainman.ProcessNewBlockHeaders({{static_cast<CBlockHeader>(below)}}, /*min_pow_checked=*/true, spare, nullptr, /*source=*/7));
+        BOOST_CHECK_EQUAL(spare.GetRejectReason(), "header-spare");
+    }
+    WITH_LOCK(::cs_main, chainman.CheckUnchecked());
 }
 
 BOOST_FIXTURE_TEST_CASE(extension_failure_not_the_peers_fault, SidechainSetup)

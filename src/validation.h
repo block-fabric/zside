@@ -1381,6 +1381,13 @@ public:
      * its own budget, whatever other peers hold. -1 always may.
      */
     bool AdmitUnchecked(const CBlockIndex& prev, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Whether a spare header (ChainHooks::HeaderSpare) on `prev` that comes alone from `source` is one the
+     * node may need now, and takes (unchecked) all the same: it would be the best header (more work, or
+     * the better key of the chain's own order, than any the node has), or it is a tip an outbound peer
+     * announces whose chain is better than the active one.
+     */
+    bool SpareWanted(const CBlockHeader& header, const CBlockIndex& prev, int64_t source) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** `source` holds `index`, an unchecked header (new or known), and those below it, if its budget allows. */
     void HoldUnchecked(CBlockIndex& index, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
