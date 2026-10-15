@@ -3,17 +3,43 @@
 // chain; asked again with every block, every transaction event of the wallet, and every few seconds, one
 // round at a time.
 //
-// And what the chain does not keep, for this viewer only (browser storage, a convenience that may be lost):
-// which memos were read, and how long the proofs took (the estimate of the next one).
+// And what the chain does not keep: which memos were read (in the app's preferences, one set per network,
+// per wallet: audit port-2 #10), and how long the proofs took (browser storage, a convenience that may be lost).
 import { BridgeError } from '../../lib/bridge';
 import { every } from '../../lib/poll';
-import { rpc } from '../../lib/rpc';
+import { host, rpc } from '../../lib/rpc';
 import { node, wallets } from '../../lib/state.svelte';
 import { WalletError } from '../../lib/wallet';
 import { memosOf, proofEstimate, type NoteRaw, type PlanStep, type PoolInfo, type ShieldedBalanceRaw, type ShieldedTxRaw } from './model';
 
-/** How many transactions of the account the pages show (listshieldedtransactions). */
+/** How many transactions of the account the pages show at first (listshieldedtransactions), and at most. */
 export const HISTORY_COUNT = 500;
+export const MAX_HISTORY = 5000;
+
+/**
+ * What the pages ask of the account beyond the usual (audit port-2 #10): more of its history ("Show older",
+ * HISTORY_COUNT more each time), and its spent notes while a page shows them (listshieldednotes is otherwise
+ * asked for the unspent ones only, which do not grow without bound).
+ */
+export const zsView = $state({ historyCount: HISTORY_COUNT, spent: false });
+
+/** Whether the history read may have left older transactions out (it holds as many as were asked for). */
+export function historyCut(): boolean {
+  return zs.txs.length >= zsView.historyCount;
+}
+
+/** Read HISTORY_COUNT more of the history (up to MAX_HISTORY). */
+export function showOlder(): void {
+  zsView.historyCount = Math.min(MAX_HISTORY, zsView.historyCount + HISTORY_COUNT);
+  void refreshZs();
+}
+
+/** The spent notes too, while a page shows them. */
+export function setSpentNotes(spent: boolean): void {
+  if (zsView.spent === spent) return;
+  zsView.spent = spent;
+  void refreshZs();
+}
 
 export const zs = $state({
   /** The wallet the rest is of. */
@@ -58,8 +84,8 @@ async function round(): Promise<void> {
   const opts = { wallet };
   const [balance, txs, notes, plan, address, balances, poolInfo] = await Promise.allSettled([
     rpc.raw<ShieldedBalanceRaw>('getshieldedbalance', [], opts),
-    rpc.raw<ShieldedTxRaw[]>('listshieldedtransactions', [HISTORY_COUNT], opts),
-    rpc.raw<NoteRaw[]>('listshieldednotes', [true], opts),
+    rpc.raw<ShieldedTxRaw[]>('listshieldedtransactions', [zsView.historyCount], opts),
+    rpc.raw<NoteRaw[]>('listshieldednotes', [zsView.spent], opts),
     rpc.raw<PlanStep[]>('listmeltcast', [], opts),
     zs.address && zs.wallet === wallet ? Promise.resolve(zs.address) : rpc.raw<string>('getshieldedaddress', [], opts),
     rpc.raw<{ mine: { trusted: number; untrusted_pending: number; immature: number } }>('getbalances', [], opts),
@@ -157,16 +183,36 @@ export function resetZs(): void {
   running = null;
   again = false;
   Object.assign(zs, { wallet: null, loaded: false, error: '', unlockNeeded: false, balance: null, transparent: null, pool: null, txs: [], notes: [], plan: [], address: '', version: 0 });
+  Object.assign(zsView, { historyCount: HISTORY_COUNT, spent: false });
   readKeys.clear();
   readLoadedFor = null;
+  readStore = null;
+  readLoading = null;
 }
 
-// --- The memos read (this viewer's convenience) ---
+// --- The memos read ---
+//
+// In the app's preferences (prefs.get / prefs.set: the host keeps one set per network, so the same wallet
+// name on main, test and regtest does not share them), under READ_PREF: per wallet, the newest READ_KEEP
+// memos read, each by a short key (16 hex digits of the transaction and the index: a few bytes each, the
+// preferences being capped). Marks kept in browser storage by an older version are moved there once.
 
-const READ_KEY = 'zside.memos.read';
+export const READ_PREF = 'zsideMemosRead';
+/** Memos read kept per wallet, and wallets kept (the newest marks of the wallets used last). */
+export const READ_KEEP = 1000;
+export const READ_WALLETS = 6;
+const OLD_READ_KEY = 'zside.memos.read';
 const readKeys = new Set<string>();
 let readLoadedFor: string | null = null;
+let readStore: Record<string, string[]> | null = null;
+let readLoading: Promise<void> | null = null;
 export const memoState = $state({ version: 0 });
+
+/** The short key a mark is kept by. */
+export function readKeyOf(key: string): string {
+  const at = key.lastIndexOf(':');
+  return at < 0 ? key.slice(0, 16) : `${key.slice(0, Math.min(16, at))}:${key.slice(at + 1)}`;
+}
 
 function storageGet(key: string): string | null {
   try {
@@ -180,39 +226,101 @@ function storageSet(key: string, value: string): void {
   try {
     localStorage.setItem(key, value);
   } catch {
-    // Not kept: the memos show as unread again next time.
+    // Not kept: a convenience.
   }
 }
 
+function storageRemove(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Nothing to do.
+  }
+}
+
+function loadStore(): Promise<void> {
+  readLoading ??= host
+    .prefs()
+    .then((p) => {
+      const raw = p[READ_PREF];
+      const store: Record<string, string[]> = {};
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        for (const [w, list] of Object.entries(raw as Record<string, unknown>)) {
+          if (Array.isArray(list)) store[w] = list.filter((k): k is string => typeof k === 'string').slice(-READ_KEEP);
+        }
+      }
+      readStore = store;
+    })
+    .catch(() => {
+      readStore = {};
+    })
+    .then(() => {
+      readLoadedFor = null;
+      memoState.version++;
+    });
+  return readLoading;
+}
+
 function loadRead(wallet: string): void {
+  if (readStore === null) {
+    void loadStore();
+    return;
+  }
   if (readLoadedFor === wallet) return;
   readLoadedFor = wallet;
   readKeys.clear();
-  try {
-    const list = JSON.parse(storageGet(`${READ_KEY}.${wallet}`) ?? '[]');
-    if (Array.isArray(list)) for (const k of list) if (typeof k === 'string') readKeys.add(k);
-  } catch {
-    // A list that cannot be read: none read.
+  for (const k of readStore[wallet] ?? []) readKeys.add(k);
+  // Marks of an older version, in browser storage: moved to the preferences.
+  const old = storageGet(`${OLD_READ_KEY}.${wallet}`);
+  if (old !== null) {
+    try {
+      const list = JSON.parse(old);
+      if (Array.isArray(list)) for (const k of list) if (typeof k === 'string') readKeys.add(readKeyOf(k));
+    } catch {
+      // A list that cannot be read: none read.
+    }
+    storageRemove(`${OLD_READ_KEY}.${wallet}`);
+    saveRead(wallet);
   }
+}
+
+function saveRead(wallet: string): void {
+  if (readStore === null) return;
+  const store = { ...readStore };
+  delete store[wallet];
+  // The wallet saved last goes last: the oldest wallets are let go first.
+  store[wallet] = [...readKeys].slice(-READ_KEEP);
+  const wallets = Object.keys(store);
+  for (const w of wallets.slice(0, Math.max(0, wallets.length - READ_WALLETS))) delete store[w];
+  readStore = store;
+  host.setPrefs({ [READ_PREF]: store }).catch(() => undefined);
 }
 
 export function isRead(key: string): boolean {
   void memoState.version;
   if (zs.wallet === null) return true;
+  // Until the preferences are read, nothing shows as unread.
+  if (readStore === null) {
+    void loadStore();
+    return true;
+  }
   loadRead(zs.wallet);
-  return readKeys.has(key);
+  return readKeys.has(readKeyOf(key));
 }
 
 export function markRead(keys: string[], read = true): void {
   if (zs.wallet === null) return;
+  if (readStore === null) {
+    void loadStore().then(() => markRead(keys, read));
+    return;
+  }
   loadRead(zs.wallet);
   for (const k of keys) {
-    if (read) readKeys.add(k);
-    else readKeys.delete(k);
+    const short = readKeyOf(k);
+    readKeys.delete(short);
+    if (read) readKeys.add(short);
   }
-  // The newest 4000 kept.
-  const list = [...readKeys].slice(-4000);
-  storageSet(`${READ_KEY}.${zs.wallet}`, JSON.stringify(list));
+  saveRead(zs.wallet);
   memoState.version++;
 }
 
@@ -222,7 +330,7 @@ export function unreadCount(): number {
   return memosOf(zs.txs).filter((m) => !isRead(m.key)).length;
 }
 
-// --- How long proofs take (this viewer's convenience) ---
+// --- How long proofs take (this viewer's convenience, in browser storage) ---
 
 const PROOF_KEY = 'zside.proofs';
 

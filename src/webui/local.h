@@ -40,6 +40,9 @@ using NodeFn = std::function<interfaces::Node&()>;
  */
 void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm);
 
+/** zSide: what the desktop asks before the viewing key of a wallet is shown (zside.viewingkey.export). */
+Window::ConfirmDialog ViewingKeyConfirmation(const std::string& wallet);
+
 } // namespace webui::local
 
 #endif // BITCOIN_WEBUI_LOCAL_H

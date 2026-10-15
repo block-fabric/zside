@@ -35,7 +35,7 @@ import {
   type PlanStep,
   type ShieldedTxRaw,
 } from './zs/model';
-import { isRead, prove, proving, resetZs, zs } from './zs/store.svelte';
+import { HISTORY_COUNT, isRead, prove, proving, READ_KEEP, READ_PREF, readKeyOf, resetZs, zs, zsView } from './zs/store.svelte';
 import { setTransport, type BridgeRequest } from '../lib/bridge';
 import { buildCommands, menuSections } from '../lib/commands.svelte';
 import { dialogs } from '../lib/dialogs.svelte';
@@ -78,6 +78,8 @@ const PLAN: PlanStep[] = [
 
 const calls: BridgeRequest[] = [];
 let privateKeysDisabled = false;
+let viewingKeyDeclined = false;
+let prefStore: Record<string, unknown> = {};
 let balance: Record<string, number> = { available: 4.9999, pending: 0.25, notes: 2 };
 
 async function fakeNode(r: BridgeRequest): Promise<unknown> {
@@ -91,7 +93,8 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
     case 'listshieldedtransactions':
       return TXS;
     case 'listshieldednotes':
-      return NOTES;
+      // Spent ones only when asked for (audit port-2 #10).
+      return p[0] === true ? NOTES : NOTES.filter((n) => !n.spent_by);
     case 'listmeltcast':
       return PLAN;
     case 'getshieldedaddress':
@@ -108,6 +111,10 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
     case 'bumpshieldedfee':
       return { txid: id('c'), origfee: 0.0001, fee: 0.0002 };
     case 'exportshieldedviewingkey':
+      // Never called by the page (audit port-2 #3): the host's zside.viewingkey.export asks the desktop first.
+      throw new Error('exportshieldedviewingkey is not a method the page calls');
+    case 'zside.viewingkey.export':
+      if (viewingKeyDeclined) throw Object.assign(new Error('The viewing key was not shown: it was declined.'), { code: -32800 });
       return ZKEY;
     case 'importshieldedviewingkey':
       return { scanned_from: Number(p[1]) };
@@ -120,8 +127,9 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
     case 'wallet.info':
       return { name: 'w', encrypted: false, locked: false, privateKeysDisabled, externalSigner: false, hd: true, canGetAddresses: !privateKeysDisabled, taproot: true, defaultAddressType: 'bech32', confirmTarget: 6, requiredFeePerK: 1000, maxTxFee: 0.1, multiwallet: false, balance: 3, unconfirmed: 0, immature: 0 };
     case 'prefs.get':
-      return {};
+      return structuredClone(prefStore);
     case 'prefs.set':
+      Object.assign(prefStore, r.params as Record<string, unknown>);
       return {};
     default:
       return null;
@@ -145,6 +153,8 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  viewingKeyDeclined = false;
+  prefStore = {};
   app.info = { name: CHAIN.name, version: 'test', bugreport: '', network: 'regtest', networkLabel: 'regtest', datadir: '/tmp', walletEnabled: true, devtools: false, test: true, platform: 'linux', blockSpacing: 60 } as typeof app.info;
   prefs.unit = 'CHN';
   prefs.mask = false;
@@ -243,11 +253,13 @@ describe('zSide: what the pages work out', () => {
 });
 
 describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
-  it('are in the Wallet and Chain sections and the menus, chain before tools, with a quick action and Alt+6', () => {
+  it('are in the Chain section and the menus, chain before tools, with a quick action and Alt+6', () => {
     expect((LOCAL_PAGES as readonly LocalPage[]).map((p) => p.id)).toEqual(['private', 'memos', 'zhistory', 'meltcast', 'pool']);
-    const wallet = NAV_SECTIONS.find((s) => s.title === 'Wallet')!.pages;
-    for (const p of ['private', 'memos', 'zhistory', 'meltcast']) expect(wallet).toContain(p);
-    expect(NAV_SECTIONS.find((s) => s.title === 'Chain')!.pages).toContain('pool');
+    // The Wallet section is the user's six (audit port-2 #9); zSide's pages are under Chain.
+    expect(NAV_SECTIONS.find((s) => s.title === 'Wallet')!.pages).toEqual(['overview', 'send', 'receive', 'transactions', 'wallets', 'advanced']);
+    const chainPages = NAV_SECTIONS.find((s) => s.title === 'Chain')!.pages;
+    for (const p of ['private', 'memos', 'zhistory', 'meltcast', 'pool']) expect(chainPages).toContain(p);
+    expect(AREAS.find((a) => a.id === 'wallet')!.tabs.length).toBeLessThanOrEqual(6);
     expect(AREAS.find((a) => a.id === 'chain')!.tabs.map((t) => t.page)).toContain('pool');
     expect(chainBeforeTools(HOME_QUICK_ACTIONS.map((q) => q.page), (p) => p)).toBeNull();
     expect(HOME_QUICK_ACTIONS.map((q) => q.label)).toContain('Pay privately');
@@ -358,12 +370,24 @@ describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
     await answer('yes');
     await waitFor(() => expect(document.querySelector('dialog[open]')?.textContent).toMatch(/Tick the box/));
     await answer('ok');
-    expect(called('exportshieldedviewingkey').length).toBe(0);
+    expect(called('zside.viewingkey.export').length).toBe(0);
+    // Declined on the desktop: nothing shown, no error.
+    viewingKeyDeclined = true;
     await fireEvent.click(screen.getByRole('button', { name: /Show the viewing key/ }));
     await waitFor(() => expect(document.querySelector('dialog[open] input[type="checkbox"]')).not.toBeNull());
     await fireEvent.click(document.querySelector('dialog[open] input[type="checkbox"]')!);
     await answer('yes');
-    await waitFor(() => expect(called('exportshieldedviewingkey').length).toBe(1));
+    await waitFor(() => expect(called('zside.viewingkey.export').length).toBe(1));
+    expect(called('zside.viewingkey.export')[0]).toMatchObject({ kind: 'host', params: { wallet: 'w' } });
+    expect(screen.queryByText(ZKEY)).toBeNull();
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    viewingKeyDeclined = false;
+    await fireEvent.click(screen.getByRole('button', { name: /Show the viewing key/ }));
+    await waitFor(() => expect(document.querySelector('dialog[open] input[type="checkbox"]')).not.toBeNull());
+    await fireEvent.click(document.querySelector('dialog[open] input[type="checkbox"]')!);
+    await answer('yes');
+    await waitFor(() => expect(called('zside.viewingkey.export').length).toBe(2));
+    expect(called('exportshieldedviewingkey').length).toBe(0);
     // Shown blurred until asked.
     await waitFor(() => expect(screen.getByText(ZKEY).classList.contains('hidden')).toBe(true));
     await fireEvent.click(screen.getByRole('button', { name: /Show$/ }));
@@ -404,6 +428,30 @@ describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
     await waitFor(() => expect(screen.getAllByRole('option').length).toBe(1));
     await fireEvent.click(screen.getByRole('button', { name: /Mark all read/ }));
     await waitFor(() => expect(screen.queryAllByLabelText('Unread').length).toBe(0));
+    // Kept in the app's preferences (one set per network, by the host), per wallet, by short keys (audit port-2 #10).
+    const kept = (prefStore[READ_PREF] as Record<string, string[]>).w;
+    expect(kept).toContain(readKeyOf(`${id('1')}:0`));
+    expect(readKeyOf(`${id('1')}:0`)).toBe(`${id('1').slice(0, 16)}:0`);
+    expect(called('listshieldedtransactions')[0].params).toEqual([HISTORY_COUNT]);
+  });
+
+  it('Memos: marks of an older version move from browser storage to the preferences; the newest kept; older memos said to be left out', async () => {
+    localStorage.setItem('zside.memos.read.w', JSON.stringify([`${id('1')}:0`]));
+    render(Memos);
+    await loaded();
+    await waitFor(() => expect(screen.getAllByRole('option').length).toBe(3));
+    await waitFor(() => expect(screen.getAllByLabelText('Unread').length).toBe(2));
+    expect(localStorage.getItem('zside.memos.read.w')).toBeNull();
+    await waitFor(() => expect((prefStore[READ_PREF] as Record<string, string[]>).w).toEqual([readKeyOf(`${id('1')}:0`)]));
+    // The whole history is there: no line about older ones.
+    expect(screen.queryByText(/older ones are not/)).toBeNull();
+    // As many read as asked for: older ones may be left out, and the page says so, with a button for more.
+    zsView.historyCount = TXS.length;
+    await waitFor(() => expect(screen.getByText(new RegExp(`The memos of the newest ${TXS.length} shielded transactions are listed; older ones are not`))).toBeTruthy());
+    calls.length = 0;
+    await fireEvent.click(screen.getByRole('button', { name: 'Show older' }));
+    await waitFor(() => expect(called('listshieldedtransactions').some((c) => (c.params as number[])[0] === TXS.length + HISTORY_COUNT)).toBe(true));
+    expect(READ_KEEP).toBeLessThanOrEqual(1000);
   });
 
   it('Private activity: the transactions in words with their privacy, a fee bump, the notes', async () => {
@@ -425,12 +473,18 @@ describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
     await waitFor(() => expect(called('bumpshieldedfee').length).toBe(1));
     expect(called('bumpshieldedfee')[0].params).toEqual([id('2')]);
 
+    // The unspent notes only, until the spent ones are asked for (audit port-2 #10).
+    expect(called('listshieldednotes').every((c) => (c.params as unknown[])[0] === false)).toBe(true);
     nav.tab = 'notes';
     await waitFor(() => expect(screen.getByRole('table', { name: 'Notes' })).toBeTruthy());
     expect(within(screen.getByRole('table', { name: 'Notes' })).getAllByRole('row').length).toBe(3);
     expect(screen.getByText('watched')).toBeTruthy();
     await fireEvent.click(screen.getByLabelText(/Show the spent notes/));
     await waitFor(() => expect(within(screen.getByRole('table', { name: 'Notes' })).getAllByRole('row').length).toBe(4));
+    expect(called('listshieldednotes').some((c) => (c.params as unknown[])[0] === true)).toBe(true);
+    expect(zsView.spent).toBe(true);
+    nav.tab = 'transactions';
+    await waitFor(() => expect(zsView.spent).toBe(false));
   });
 
   it('Melt & cast: the plan, a melt, a cast with its bills, a step cancelled', async () => {

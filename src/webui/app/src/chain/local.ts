@@ -31,10 +31,10 @@ export interface LocalPage {
 }
 
 export const LOCAL_PAGES = [
-  { id: 'private', title: 'Private', icon: 'private', section: 'wallet', summary: 'The shielded balance: pay privately with a memo, shield and unshield, shielded addresses, viewing keys', wallet: true, shortcut: 'Alt+6', keywords: 'shielded zside orchard pay privately shield unshield memo address viewing key', quick: { label: 'Pay privately', icon: 'private', tab: 'pay' } },
-  { id: 'memos', title: 'Memos', icon: 'memo', section: 'wallet', summary: 'The memos the shielded account received, to read', wallet: true, keywords: 'inbox messages notes memo received' },
-  { id: 'zhistory', title: 'Private activity', icon: 'zhistory', section: 'wallet', summary: 'The transactions and the notes of the shielded account', wallet: true, keywords: 'shielded history transactions notes bump fee' },
-  { id: 'meltcast', title: 'Melt & cast', icon: 'meltcast', section: 'wallet', summary: 'Shield and unshield in steps that leave nothing to link', wallet: true, keywords: 'melt cast bills unlinkable plan schedule' },
+  { id: 'private', title: 'Private', icon: 'private', section: 'chain', summary: 'The shielded balance: pay privately with a memo, shield and unshield, shielded addresses, viewing keys', wallet: true, shortcut: 'Alt+6', keywords: 'shielded zside orchard pay privately shield unshield memo address viewing key', quick: { label: 'Pay privately', icon: 'private', tab: 'pay' } },
+  { id: 'memos', title: 'Memos', icon: 'memo', section: 'chain', summary: 'The memos the shielded account received, to read', wallet: true, keywords: 'inbox messages notes memo received' },
+  { id: 'zhistory', title: 'Private activity', icon: 'zhistory', section: 'chain', summary: 'The transactions and the notes of the shielded account', wallet: true, keywords: 'shielded history transactions notes bump fee' },
+  { id: 'meltcast', title: 'Melt & cast', icon: 'meltcast', section: 'chain', summary: 'Shield and unshield in steps that leave nothing to link', wallet: true, keywords: 'melt cast bills unlinkable plan schedule' },
   { id: 'pool', title: 'Shielded pool', icon: 'pool', section: 'chain', summary: 'What the shielded pool of the chain holds, and its tree of notes', keywords: 'orchard pool notes nullifiers tree root index' },
 ] as const satisfies readonly LocalPage[];
 

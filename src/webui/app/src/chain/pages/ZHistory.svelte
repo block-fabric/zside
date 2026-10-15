@@ -21,7 +21,8 @@
   import Privacy from '../zs/Privacy.svelte';
   import ProvingPanel from '../zs/ProvingPanel.svelte';
   import { describeTx, type ShieldedTx } from '../zs/model';
-  import { prove, proving, startZs, zs } from '../zs/store.svelte';
+  import OlderNote from '../zs/OlderNote.svelte';
+  import { prove, proving, setSpentNotes, startZs, zs } from '../zs/store.svelte';
 
   $effect(() => startZs());
 
@@ -90,6 +91,11 @@
 
   // --- Notes ---
   let showSpent = $state(false);
+  // The spent notes are read only while they are shown here (listshieldednotes [true]).
+  $effect(() => {
+    setSpentNotes(showSpent && tab === 'notes');
+  });
+  $effect(() => () => setSpentNotes(false));
   const notes = $derived(zs.notes.filter((n) => showSpent || !n.spent_by).slice().sort((a, b) => a.confirmations - b.confirmations || b.amount - a.amount));
   const unspentTotal = $derived(zs.notes.filter((n) => !n.spent_by && !n.watchonly).reduce((s, n) => s + coinsToSats(n.amount), 0n));
   function noteKind(n: (typeof zs.notes)[number]): string {
@@ -119,6 +125,7 @@
         <input type="search" class="grow" placeholder="Search memos, addresses, transactions" aria-label="Search memos, addresses, transactions" bind:value={query} />
       </div>
 
+      <OlderNote what="transactions" />
       <section class="panel">
         {#if txs.length === 0}
           <p class="muted pad">Nothing yet: shield some coins to start.</p>

@@ -141,6 +141,18 @@
 
     // --- The viewing key: exported after its warning, watched in a wallet without keys ---
     await go('private', 'keys');
+    // The desktop asks before the host shows the key (audit port-2 #3): declined first, nothing shown.
+    const asked = (await host('test.confirmed')).length;
+    await host('test.confirmAnswer', { yes: false });
+    await clickId('zs-export');
+    await answerDialog('Export the viewing key', 'Show the key', async (d) => {
+      $('input[type="checkbox"]', d).click();
+      await sleep(100);
+    });
+    await waitFor('the desktop asked for the key', async () => (await host('test.confirmed')).length > asked, 30000);
+    await sleep(800);
+    await check('declined on the desktop: no key shown', !$('.zs-code') || !/^rzview1/.test($('.zs-code').textContent.trim()));
+    await host('test.confirmAnswer', { yes: true });
     await clickId('zs-export');
     await answerDialog('Export the viewing key', 'Show the key', async (d) => {
       const box = $('input[type="checkbox"]', d);

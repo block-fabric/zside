@@ -14,6 +14,7 @@
   import { go, nav, PAGES } from '../../lib/nav.svelte';
   import { wallets, walletsEnabled } from '../../lib/state.svelte';
   import '../zs/zs.css';
+  import OlderNote from '../zs/OlderNote.svelte';
   import Privacy from '../zs/Privacy.svelte';
   import { memosOf } from '../zs/model';
   import { isRead, markRead, memoState, startZs, zs } from '../zs/store.svelte';
@@ -70,6 +71,8 @@
       <label class="check"><input type="checkbox" bind:checked={onlyUnread} /> Unread only</label>
       <button type="button" class="btn ghost small" disabled={unread === 0} onclick={() => markRead(all.map((m) => m.key))}><Icon name="check" size={15} /> Mark all read</button>
     </div>
+
+    <OlderNote what="memos" />
 
     {#if all.length === 0}
       <section class="panel empty">

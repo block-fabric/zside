@@ -273,7 +273,7 @@ zside.js`, `webui_e2e_zside`).
 
 | ID | Qt | Source | zside-app |
 |----|----|--------|-----------|
-| ZS01 | The Private action: in the sidebar and the menu, Alt+6, its status tip; on only with a wallet | `bitcoingui.cpp` `shieldedAction`, `gotoShieldedPage` | [x] Private in the Wallet section of both layouts, the palette and the menus (Pay privately…, Shield or unshield…, Shielded address, Viewing keys…), Alt+6 (`lib/keyboard.ts`: a chain's own page that names Alt+6 and on); a page that needs a wallet says so (NoWallet) |
+| ZS01 | The Private action: in the sidebar and the menu, Alt+6, its status tip; on only with a wallet | `bitcoingui.cpp` `shieldedAction`, `gotoShieldedPage` | [x] Private in the Chain section of both layouts (the Wallet section keeps the user's six pages), the palette and the menus (Pay privately…, Shield or unshield…, Shielded address, Viewing keys…), Alt+6 (`lib/keyboard.ts`: a chain's own page that names Alt+6 and on); a page that needs a wallet says so (NoWallet) |
 | ZS02 | The title, and a sentence on what the pool hides | `ShieldedPage` (header) | [x] Private → Overview; the privacy indicator says it on every balance, address and transaction (ZS16) |
 | ZS03 | The balance strip: Shielded (available; pending or the count of notes; "scanning the blocks from n again"), Transparent (getbalance), The whole pool (value, notes) | `refresh` (getshieldedbalance, getbalance, getshieldedinfo) | [x] Private → Overview: the two balances side by side (the transparent one with what waits or matures), each with its indicator, the moves between them, the share shielded (a ring); the rescan in a note over every tab; the pool on the Shielded pool page (ZS13); the home's Private card |
 | ZS04 | Receive tab: the shielded address, its QR code, Copy, New address (one per payer), the sentence that they all pay the same balance | `showAddress`, `fresh` (getshieldedaddress true) | [x] Private → Receive: the same, the addresses made listed to show again or copy; a wallet without keys says it has no address of its own |
@@ -290,7 +290,7 @@ zside.js`, `webui_e2e_zside`).
 | ZS15 | The status line: what went, in green; errors, in red | `say` | [x] notices (toasts) and dialogs of the kit, errors of the node as they are (SafeText) |
 | ZS16 | (none: the privacy of a balance, an address or a transaction was said only in the sentences of the forms) | | [x] new: the privacy indicator (`zs/Privacy.svelte`) on every balance, address and transaction of the pages and cards: Private or Public, with why |
 | ZS17 | (none: memos were a column of the history) | | [x] new: Memos, the inbox (unread marked, search, a reading pane, as text), the home's Memos card |
-| ZS18 | (none: no RPC either) | | [x] new: viewing keys, in the wallet (`exportshieldedviewingkey`, `importshieldedviewingkey`, functional test `feature_zside_viewingkey.py`) and in Private → Viewing keys: the key exported only once its warning is ticked, blurred until asked; one watched in a wallet without private keys, watch-only |
+| ZS18 | (none: no RPC either) | | [x] new: viewing keys, in the wallet (`exportshieldedviewingkey`, `importshieldedviewingkey`, functional test `feature_zside_viewingkey.py`) and in Private → Viewing keys: the key exported only once its warning is ticked and the desktop asked (`zside.viewingkey.export`), blurred until asked; one watched in a wallet without private keys, watch-only |
 | ZS19 | (none: `bumpshieldedfee` had no control) | | [x] new: Private activity → a payment waiting for a block, "Pay a higher fee" (the new fee chosen or the least that replaces it) |
 | ZS20 | The page's own colours (green, amber, red, purple) and styles | `ShieldedPage` (setStyleSheet) | [x] the colour tokens of the themes (Midnight by default, Light, Dark, Ocean Teal, Classic Dark, Matrix Green, System); private in the colour of the chain's mark (chain.json), public in the warning colour |
 | ZS21 | Read-only tables that take no input method (the Wayland crash of Qt) | `ViewTable` (ItemViews::Table) | [–] Qt only |
@@ -307,4 +307,4 @@ The RPC methods of zSide's wallet and pool, and where the app calls them:
 | shieldcoins, unshieldcoins | Private → Shield & unshield (keyed, long lane) |
 | bumpshieldedfee | Private activity (keyed, long lane) |
 | meltcoins (keyed), castcoins, cancelmeltcast | Melt & cast |
-| exportshieldedviewingkey, importshieldedviewingkey (long lane) | Private → Viewing keys |
+| importshieldedviewingkey (long lane); the host method zside.viewingkey.export (exportshieldedviewingkey after the desktop's confirmation) | Private → Viewing keys |

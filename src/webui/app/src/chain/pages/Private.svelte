@@ -22,6 +22,8 @@
   import { t, tn } from '../../lib/i18n.svelte';
   import { go, nav, PAGES } from '../../lib/nav.svelte';
   import { rpc } from '../../lib/rpc';
+  import { request } from '../../lib/bridge';
+  import { declined } from '../../lib/side';
   import { app, prefs, toast, wallets, walletsEnabled } from '../../lib/state.svelte';
   import { coinsToSats, formatAmount, satsToCoins } from '../../lib/units';
   import { current, refreshInfo } from '../../lib/walletdata.svelte';
@@ -303,10 +305,11 @@
       return;
     }
     try {
-      exported = await rpc.raw<string>('exportshieldedviewingkey', [], { wallet });
+      // The host shows the key only after the desktop asked (audit port-2 #3): a no is taken quietly.
+      exported = await request<string>('host', 'zside.viewingkey.export', { wallet });
       revealed = false;
     } catch (e) {
-      await inform(t('Viewing keys'), errorText(e), 'warning');
+      if (!declined(e)) await inform(t('Viewing keys'), errorText(e), 'warning');
     }
   }
   $effect(() => {
