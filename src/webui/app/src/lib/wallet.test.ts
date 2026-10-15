@@ -16,6 +16,7 @@ import {
   psbtFileName,
   statusText,
   toCsv,
+  csvCell,
   transactionsCsv,
   typeText,
   walletApi,
@@ -103,6 +104,12 @@ describe('transaction records', () => {
 
   it('exports CSV as CSVModelWriter: every value quoted, quotes doubled', () => {
     expect(toCsv(['a', 'b'], [['x', 'say "hi"']])).toBe('"a","b"\n"x","say ""hi"""\n');
+    // Formulas from other people's labels are not run by a spreadsheet; numbers stay numbers (audit port-2 #12).
+    expect(toCsv(['Label', 'Amount'], [["=cmd|' /C calc'!A0", '-0.5'], ['@SUM(A1)', '+1'], ['+x', '-1e5'], ['\tx', 'a-b']])).toBe(
+      `"Label","Amount"\n"'=cmd|' /C calc'!A0","-0.5"\n"'@SUM(A1)","+1"\n"'+x","-1e5"\n"'\tx","a-b"\n`,
+    );
+    expect(csvCell("'=cmd")).toBe('=cmd');
+    expect(csvCell("'plain")).toBe("'plain");
     const csv = transactionsCsv([records[5], records[1]], 'CHN').split('\n');
     expect(csv[0]).toBe('"Confirmed","Date","Type","Label","Address","Amount (CHN)","ID"');
     expect(csv[1]).toBe(`"false","${isoLocal(1_700_500_000)}","Sent to","Carol ""C""","rchn1qcarol","-0.00020000","${'ff'.repeat(32)}"`);

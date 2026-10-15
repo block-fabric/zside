@@ -264,7 +264,15 @@
   }
   .cell.end {
     justify-content: flex-end;
+    /* Content wider than the cell (an amount in a narrow column) is cut at its end, never at its start: with
+       plain flex-end it would overflow to the left, and 0.00100000 read 00100000 (audit port-2 #2). */
+    justify-content: safe flex-end;
     text-align: right;
+  }
+  .cell.end > :global(*) {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .cell.center {
     justify-content: center;

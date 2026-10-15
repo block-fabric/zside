@@ -47,10 +47,11 @@ std::set<std::string> KeyedRpcMethods()
     return {"sendshielded", "shieldcoins", "unshieldcoins", "bumpshieldedfee", "meltcoins", "getshieldedaddress"};
 }
 
-void RegisterHost(Bridge& bridge, NodeFn node)
+void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm)
 {
     (void)bridge;
     (void)node;
+    (void)confirm;
 }
 
 } // namespace webui::local

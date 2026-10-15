@@ -1138,7 +1138,7 @@ void App::RegisterHostMethods()
     m_sidechain_nodes->Register(b);
 #endif
     // The host methods of this chain's own pages (local.cpp).
-    local::RegisterHost(b, need_node);
+    local::RegisterHost(b, need_node, [this](const Window::ConfirmDialog& dialog) { return Confirm(dialog); });
 
     // The options of the node (OptionsModel), in settings.json; the flag of a restart in the preferences.
     const auto options{[this, need_node]() {

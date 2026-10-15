@@ -66,4 +66,10 @@ describe('audit port-2', () => {
     expect(home).toMatch(/class="value big-amount fit"[^>]*style:--chars=\{totalChars\}/);
     expect(home).toMatch(/\.value\.fit :global\(\.amount\) \{\s*font-size: min\(1em, calc\(100cqi \/ \(var\(--chars, 12\) \* 0\.62\)\)\);/);
   });
+
+  it('#2: a cell aligned to the end that is too narrow cuts the end of its content, never its start', () => {
+    const css = src('components/DataTable.svelte');
+    expect(css).toMatch(/\.cell\.end \{[^}]*justify-content: safe flex-end;/);
+    expect(css).toMatch(/\.cell\.end > :global\(\*\) \{\s*min-width: 0;\s*overflow: hidden;\s*text-overflow: ellipsis;/);
+  });
 });

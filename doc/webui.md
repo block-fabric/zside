@@ -387,7 +387,8 @@ template keeps empty, and nowhere else, so that a merge of the template never co
    `src/chain/pages/`, say) and shows the one of `page`.
 3. **src/webui/local.cpp**: the RPC methods the pages call (`RpcMethods`, added to the page's
    allowlist; those that need the keys in `KeyedRpcMethods`) and the host methods they need
-   (`RegisterHost`, after the kit's).
+   (`RegisterHost`, after the kit's; with `confirm`, the confirmation of the desktop, for what a page must
+   not do on its own word, such as showing a key: a no answers `BRIDGE_CANCELLED`).
 
 The template keeps more hooks empty for what a chain adds beside its pages (audit port-2 #7), so that
 these too never conflict:

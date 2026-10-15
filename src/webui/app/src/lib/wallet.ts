@@ -631,8 +631,22 @@ export function filterRecords(records: readonly TxRecord[], f: TxFilter): TxReco
 
 // --- CSV (CSVModelWriter: every value quoted, quotes doubled) ---
 
+/**
+ * A cell a spreadsheet would run as a formula (=, +, -, @, a tab or a return first: a label from someone else
+ * such as =cmd|' /C calc'!A0) gets a ' first, as OWASP's CSV injection advice says; numbers (-0.5) stay as they
+ * are (audit port-2 #12). A file read back takes the ' off (csvCell).
+ */
+export function csvSafe(v: string): string {
+  return /^[=+\-@\t\r]/.test(v) && !/^[-+]?\d[\d.,]*(e[-+]?\d+)?$/i.test(v) ? `'${v}` : v;
+}
+
+/** A cell of a CSV file this app wrote, as it was before csvSafe. */
+export function csvCell(v: string): string {
+  return /^'[=+\-@\t\r]/.test(v) ? v.slice(1) : v;
+}
+
 export function toCsv(header: string[], rows: string[][]): string {
-  const value = (v: string) => `"${v.replace(/"/g, '""')}"`;
+  const value = (v: string) => `"${csvSafe(v).replace(/"/g, '""')}"`;
   return [header, ...rows].map((r) => r.map(value).join(',')).join('\n') + '\n';
 }
 
