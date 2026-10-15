@@ -14,6 +14,7 @@ export PIP_PACKAGES="--break-system-packages pycapnp"
 export DEP_OPTS="NO_WALLET=1 CC=clang-17 CXX='clang++-17 -stdlib=libc++'"
 export GOAL="install"
 export BITCOIN_CONFIG="\
+  -DBUILD_WEBUI=OFF \
   --preset=dev-mode \
   -DREDUCE_EXPORTS=ON \
   -DENABLE_WALLET=OFF \

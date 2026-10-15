@@ -1,0 +1,50 @@
+// Copyright (c) 2026 The Chains developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+// Made by CMake from src/webui/app/src/chain/chain.json, the chain of this app in one place
+// (src/webui/CMakeLists.txt). Do not edit: edit chain.json.
+
+#ifndef BITCOIN_WEBUI_CHAINCONFIG_H
+#define BITCOIN_WEBUI_CHAINCONFIG_H
+
+#include <array>
+#include <string_view>
+
+//! 1 for the app of a sidechain (its pages: peg, merged mining), 0 for the mainchain's.
+#define WEBUI_SIDECHAIN @WEBUI_SIDECHAIN@
+
+namespace webui::chain {
+//! The name users see ("Sidechain"), as CLIENT_NAME.
+inline constexpr std::string_view NAME{"@WEBUI_CHAIN_NAME@"};
+//! The stem of the programs ("sidechain"), as CLIENT_BIN_NAME.
+inline constexpr std::string_view STEM{"@WEBUI_CHAIN_BIN@"};
+//! The program of the app, its desktop entry and the name of its files: "<stem>-app".
+inline constexpr std::string_view APP{"@WEBUI_CHAIN_BIN@-app"};
+//! The scheme of its payment URIs (BIP 21), without the colon.
+inline constexpr std::string_view URI_SCHEME{"@WEBUI_CHAIN_URI_SCHEME@"};
+//! The unit of its coin, and the name of the coin.
+inline constexpr std::string_view TICKER{"@WEBUI_CHAIN_TICKER@"};
+inline constexpr std::string_view COIN_NAME{"@WEBUI_CHAIN_COIN_NAME@"};
+//! The hue the icon of the app is turned by (degrees), before the tint of a test network.
+inline constexpr int ICON_HUE{@WEBUI_CHAIN_ICON_HUE@};
+//! The name of the mainchain (the chain a sidechain is pegged to).
+inline constexpr std::string_view MAINCHAIN_NAME{"@WEBUI_MAINCHAIN_NAME@"};
+
+//! The help links of chain.json (links), which the app opens without asking.
+inline constexpr std::array<std::string_view, @WEBUI_CHAIN_LINKS_COUNT@> LINKS{{@WEBUI_CHAIN_LINKS@}};
+
+struct Network {
+    std::string_view id;
+    int p2p_port;
+    int rpc_port;
+    std::string_view hrp;
+    int mainchain_rpc_port;
+};
+//! The networks as chain.json says (a test checks them against the chain parameters).
+inline constexpr std::array<Network, 4> NETWORKS{{
+    @WEBUI_CHAIN_NETWORKS@
+}};
+} // namespace webui::chain
+
+#endif // BITCOIN_WEBUI_CHAINCONFIG_H

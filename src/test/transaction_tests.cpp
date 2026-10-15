@@ -920,21 +920,23 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
         CheckIsStandard(t);
     }
 
-    // Check tx-size (non-standard if transaction weight is > MAX_STANDARD_TX_WEIGHT)
+    // Check tx-size (non-standard if transaction weight is > MAX_STANDARD_TX_WEIGHT, which is
+    // 392,000 on Chains: below the 400,000 the transactions of a block may weigh)
+    BOOST_CHECK_EQUAL(MAX_STANDARD_TX_WEIGHT, 392000);
     t.vin.clear();
-    t.vin.resize(2438); // size per input (empty scriptSig): 41 bytes
-    t.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(19, 0); // output size: 30 bytes
+    t.vin.resize(2389); // size per input (empty scriptSig): 41 bytes
+    t.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(28, 0); // output size: 39 bytes
     // tx header:                12 bytes =>     48 weight units
-    // 2438 inputs: 2438*41 = 99958 bytes => 399832 weight units
-    //    1 output:              30 bytes =>    120 weight units
+    // 2389 inputs: 2389*41 = 97949 bytes => 391796 weight units
+    //    1 output:              39 bytes =>    156 weight units
     //                      ======================================
-    //                                total: 400000 weight units
-    BOOST_CHECK_EQUAL(GetTransactionWeight(CTransaction(t)), 400000);
+    //                                total: 392000 weight units
+    BOOST_CHECK_EQUAL(GetTransactionWeight(CTransaction(t)), 392000);
     CheckIsStandard(t);
 
-    // increase output size by one byte, so we end up with 400004 weight units
-    t.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(20, 0); // output size: 31 bytes
-    BOOST_CHECK_EQUAL(GetTransactionWeight(CTransaction(t)), 400004);
+    // increase output size by one byte, so we end up with 392004 weight units
+    t.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(29, 0); // output size: 40 bytes
+    BOOST_CHECK_EQUAL(GetTransactionWeight(CTransaction(t)), 392004);
     CheckIsNotStandard(t, "tx-size");
 
     // Check bare multisig (standard if policy flag g_bare_multi is set)

@@ -6,7 +6,10 @@ This document provides guidelines for internationalization of the Bitcoin Core s
 
 To mark a message as translatable
 
-- In GUI source code (under `src/qt`): use `tr("...")`
+- In the interface of chains-app (under `src/webui/app`): write the words of the app in English
+  in the templates (they become `t()` calls when the components are built), or use `t("...")` and
+  `tn("...", n)` in code; text from the chain, peers or the user is shown with `SafeText`, never
+  given to `t()` (see [webui.md](webui.md))
 
 - In non-GUI source code (under `src`): use `_("...")`
 
@@ -30,7 +33,6 @@ This includes messages passed to the GUI through the UI interface through `InitM
 
 Try not to burden translators with translating messages that are e.g. slight variations of other messages.
 In the GUI, avoid the use of text where an icon or symbol will do.
-Make sure that placeholder texts in forms do not end up in the list of strings to be translated (use `<string notr="true">`).
 
 ### Make translated strings understandable
 
@@ -63,13 +65,12 @@ Plurals can be complex in some languages. A quote from the gettext documentation
     25-31 pliko'w
     and so on
 
-In Qt code, use tr's third argument for optional plurality. For example:
+In the interface of chains-app, use `tn()` for optional plurality. For example:
 
-    tr("%n hour(s)","",secs/HOUR_IN_SECONDS);
-    tr("%n day(s)","",secs/DAY_IN_SECONDS);
-    tr("%n week(s)","",secs/WEEK_IN_SECONDS);
+    tn('%n hour(s)', hours)
+    tn('%n day(s)', days)
 
-This adds `<numerusform>`s to the respective `.ts` file, which can be translated separately depending on the language. In English, this is simply:
+The catalogs (`src/webui/locale/*.ts`) have `<numerusform>`s for such messages, translated separately depending on the language. In English, this is simply:
 
     <message numerus="yes">
         <source>%n active connection(s) to Bitcoin network</source>
@@ -93,4 +94,4 @@ The second example reduces the number of pluralized words that translators have 
 
 During a string freeze (often before a major release), no translation strings are to be added, modified or removed.
 
-This can be checked by building the `translate` target with `cmake` ([instructions](translation_process.md)), then verifying that `bitcoin_en.ts` remains unchanged.
+This can be checked by running `npm run i18n` in `src/webui/app` ([instructions](translation_process.md)), then verifying that the catalogs in `src/webui/app/public/locales` remain unchanged.

@@ -30,7 +30,7 @@ def main():
     old, new = sys.argv[1].lower(), sys.argv[2].lower()
     token = re.compile(r"\b(?:%s1[0-9a-z]+|%s1[0-9A-Z]+)\b" % (re.escape(old), re.escape(old.upper())))
     files = subprocess.run(
-        ["git", "grep", "-lIi", old + "1", "--", "src/test", "src/wallet/test", "src/qt/test", "src/bench", "test/functional", "src/qt/guiutil.cpp", "src/wallet/test/util.h"],
+        ["git", "grep", "-lIi", old + "1", "--", "src/test", "src/wallet/test", "src/bench", "test/functional", "src/wallet/test/util.h"],
         capture_output=True, text=True, check=False).stdout.split()
     changed, skipped = 0, []
 

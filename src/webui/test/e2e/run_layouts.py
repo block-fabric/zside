@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The Chains developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+"""End-to-end test of the layouts of chains-app (doc/webui-layouts.md).
+
+Starts chains-app on regtest with a temporary data directory, in a virtual
+display, and has it run layouts.js in its page: a wallet with a history, two
+sidechains, then pictures of the workspace and dashboard layouts in the
+light and dark themes (Home, send, the history with the detail
+panel, sidechains, settings, the command palette).
+
+    run_layouts.py --app build/bin/chains-app --tmp <dir> --shots <dir>
+"""
+
+import argparse
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from run_smoke import App, check_shutdown, environment, script  # noqa: E402
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--app", required=True, type=Path)
+    parser.add_argument("--tmp", required=True, type=Path, help="folder for the data directory (made anew)")
+    parser.add_argument("--shots", required=True, type=Path, help="folder for the pictures")
+    parser.add_argument("--port", type=int, default=29490)
+    parser.add_argument("--script", default="layouts.js", help="the page script: layouts.js, titlebar.js (the integrated title bar), refresh.js, walletcard.js (the card of the wallet), uishots.js or controls.js (the dropdowns and scroll bars)")
+    args = parser.parse_args()
+
+    if shutil.which("xvfb-run") is None:
+        print("xvfb-run is needed", file=sys.stderr)
+        return 2
+    base = args.tmp.resolve()
+    if base.exists():
+        shutil.rmtree(base)
+    base.mkdir(parents=True)
+    args.shots.mkdir(parents=True, exist_ok=True)
+    env = environment(base)
+    datadir = base / "datadir"
+    datadir.mkdir()
+    failures = []
+
+    print(f"== {args.script}", flush=True)
+    layouts_script = base / args.script
+    layouts_script.write_text(script(args.script))
+    cmd = ["-regtest", f"-port={args.port}", f"-rpcport={args.port + 1}", "-listen=0", "-dnsseed=0", "-fixedseeds=0",
+           "-fallbackfee=0.0002", f"-datadir={datadir}",
+           f"-webuiconfig={base / 'chains-app.json'}", f"-webuitestshots={args.shots.resolve()}", f"-webuitestscript={layouts_script}"]
+    app = App(args.app, cmd, env, base / "layouts.log")
+    code = app.wait(1200)
+    result = app.result()
+    if code != 0 or not result or result["failures"]:
+        failures.append(f"layouts run: exit {code}, {result['failures'] if result else 'no result'}")
+    check_shutdown(datadir, failures)
+    if result:
+        missing = [s for s in result["shots"] if not (args.shots / f"{s}.png").is_file()]
+        if missing:
+            failures.append(f"missing pictures: {missing}")
+        print(f"  {result['passed']} checks passed, {len(result['shots'])} pictures in {args.shots}", flush=True)
+    if failures:
+        print("FAILED:\n  " + "\n  ".join(failures), flush=True)
+        return 1
+    print("OK", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

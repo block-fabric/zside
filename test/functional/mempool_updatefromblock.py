@@ -119,7 +119,7 @@ class MempoolUpdateFromBlockTest(BitcoinTestFramework):
         self.log.info('Creating independent transactions to test MAX_DISCONNECTED_TX_POOL_BYTES limit during reorg')
 
         # Generate coins for the hundreds of transactions we will make
-        parent_target_vsize = 100_000
+        parent_target_vsize = 98_000  # Chains: the largest standard transaction
         wallet = MiniWallet(self.nodes[0])
         self.generate(wallet, (MAX_DISCONNECTED_TX_POOL_BYTES // parent_target_vsize) + 100)
 

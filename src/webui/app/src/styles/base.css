@@ -1,0 +1,691 @@
+/* Base styles and the shared building blocks (buttons, fields, panels). */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 14px;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Text from the chain, peers or the user (SafeText, translate="no") is isolated as to direction: a mark
+   that turns text around inside it stays inside it (audit port-1 #2). */
+[translate='no'] {
+  unicode-bidi: isolate;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 1rem;
+  line-height: 1.45;
+  /* No contextual alternates: Inter would write the x of "3x7" in an address as a multiplication sign. */
+  font-feature-settings: 'cv11', 'ss01', 'calt' 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The ambient light of the accent behind the page: still (no motion), under everything. A layer of its
+   own, painted once and composited (not a fixed background of the body, which the engine paints again
+   at each scroll of the page above it: with software GL, as under WSLg, two large gradients each time). */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(60rem 36rem at 12% -12%, var(--ambient), transparent 70%),
+    radial-gradient(48rem 30rem at 105% 112%, var(--ambient-2), transparent 70%);
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+#app {
+  position: relative;
+  height: 100%;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: 1.7rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+h2 {
+  font-size: 1.2rem;
+}
+h3 {
+  font-size: 1rem;
+}
+
+p {
+  margin: 0 0 0.6em;
+  max-width: 72ch;
+}
+
+a {
+  color: var(--link);
+}
+
+code,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.num {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.faint {
+  color: var(--text-faint);
+}
+
+.break {
+  overflow-wrap: anywhere;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+/* The glow of a highlighted thing (a button of the accent, the page shown) under the pointer: it lights
+   up rather than darkens (user decision, 2026-10-15). In every theme, from its accent. */
+:root {
+  /* Subtle (user decision: the first one was too much): no ring, a short soft halo. */
+  --glow: 0 0 12px -3px color-mix(in srgb, var(--accent) 45%, transparent);
+  --glow-strong: 0 0 16px -3px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45em;
+  min-height: 2.3rem;
+  padding: 0 0.95rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+  white-space: nowrap;
+  /* Colours only: a shadow or a filter animated is painted again at each frame (software GL). */
+  transition:
+    background-color 120ms,
+    border-color 120ms;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--raised);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 6px 18px -8px var(--accent);
+}
+
+.btn.primary:hover:not(:disabled) {
+  /* Still the accent (the hover of .btn would make it dark), lit up and glowing. */
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  filter: brightness(1.04);
+  box-shadow: var(--glow);
+}
+
+/* The one big action of a panel: full width, the accent, an arrow at its end. */
+.btn.cta {
+  width: 100%;
+  min-height: 3.6rem;
+  justify-content: space-between;
+  padding: 0 1.4rem;
+  border: 0;
+  border-radius: var(--radius-l);
+  background: linear-gradient(120deg, var(--accent), color-mix(in srgb, var(--accent) 86%, white));
+  color: var(--on-accent);
+  font-size: 1.2rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  box-shadow: 0 10px 30px -12px var(--accent);
+}
+
+.btn.cta:hover:not(:disabled) {
+  background: linear-gradient(120deg, var(--accent), color-mix(in srgb, var(--accent) 86%, white));
+  color: var(--on-accent);
+  filter: brightness(1.06);
+  box-shadow: var(--glow-strong);
+}
+
+/* Round icon buttons of the top bars. */
+.btn.round {
+  position: relative;
+  width: 2.35rem;
+  min-height: 2.35rem;
+  padding: 0;
+  border-radius: 999px;
+  border-color: var(--line);
+  background: var(--surface-2);
+}
+
+/* A pill: a choice shown in a top bar or a card head. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+select.pill {
+  width: auto;
+  min-height: 2rem;
+  padding: 0 2rem 0 0.8rem;
+  border-radius: 999px;
+}
+
+/* The state of something: confirmed, pending, failed; a vote for or against. */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--raised);
+  color: var(--text-muted);
+}
+
+.status::before {
+  content: '';
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status.ok {
+  background: var(--accent-soft);
+  color: var(--positive);
+}
+
+.status.wait {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.status.bad {
+  background: var(--danger-soft);
+  color: var(--negative);
+}
+
+/* The small names of the groups of a sidebar or a card. */
+.caps {
+  color: var(--text-faint);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.btn.danger {
+  color: var(--negative);
+  border-color: var(--negative);
+}
+
+.btn.ghost {
+  border-color: transparent;
+  background: transparent;
+}
+
+.btn.ghost:hover:not(:disabled) {
+  background: var(--raised);
+}
+
+.btn.small {
+  min-height: 1.8rem;
+  padding: 0 0.6rem;
+  font-size: 0.9rem;
+}
+
+.btn.icon {
+  padding: 0;
+  width: 2.3rem;
+}
+
+.btn.icon.small {
+  width: 1.8rem;
+}
+
+/* Fields */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.field > label,
+.field > .label {
+  font-weight: 550;
+  font-size: 0.92rem;
+}
+
+.field .hint {
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+.field .error {
+  color: var(--negative);
+  font-size: 0.86rem;
+}
+
+input[type='text'],
+input[type='number'],
+input[type='password'],
+input[type='search'],
+input:not([type]),
+select,
+textarea {
+  width: 100%;
+  min-height: 2.3rem;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-m);
+  background-color: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  transition: border-color 120ms;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent-fg);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 5rem;
+}
+
+/* Our own dropdowns, the same on WebKitGTK and WebView2 in every look: no native face, the chevron of
+   the icons in the muted colour of the look (--chevron, styles/themes.css), the padding and radius of
+   the fields (or of a .pill). The list that opens stays the native one (keyboard, screen readers), in
+   the colours of the look where the engine lets the page choose them (color-scheme, option). The
+   selector outweighs the scoped rules of the components (a `background:` there keeps the chevron). */
+select:not([multiple]):not([size]) {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 2rem;
+  background-image: var(--chevron);
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  background-size: 0.9rem 0.9rem;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+
+select:hover:not(:disabled) {
+  border-color: var(--text-faint);
+}
+
+select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+option,
+optgroup {
+  background-color: var(--surface);
+  color: var(--text);
+}
+
+input[aria-invalid='true'],
+textarea[aria-invalid='true'] {
+  border-color: var(--negative);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-faint);
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: var(--accent);
+  width: 1rem;
+  height: 1rem;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+/* Panels and cards: big soft surfaces, lit from above. */
+.panel {
+  background: linear-gradient(180deg, var(--card-top), transparent 9rem), var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
+}
+
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.05rem 1.3rem 0.65rem;
+}
+
+.panel-body {
+  padding: 0 1.3rem 1.2rem;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: var(--raised);
+  color: var(--text-muted);
+}
+
+.badge.warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.badge.accent {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.badge.danger {
+  background: var(--danger-soft);
+  color: var(--negative);
+}
+
+kbd {
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+  padding: 0.05em 0.35em;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Our own scroll bars, thin and round in the colours of the look, on every scrolling area: drawn by
+   ::-webkit-scrollbar in WebKitGTK and in WebView2 alike (Chromium ignores those when scrollbar-width or
+   scrollbar-color is set, so the standard properties are only for engines without them). */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  min-height: 2rem;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-color: var(--line-strong);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--text-muted);
+}
+::-webkit-scrollbar-thumb:active {
+  background-color: var(--accent-fg);
+}
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+}
+
+:root[data-theme='matrix'] body {
+  text-shadow: 0 0 6px rgb(0 255 65 / 25%);
+}
+
+/* Pages */
+.page {
+  padding: 1.25rem 1.5rem 1.5rem;
+  min-height: 100%;
+}
+
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+  margin-bottom: 0.25rem;
+}
+
+.tabs {
+  display: flex;
+  /* A narrow window: the tabs go on two lines rather than out of the page. */
+  flex-wrap: wrap;
+  width: fit-content;
+  max-width: 100%;
+  gap: 0.2rem;
+  margin: 0.8rem 0 1rem;
+  padding: 0.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-l);
+  background: var(--surface-2);
+  overflow-x: auto;
+}
+
+.tabs button {
+  padding: 0.4rem 0.95rem;
+  border: 0;
+  border-radius: var(--radius-m);
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* The tab shown: raised, its text bolder. No shadow: an underline drawn inside the rounded button looked
+   cut by its corners (user decision). */
+.tabs button[aria-selected='true'] {
+  color: var(--text);
+  background: var(--raised);
+  font-weight: 650;
+}
+
+.tabs button:hover {
+  color: var(--text);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: minmax(10rem, max-content) minmax(0, 1fr);
+  gap: 0.45rem 1.5rem;
+  margin: 0;
+}
+
+.facts dt {
+  color: var(--text-muted);
+}
+
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Addresses, transaction ids, PSBTs typed in fields: monospaced too (after the rules of the fields). */
+input.mono,
+textarea.mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+/* A narrow window: less room around the page, facts under their names. */
+@media (max-width: 600px) {
+  .page {
+    padding: 0.9rem 0.8rem 1.1rem;
+  }
+  .facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .facts dd {
+    margin-bottom: 0.4rem;
+  }
+}
+
+/* A switch: a checkbox drawn as a track and a knob (Send's "Choose coins", the proof's "Choose what to prove"). */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+.switch .track {
+  position: relative;
+  width: 2.4rem;
+  height: 1.35rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  transition: background 0.15s;
+}
+.switch .track::after {
+  content: '';
+  position: absolute;
+  top: 0.15rem;
+  left: 0.15rem;
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.15s;
+}
+.switch input:checked + .track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.switch input:checked + .track::after {
+  transform: translateX(1.05rem);
+  background: var(--on-accent);
+}
+.switch input:focus-visible + .track {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch .track,
+  .switch .track::after {
+    transition: none;
+  }
+}

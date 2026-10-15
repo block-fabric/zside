@@ -10,7 +10,7 @@ export CI_IMAGE_NAME_TAG="mirror.gcr.io/ubuntu:26.04"  # To build codegen, CMake
 export CONTAINER_NAME=ci_native_iwyu
 export IWYU_LLVM_V="23"
 export APT_LLVM_V="${IWYU_LLVM_V}"
-export PACKAGES="clang-${IWYU_LLVM_V} clang-format-${IWYU_LLVM_V} libclang-${IWYU_LLVM_V}-dev llvm-${IWYU_LLVM_V}-dev jq libboost-dev libzmq3-dev systemtap-sdt-dev qt6-base-dev qt6-tools-dev qt6-l10n-tools libqrencode-dev libsqlite3-dev libcapnp-dev capnproto"
+export PACKAGES="clang-${IWYU_LLVM_V} clang-format-${IWYU_LLVM_V} libclang-${IWYU_LLVM_V}-dev llvm-${IWYU_LLVM_V}-dev jq libboost-dev libzmq3-dev systemtap-sdt-dev libsqlite3-dev libcapnp-dev capnproto"
 export NO_DEPENDS=1
 export RUN_UNIT_TESTS=false
 export RUN_FUNCTIONAL_TESTS=false
@@ -22,7 +22,7 @@ export RUN_IWYU=true
 # and https://github.com/bitcoin-core/libmultiprocess/issues/284.
 export GOAL="codegen bitcoin_node_raw_data_headers mp_headers mptest_headers bitcoin_ipc_headers bitcoin_ipc_test_headers bitcoin_ipc_fuzz_headers"
 export BITCOIN_CONFIG="\
- --preset dev-mode -DBUILD_GUI=OFF \
+ --preset dev-mode -DBUILD_WEBUI=OFF \
  -DCMAKE_C_COMPILER=clang-${IWYU_LLVM_V} \
  -DCMAKE_CXX_COMPILER=clang++-${IWYU_LLVM_V} \
 "

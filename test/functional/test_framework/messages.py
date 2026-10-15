@@ -80,7 +80,7 @@ DEFAULT_CLUSTER_LIMIT = 64     # default max number of transactions in a cluster
 
 
 # Default setting for -datacarriersize.
-MAX_OP_RETURN_RELAY = 100_000
+MAX_OP_RETURN_RELAY = 98_000
 
 
 DEFAULT_MEMPOOL_EXPIRY_HOURS = 336  # hours

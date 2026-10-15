@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -19,6 +20,8 @@
 #include <drivechain/sidechain.h>
 #include <interfaces/chain.h>
 #include <kernel/chainparams.h>
+#include <kernel/chain.h>
+#include <kernel/types.h>
 #include <key_io.h>
 #include <node/blockstorage.h>
 #include <node/types.h>
@@ -279,6 +282,29 @@ BOOST_FIXTURE_TEST_CASE(remove_wallet_aborts_rescan, TestChain100Setup)
         BOOST_CHECK_EQUAL(result.status, CWallet::ScanResult::USER_ABORT);
         BOOST_CHECK(!result.last_scanned_height);
     }
+    // A rescan reserved after the unload began (by an RPC that still holds the wallet) is
+    // aborted too: reserving does not discard the abort.
+    {
+        WalletRescanReserver reserver(*wallet);
+        BOOST_REQUIRE(reserver.reserve());
+        BOOST_CHECK(wallet->IsAbortingRescan());
+        const CWallet::ScanResult result{wallet->ScanForWalletTransactions(genesis_hash, /*start_height=*/0, /*max_height=*/{}, reserver, /*save_progress=*/false)};
+        BOOST_CHECK_EQUAL(result.status, CWallet::ScanResult::USER_ABORT);
+        BOOST_CHECK(!result.last_scanned_height);
+    }
+    // The best block saved is where the rescan stopped, not the tip (which RemoveWallet saved before
+    // the rescan began): loaded again, the wallet resumes the rescan, and finds what keys imported
+    // just before it (importdescriptors) have.
+    const auto saved_best_block{[](CWallet& w) {
+        CBlockLocator locator;
+        BOOST_REQUIRE(WalletBatch(w.GetDatabase()).ReadBestBlock(locator));
+        BOOST_REQUIRE(!locator.vHave.empty());
+        return locator.vHave.front();
+    }};
+    BOOST_CHECK_EQUAL(saved_best_block(*wallet), genesis_hash);
+    // Later writes keep it.
+    WITH_LOCK(wallet->cs_wallet, wallet->WriteBestBlock());
+    BOOST_CHECK_EQUAL(saved_best_block(*wallet), genesis_hash);
     TestUnloadWallet(std::move(wallet));
 }
 
@@ -1893,6 +1919,70 @@ BOOST_FIXTURE_TEST_CASE(meltcast_plan_refusals_and_cancelling, ListCoinsTestingS
         mark_sent(melts[1].id, uint256::ONE);
         BOOST_CHECK(CancelMeltCast(*wallet, melts[1].id));
         BOOST_CHECK(!WITH_LOCK(wallet->cs_wallet, return wallet->IsLockedCoin(melts[1].coin)));
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(abandon_waits_for_descendant_notifications, ListCoinsTestingSetup)
+{
+    // A drivechain transaction the mempool dropped is abandoned, but not while the wallet still marks
+    // one spending it as in the mempool: the mempool notifies the removals of a parent and its child
+    // in any order. Whichever comes first, both end abandoned, and the coin they spent is back.
+    const CScript change{GetScriptForRawPubKey(coinbaseKey.GetPubKey())};
+    const auto make_tx{[&](const COutPoint& coin, CAmount value, bool deposit, bool spend_escrow) {
+        CMutableTransaction mtx;
+        mtx.vin.emplace_back(coin);
+        // A deposit spends the escrow output of the one before it, a request the change.
+        if (spend_escrow) mtx.vin.emplace_back(COutPoint{coin.hash, 0});
+        drivechain::BmmRequest request;
+        request.slot = 1;
+        request.side_block_hash = uint256{1};
+        // For a block that is not the tip: stale once one comes.
+        request.prev_main_block_hash = uint256{2};
+        mtx.vout.emplace_back(deposit ? COIN : 0, deposit ? drivechain::EscrowScript(1) : drivechain::BmmRequestScript(request));
+        mtx.vout.emplace_back(value, change);
+        return MakeTransactionRef(mtx);
+    }};
+    unsigned int coinbase{0};
+    for (const bool deposit : {true, false}) {
+        for (const bool parent_first : {true, false}) {
+            BOOST_TEST_MESSAGE((deposit ? "deposit" : "BMM request") << (parent_first ? ", parent first" : ", child first"));
+            const auto reason{deposit ? MemPoolRemovalReason::REPLACED : MemPoolRemovalReason::CONFLICT};
+            const COutPoint coin{m_coinbase_txns.at(coinbase++)->GetHash(), 0};
+            const CTransactionRef parent{make_tx(coin, 10 * COIN, deposit, /*spend_escrow=*/false)};
+            const CTransactionRef child{make_tx(COutPoint{parent->GetHash(), 1}, 9 * COIN, deposit, /*spend_escrow=*/deposit)};
+            {
+                LOCK(wallet->cs_wallet);
+                BOOST_REQUIRE(wallet->AddToWallet(parent, TxStateInMempool{}));
+                BOOST_REQUIRE(wallet->AddToWallet(child, TxStateInMempool{}));
+                BOOST_CHECK(wallet->IsSpent(coin));
+                // The parent is out of the mempool (the wallet learnt it first), the child is not yet.
+                CWalletTx& parent_wtx{wallet->mapWallet.at(parent->GetHash())};
+                parent_wtx.m_state = TxStateInactive{};
+                BOOST_CHECK(!wallet->AbandonTransaction(parent_wtx));
+                BOOST_CHECK(!parent_wtx.isAbandoned());
+                BOOST_CHECK(wallet->mapWallet.at(child->GetHash()).InMempool());
+            }
+            // Neither is in the mempool of the node: the notifications find them gone.
+            if (parent_first) wallet->transactionRemovedFromMempool(parent, reason);
+            wallet->transactionRemovedFromMempool(child, reason);
+            if (!parent_first) wallet->transactionRemovedFromMempool(parent, reason);
+            const auto check_abandoned{[&] {
+                LOCK(wallet->cs_wallet);
+                BOOST_CHECK(wallet->mapWallet.at(parent->GetHash()).isAbandoned());
+                BOOST_CHECK(wallet->mapWallet.at(child->GetHash()).isAbandoned());
+                BOOST_CHECK(!wallet->IsSpent(coin));
+            }};
+            check_abandoned();
+            // And so they stay when the next block comes.
+            CBlock block;
+            const uint256 tip_hash{WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain().Tip()->GetBlockHash())};
+            interfaces::BlockInfo info{tip_hash};
+            info.height = WITH_LOCK(wallet->cs_wallet, return wallet->GetLastBlockHeight());
+            info.data = &block;
+            info.chain_time_max = std::numeric_limits<unsigned int>::max();
+            wallet->blockConnected(kernel::ChainstateRole{}, info);
+            check_abandoned();
+        }
     }
 }
 

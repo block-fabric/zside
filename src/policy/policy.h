@@ -34,8 +34,13 @@ inline constexpr unsigned int DEFAULT_COINBASE_OUTPUT_MAX_ADDITIONAL_SIGOPS{400}
 inline constexpr unsigned int MINIMUM_BLOCK_RESERVED_WEIGHT{2000};
 /** Default for -blockmintxfee, which sets the minimum feerate for a transaction in blocks created by mining code **/
 inline constexpr unsigned int DEFAULT_BLOCK_MIN_TX_FEE{1};
-/** The maximum weight for transactions we're willing to relay/mine */
-inline constexpr int32_t MAX_STANDARD_TX_WEIGHT{400'000};
+/**
+ * The maximum weight for transactions we're willing to relay/mine. Chains: below the weight the
+ * transactions of a block may have, by a margin, so that a standard transaction, and the chunk of
+ * a cluster of standard size (see DEFAULT_CLUSTER_SIZE_LIMIT_KVB), always fit in a block: the
+ * miner takes a chunk only while the block stays below its limit.
+ */
+inline constexpr int32_t MAX_STANDARD_TX_WEIGHT{CHAINS_MAX_BLOCK_TX_WEIGHT - 8'000};
 /** The minimum non-witness size for transactions we're willing to relay/mine: one larger than 64  */
 inline constexpr unsigned int MIN_STANDARD_TX_NONWITNESS_SIZE{65};
 /** Maximum number of signature check operations in an IsStandard() P2SH script */
@@ -70,8 +75,10 @@ inline constexpr unsigned int DUST_RELAY_TX_FEE{3000};
 inline constexpr unsigned int DEFAULT_MIN_RELAY_TX_FEE{100};
 /** Maximum number of transactions per cluster (default) */
 inline constexpr unsigned int DEFAULT_CLUSTER_LIMIT{64};
-/** Maximum size of cluster in virtual kilobytes */
-inline constexpr unsigned int DEFAULT_CLUSTER_SIZE_LIMIT_KVB{101};
+/** Maximum size of cluster in virtual kilobytes: a standard transaction and 1 kvB of descendants, as in Bitcoin */
+inline constexpr unsigned int DEFAULT_CLUSTER_SIZE_LIMIT_KVB{MAX_STANDARD_TX_WEIGHT / WITNESS_SCALE_FACTOR / 1000 + 1};
+// The largest chunk a mempool of default limits holds fits in a block.
+static_assert(DEFAULT_CLUSTER_SIZE_LIMIT_KVB * 1000 * WITNESS_SCALE_FACTOR < CHAINS_MAX_BLOCK_TX_WEIGHT);
 /** Default for -limitancestorcount, max number of in-mempool ancestors */
 inline constexpr unsigned int DEFAULT_ANCESTOR_LIMIT{25};
 /** Default for -limitdescendantcount, max number of in-mempool descendants */

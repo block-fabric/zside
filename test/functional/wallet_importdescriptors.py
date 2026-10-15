@@ -16,6 +16,7 @@ variants.
   and test the values returned."""
 
 import concurrent.futures
+import http.client
 import threading
 import time
 
@@ -28,6 +29,7 @@ from test_framework.script import SEQUENCE_LOCKTIME_TYPE_FLAG
 from test_framework.script_util import keys_to_multisig_script
 from test_framework.util import (
     assert_equal,
+    assert_greater_than,
     assert_raises_rpc_error,
     JSONRPCException,
 )
@@ -250,6 +252,45 @@ class ImportDescriptorsTest(BitcoinTestFramework):
             except JSONRPCException as e:
                 assert_equal(e.error["code"], -1)
                 assert_equal(e.error["message"], "Rescan aborted by user.")
+
+    def test_unload_during_import(self):
+        self.log.info("A wallet unloaded during an importdescriptors rescan resumes the rescan when loaded again")
+        # (The unloadwallet call waits for a rescan to end: the wallet unloads during one when the node
+        # shuts down, or when the GUI closes it.)
+        node = self.nodes[0]
+        xpriv = ExtendedPrivateKey.generate().to_string()
+        descriptor = [{"desc": descsum_create("pkh(" + xpriv + "/0h/*h)"), "timestamp": 0, "range": [0, 4000]}]
+        # Coins to the descriptor, then more blocks.
+        self.generatetoaddress(node, 10, node.deriveaddresses(descriptor[0]["desc"], [0, 0])[0])
+        self.generate(node, 200)
+        node.createwallet("unload_import_reference", blank=True)
+        reference = node.get_wallet_rpc("unload_import_reference")
+        assert_equal(reference.importdescriptors(descriptor), [{"success": True}])
+        expected_balances = reference.getbalances()["mine"]
+        assert_greater_than(expected_balances["trusted"], 0)
+        expected_txs = len(reference.listtransactions("*", 1000))
+
+        wallet_name = "unload_import"
+        node.createwallet(wallet_name, blank=True, load_on_startup=True)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as thread:
+            w_import = node.create_new_rpc_connection(mode="AUTHPROXY") / f"wallet/{wallet_name}"
+            importing = thread.submit(w_import.importdescriptors, descriptor)
+            # Once the import holds the wallet (it reserves the rescan first), shut down.
+            self.wait_until(lambda: importing.done() or node.get_wallet_rpc(wallet_name).getwalletinfo()["scanning"] is not False)
+            assert not importing.done()
+            self.stop_node(0)
+            # The call says the rescan was stopped, if the answer gets out before the node stops.
+            try:
+                importing.result(timeout=30 * self.options.timeout_factor)
+                raise AssertionError("importdescriptors unexpectedly succeeded")
+            except JSONRPCException as e:
+                assert_equal(e.error["message"], "Rescan aborted: the wallet is being unloaded. The descriptors were imported, and the wallet resumes the rescan when it is loaded again.")
+            except (OSError, http.client.HTTPException):
+                pass
+        self.start_node(0, extra_args=self.extra_args[0])
+        wallet = node.get_wallet_rpc(wallet_name)
+        assert_equal(wallet.getbalances()["mine"], expected_balances)
+        assert_equal(len(wallet.listtransactions("*", 1000)), expected_txs)
 
     def test_musig_private_key_warnings(self, xprv1, acc_xprv2, acc_xpub2, derivation_path):
         self.log.info("Testing importdescriptors MuSig private key warnings")
@@ -1133,6 +1174,7 @@ class ImportDescriptorsTest(BitcoinTestFramework):
         self.test_import_unused_noprivs()
         self.test_per_item_errors_are_reported_in_order()
         self.test_rescan_fails_import()
+        self.test_unload_during_import()
 
 if __name__ == '__main__':
     ImportDescriptorsTest(__file__).main()

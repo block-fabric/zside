@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=@CLIENT_NAME@
+GenericName=@CLIENT_NAME@ node and wallet
+Comment=The node of @CLIENT_NAME@, with its wallet, in one program
+Exec=@CLIENT_BIN_NAME@-app %u
+Icon=@CLIENT_BIN_NAME@
+Terminal=false
+Categories=Office;Finance;Network;
+MimeType=x-scheme-handler/@WEBUI_CHAIN_URI_SCHEME@;
+StartupWMClass=@CLIENT_BIN_NAME@-app

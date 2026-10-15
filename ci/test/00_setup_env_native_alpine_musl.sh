@@ -13,6 +13,7 @@ export PIP_PACKAGES="--break-system-packages pyzmq pycapnp"
 export DEP_OPTS="DEBUG=1"
 export GOAL="install"
 export BITCOIN_CONFIG="\
+ -DBUILD_WEBUI=OFF \
  --preset=dev-mode \
  -DREDUCE_EXPORTS=ON \
  -DCMAKE_BUILD_TYPE=Debug \

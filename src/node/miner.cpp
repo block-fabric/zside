@@ -150,6 +150,9 @@ void BlockAssembler::resetBlock()
     // These counters do not include coinbase tx
     nBlockTx = 0;
     nFees = 0;
+    m_withdrawal_weight = 0;
+    m_withdrawal_sigops = 0;
+    m_in_block.clear();
 }
 
 std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
@@ -180,13 +183,6 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     pblock->nTime = TicksSinceEpoch<std::chrono::seconds>(NodeClock::now());
     m_lock_time_cutoff = pindexPrev->GetMedianTimePast();
 
-    if (m_mempool) {
-        LOCK(m_mempool->cs);
-        m_mempool->StartBlockBuilding();
-        addChunks();
-        m_mempool->StopBlockBuilding();
-    }
-
     // Drivechain: the messages this node puts in the coinbase, and the
     // withdrawal bundles that can be paid out. Withdrawals go last, so that
     // they spend the escrow output as the deposits in the block leave it.
@@ -201,9 +197,36 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         return closure->height;
     }};
     chainman.m_drivechain_miner.Prune(m_chainstate.m_scdb, pindexPrev->nHeight + 1, history);
-    const drivechain::BlockAdditions drivechain_additions{chainman.m_drivechain_miner.CreateBlockAdditions(
-        m_chainstate.m_scdb, chainparams.GetConsensus().drivechain, pindexPrev->GetBlockHash(),
-        std::vector<CTransactionRef>{pblock->vtx.begin() + 1, pblock->vtx.end()})};
+    const auto additions_for{[&](const std::vector<CTransactionRef>& txs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        return chainman.m_drivechain_miner.CreateBlockAdditions(m_chainstate.m_scdb, chainparams.GetConsensus().drivechain,
+                                                                pindexPrev->GetBlockHash(), txs);
+    }};
+    const auto block_txs{[&] { return std::vector<CTransactionRef>{pblock->vtx.begin() + 1, pblock->vtx.end()}; }};
+
+    if (m_mempool) {
+        LOCK(m_mempool->cs);
+        // Room is kept for the withdrawals that can be paid out, so that a full mempool cannot keep
+        // them out of the block, whatever their fee. Their weight does not depend on the escrow
+        // output they spend.
+        std::tie(m_withdrawal_weight, m_withdrawal_sigops) = WithdrawalRoom(additions_for({}).withdrawals);
+        m_mempool->StartBlockBuilding();
+        addChunks();
+        m_mempool->StopBlockBuilding();
+        // Room the withdrawals do not take after all (one the block has from the mempool already,
+        // one the escrow output no longer pays) goes to transactions: a second pass over the
+        // mempool, which takes the chunks the kept room left out.
+        if (const auto room{WithdrawalRoom(additions_for(block_txs()).withdrawals)};
+            room.first < m_withdrawal_weight || room.second < m_withdrawal_sigops) {
+            std::tie(m_withdrawal_weight, m_withdrawal_sigops) = room;
+            m_mempool->StartBlockBuilding();
+            addChunks();
+            m_mempool->StopBlockBuilding();
+        }
+        m_withdrawal_weight = 0;
+        m_withdrawal_sigops = 0;
+    }
+
+    const drivechain::BlockAdditions drivechain_additions{additions_for(block_txs())};
     // A template that is asked not to take transactions from the mempool gets none from here either.
     for (size_t i{0}; m_mempool && i < drivechain_additions.withdrawals.size(); ++i) {
         const CTransactionRef& withdrawal{drivechain_additions.withdrawals[i]};
@@ -443,14 +466,30 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     return std::move(pblocktemplate);
 }
 
+std::pair<uint64_t, uint64_t> BlockAssembler::WithdrawalRoom(const std::vector<CTransactionRef>& withdrawals) const
+{
+    uint64_t weight{0};
+    uint64_t sigops{0};
+    for (const CTransactionRef& withdrawal : withdrawals) {
+        const uint64_t tx_weight(GetTransactionWeight(*withdrawal));
+        const uint64_t tx_sigops(WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*withdrawal));
+        if (*m_options.block_reserved_weight + weight + tx_weight >= *Assert(m_options.block_max_weight)) continue;
+        if (m_options.coinbase_output_max_additional_sigops + sigops + tx_sigops >= MAX_BLOCK_SIGOPS_COST) continue;
+        weight += tx_weight;
+        sigops += tx_sigops;
+    }
+    return {weight, sigops};
+}
+
 bool BlockAssembler::TestChunkBlockLimits(int64_t chunk_weight, int64_t chunk_sigops_cost) const
 {
     // block_max_weight has been flattened before block assembly limit checks.
     Assert(m_options.block_max_weight);
-    if (nBlockWeight + chunk_weight >= m_options.block_max_weight) {
+    // The room kept for the withdrawals counts as taken.
+    if (nBlockWeight + m_withdrawal_weight + chunk_weight >= m_options.block_max_weight) {
         return false;
     }
-    if (nBlockSigOpsCost + chunk_sigops_cost >= static_cast<uint64_t>(chainparams.GetConsensus().MaxBlockSigOpsCost())) {
+    if (nBlockSigOpsCost + m_withdrawal_sigops + chunk_sigops_cost >= static_cast<uint64_t>(chainparams.GetConsensus().MaxBlockSigOpsCost())) {
         return false;
     }
     return true;
@@ -478,6 +517,7 @@ void BlockAssembler::AddToBlock(const CTxMemPoolEntry& entry)
     pblocktemplate->block.vtx.emplace_back(entry.GetSharedTx());
     pblocktemplate->vTxFees.push_back(entry.GetFee());
     pblocktemplate->vTxSigOpsCost.push_back(entry.GetSigOpCost());
+    m_in_block.insert(entry.GetTx().GetHash());
     nBlockWeight += entry.GetTxWeight();
     ++nBlockTx;
     nBlockSigOpsCost += entry.GetSigOpCost();
@@ -514,6 +554,15 @@ void BlockAssembler::addChunks()
             return;
         }
 
+        // A second pass goes over the chunks of the first one again: those the block has stay in it.
+        if (m_in_block.contains(selected_transactions.front().get().GetTx().GetHash())) {
+            m_mempool->IncludeBuilderChunk();
+            selected_transactions.clear();
+            chunk_feerate = m_mempool->GetBlockBuilderChunk(selected_transactions);
+            chunk_feerate_vsize = ToFeePerVSize(chunk_feerate);
+            continue;
+        }
+
         int64_t chunk_sig_ops = 0;
         int64_t chunk_weight = 0;
         for (const auto& tx : selected_transactions) {
@@ -529,7 +578,7 @@ void BlockAssembler::addChunks()
 
             // block_max_weight has been flattened before block assembly limit checks.
             Assert(m_options.block_max_weight);
-            if (nConsecutiveFailed > MAX_CONSECUTIVE_FAILURES && nBlockWeight +
+            if (nConsecutiveFailed > MAX_CONSECUTIVE_FAILURES && nBlockWeight + m_withdrawal_weight +
                     BLOCK_FULL_ENOUGH_WEIGHT_DELTA > *m_options.block_max_weight) {
                 // Give up if we're close to full and haven't succeeded in a while
                 return;

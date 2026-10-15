@@ -446,31 +446,16 @@ EOF
             time-machine shell --root="$(profiledir_for_host "${HOST}")" \
                                     "${shell_opts[@]}" \
                                     bash -c "cd /bitcoin && bash contrib/guix/libexec/build_linux.sh"
-
-            time-machine shell --manifest="${PWD}/contrib/guix/manifest_gui.scm" \
-                                    --root="$(profiledir_for_host "${HOST}"_gui)" \
-                                    "${shell_opts[@]}" \
-                                    bash -c "cd /bitcoin && bash contrib/guix/libexec/build_linux_gui.sh"
             ;;
             *darwin*)
             time-machine shell --root="$(profiledir_for_host "${HOST}")" \
                                     "${shell_opts[@]}" \
                                     bash -c "cd /bitcoin && bash contrib/guix/libexec/build_macos.sh"
-
-            time-machine shell --manifest="${PWD}/contrib/guix/manifest_gui.scm" \
-                                    --root="$(profiledir_for_host "${HOST}"_gui)" \
-                                    "${shell_opts[@]}" \
-                                    bash -c "cd /bitcoin && bash contrib/guix/libexec/build_macos_gui.sh"
             ;;
             *mingw*)
             time-machine shell --root="$(profiledir_for_host "${HOST}")" \
                                     "${shell_opts[@]}" \
                                     bash -c "cd /bitcoin && bash contrib/guix/libexec/build_win.sh"
-
-            time-machine shell --manifest="${PWD}/contrib/guix/manifest_gui.scm" \
-                                    --root="$(profiledir_for_host "${HOST}"_gui)" \
-                                    "${shell_opts[@]}" \
-                                    bash -c "cd /bitcoin && bash contrib/guix/libexec/build_win_gui.sh"
             ;;
         esac
     )

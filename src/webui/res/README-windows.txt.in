@@ -1,0 +1,20 @@
+@CLIENT_NAME@
+@WEBUI_README_RULE@
+
+@CLIENT_BIN_NAME@-app.exe is the node of @CLIENT_NAME@, its wallet and its interface in one
+program; the interface is shown by Microsoft Edge WebView2, which Windows 10 and
+11 have. Without it, install the WebView2 Runtime (Evergreen) from
+https://developer.microsoft.com/microsoft-edge/webview2/
+
+Setup
+-----
+Unpack the files into a folder and run @CLIENT_BIN_NAME@-app.exe (or use the installer).
+The node and its wallets keep their data in %APPDATA%\@CLIENT_NAME@;
+the settings of the app are in %APPDATA%\@CLIENT_NAME@\@CLIENT_BIN_NAME@-app.json.
+
+The programs without an interface (@CLIENT_BIN_NAME@d, @CLIENT_BIN_NAME@-cli, @CLIENT_BIN_NAME@-tx,
+@CLIENT_BIN_NAME@-wallet, @CLIENT_BIN_NAME@-util) are in the daemon folder.
+
+License
+-------
+Distributed under the MIT software license, see COPYING.txt.

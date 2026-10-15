@@ -49,7 +49,7 @@ Create a wallet, this automatically imports the public keys:
 bitcoin rpc createwallet wallet_name="hww2" disable_private_keys=true descriptors=true external_signer=true
 ```
 
-Creation of the external wallet can be confirmed with `getwalletinfo`, which will report `"external_signer": true`. These commands can also be executed using `bitcoin-qt` Debug Console instead of using `bitcoin rpc` or `bitcoin-cli`.
+Creation of the external wallet can be confirmed with `getwalletinfo`, which will report `"external_signer": true`. These commands can also be executed using the console of `chains-app` (Node window) instead of using `bitcoin rpc` or `bitcoin-cli`.
 
 ### Verify an address
 

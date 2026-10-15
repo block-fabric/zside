@@ -112,7 +112,7 @@ needs a mainchain node** (`chainsd`), reached over its RPC interface.
 | Hooks in validation | `ContextualCheckBlockHeader`, `ConnectBlock`, `GetBlockSubsidy`, mempool checks in `src/validation.cpp` |
 | Block assembly | `src/node/miner.cpp` |
 | RPC commands | `src/rpc/sidechain.cpp`, `src/wallet/rpc/sidechain.cpp` |
-| GUI page | `src/qt/sidechainpage.{h,cpp}` |
+| GUI pages (the app, `sidechain-app`) | Peg and Merged mining: `src/webui/app/src/pages/Peg.svelte`, `Bmm.svelte`, the home `views/home/SideHome.svelte`; the calls to the mainchain node `src/webui/sidechainapi.cpp`; the chain of the app `src/webui/app/src/chain/chain.json` (see [webui.md](webui.md)) |
 | Tests | `test/functional/feature_sidechain.py` |
 
 The state of the sidechain rules (`sidechain::State`) is stored, copied and
@@ -177,7 +177,9 @@ sidechain-cli -regtest getwithdrawalbundle
 chains-cli -regtest listwithdrawalbundles 3
 ```
 
-`sidechain-qt` does the same from its Mainchain tab.
+`sidechain-app` does the same from its Peg page (a deposit address, the deposit made by the mainchain
+wallet, a withdrawal, its bundle and its votes) and its Merged mining page; its end-to-end test does
+all of it against a live mainchain: `src/webui/test/e2e/run_sidechain.py`.
 
 ## Making your own sidechain
 
@@ -199,7 +201,14 @@ chains-cli -regtest listwithdrawalbundles 3
    `pending_min_score` (a tenth of the
    mainchain's `withdrawal_min_score`: 6480 on main and signet, 30 on testnet)
    and `unproposed_expiry_blocks` (1440 on main and signet, 60 on testnet).
-4. Bring the tests along:
+4. Name its app: `src/webui/app/src/chain/chain.json` holds what the app shows of the chain (its
+   name and programs, which `rename.py` sets, its coin, the scheme of its payment URIs, which
+   `rename.py` sets to the stem, the ports and address prefixes of each network, its mark and
+   colour, its help links, the pages of the kit it does not have). The ports and prefixes must be
+   those of step 3: `test_<stem>-app` checks them against the chain parameters. Then
+   `npm run i18n` in `src/webui/app` makes the catalogs again (the name of the chain is in them).
+   Pages of its own: [webui.md](webui.md), "Pages of a chain of its own".
+5. Bring the tests along:
    - `contrib/sidechain/rename-hrp.py <old> <new>` re-encodes the addresses in
      the tests for each address prefix you changed;
    - the magic bytes of the networks are in
@@ -208,7 +217,7 @@ chains-cli -regtest listwithdrawalbundles 3
      in `test/functional/rpc_dumptxoutset.py` follows the magic of regtest;
    - regenerate `test/functional/data/util/getchainparams-*.json` with
      `<name>-util [-testnet|-signet|-regtest] getchainparams`.
-5. Add what makes your sidechain worth having. Consensus rules of your own
+6. Add what makes your sidechain worth having. Consensus rules of your own
    go next to the sidechain rules in `sidechain::State::ConnectBlock`, with
    their state in `sidechain::State` if they have any; it is stored and
    reverted with the rest.

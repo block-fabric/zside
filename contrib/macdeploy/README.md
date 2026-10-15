@@ -1,12 +1,8 @@
 # MacOS Deployment
 
-The `macdeployqtplus` script should not be run manually. Instead, after building as usual:
-
-```bash
-make deploy
-```
-
-When complete, it will have produced `Bitcoin-Core.zip`.
+The GUI, chains-app, is not built for macOS yet (its port, with WKWebView, comes
+later); the programs of the node are. This folder keeps what their builds and
+signatures need: the SDK and the detached signatures.
 
 ## SDK Extraction
 
@@ -54,9 +50,9 @@ path to `Xcode.app` (extracted in the previous stage) as the first argument.
 The generated archive should be: `Xcode-26.1.1-17B100-extracted-SDK-with-libcxx-headers.tar`.
 The `sha256sum` should be `9600fa93644df674ee916b5e2c8a6ba8dacf631996a65dc922d003b98b5ea3b1`.
 
-## Deterministic macOS App Notes
+## Deterministic macOS Notes
 
-macOS Applications are created on Linux using a recent LLVM.
+macOS binaries are created on Linux using a recent LLVM.
 
 All builds must target an Apple SDK. These SDKs are free to download, but not redistributable.
 See the SDK Extraction notes above for how to obtain it.
@@ -68,10 +64,9 @@ Using an Apple-blessed key to sign binaries is a requirement to produce (distrib
 binaries. Because this private key cannot be shared, we'll have to be a bit creative in order
 for the build process to remain somewhat deterministic. Here's how it works:
 
-- Builders use Guix to create an unsigned release. This outputs an unsigned ZIP which
-  users may choose to bless, self-codesign, and run. It also outputs an unsigned app structure
-  in the form of a tarball.
-- The Apple keyholder uses this unsigned app to create a detached signature, using the
-  included script. Detached signatures are available from this [repository](https://github.com/bitcoin-core/bitcoin-detached-sigs).
-- Builders feed the unsigned app + detached signature back into Guix, which combines the
-  pieces into a deterministic ZIP.
+- Builders use Guix to create an unsigned release. This outputs an unsigned tarball of the
+  binaries, and the same binaries in a tarball for codesigning.
+- The Apple keyholder uses these unsigned binaries to create a detached signature, using the
+  included script.
+- Builders feed the unsigned binaries + detached signature back into Guix, which combines the
+  pieces into a deterministic tarball.

@@ -2,6 +2,7 @@
 // Distributed under the MIT software license. See the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <drivechain/sidechain.h>
 #include <kernel/mempool_entry.h>
 #include <policy/fees/estimator_args.h>
 #include <policy/fees/mempool_estimator.h>
@@ -341,6 +342,64 @@ BOOST_AUTO_TEST_CASE(MempoolFeeRateEstimator)
         BOOST_CHECK(mempool_estimator.EstimateFeeRate(/*conservative=*/false).value().feerate == FeeFrac(med_fee, tx_vsize));
         BOOST_CHECK(mempool_estimator.EstimateFeeRate(/*conservative=*/true).value().feerate == FeeFrac(high_fee, tx_vsize));
     }
+}
+
+BOOST_AUTO_TEST_CASE(MempoolHealthWithdrawals)
+{
+    // A withdrawal the miner adds to its block itself never was in the mempool: it does not
+    // make a mempool that had every other transaction of the block look unrepresentative.
+    // A sidechain has no sidechains of its own, so no escrow outputs: nothing to leave out.
+    if (m_node.chainman->GetConsensus().drivechain.max_sidechains == 0) return;
+    const int64_t block_weight{m_node.chainman->GetConsensus().max_block_tx_weight};
+    m_node.mempool->SetLoadTried(true);
+    MemPoolFeeRateEstimator estimator{MempoolPolicyEstimatorPath(*m_node.args), *m_node.mempool, *m_node.chainman};
+    // As large as the block's other transactions.
+    CMutableTransaction withdrawal;
+    withdrawal.vin.resize(1);
+    withdrawal.vin[0].prevout.hash = Txid::FromUint256(m_rng.rand256());
+    withdrawal.vout.emplace_back(COIN, drivechain::EscrowScript(/*slot=*/1));
+    // Outputs of 10 bytes, 40 weight units each.
+    withdrawal.vout.resize(1 + block_weight / 2 / 40, CTxOut{COIN / 1000, CScript() << OP_TRUE});
+    BOOST_REQUIRE(GetTransactionWeight(CTransaction{withdrawal}) >= block_weight / 2);
+    const CTransactionRef withdrawal_tx{MakeTransactionRef(withdrawal)};
+    TestMemPoolEntryHelper entry;
+    unsigned int height{100};
+    for (size_t i{0}; i < MEMPOOL_HEALTH_WINDOW_BLOCKS; ++i) {
+        auto block{std::make_shared<CBlock>()};
+        block->vtx.emplace_back(MakeRandomTx()); // the coinbase
+        std::vector<RemovedMempoolTransactionInfo> removed;
+        int64_t weight{0};
+        while (weight < block_weight / 2) {
+            const auto tx{MakeRandomTx()};
+            weight += GetTransactionWeight(*tx);
+            block->vtx.emplace_back(tx);
+            removed.emplace_back(entry.FromTx(tx));
+        }
+        // Not from the mempool.
+        block->vtx.emplace_back(withdrawal_tx);
+        estimator.MempoolTxsRemovedForBlock(block, removed, height++);
+    }
+    BOOST_CHECK(estimator.GetMempoolHealth() == MemPoolFeeRateEstimator::MempoolHealth::HEALTHY);
+
+    // An ordinary transaction of the same size that was not in the mempool counts, as before.
+    CMutableTransaction other{withdrawal};
+    other.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    const CTransactionRef other_tx{MakeTransactionRef(other)};
+    for (size_t i{0}; i < MEMPOOL_HEALTH_WINDOW_BLOCKS; ++i) {
+        auto block{std::make_shared<CBlock>()};
+        block->vtx.emplace_back(MakeRandomTx());
+        std::vector<RemovedMempoolTransactionInfo> removed;
+        int64_t weight{0};
+        while (weight < block_weight / 2) {
+            const auto tx{MakeRandomTx()};
+            weight += GetTransactionWeight(*tx);
+            block->vtx.emplace_back(tx);
+            removed.emplace_back(entry.FromTx(tx));
+        }
+        block->vtx.emplace_back(other_tx);
+        estimator.MempoolTxsRemovedForBlock(block, removed, height++);
+    }
+    BOOST_CHECK(estimator.GetMempoolHealth() == MemPoolFeeRateEstimator::MempoolHealth::LOW_COVERAGE);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

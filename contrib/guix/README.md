@@ -249,9 +249,8 @@ details.
 
 * _**BASE_CACHE**_
 
-  Set the root directory for cached built packages. Non-GUI and GUI builds use
-  the `GUIX/BUILD` and `GUIX/GUI` subdirectories, respectively, so their caches do
-  not evict each other's packages. Setting this to the same directory across
+  Set the root directory for cached built packages (in its `GUIX/BUILD`
+  subdirectory). Setting this to the same directory across
   multiple Guix builds can eliminate unnecessary building of packages.
 
   The path that this environment variable points to **must be a directory**, and

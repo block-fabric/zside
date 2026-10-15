@@ -16,6 +16,7 @@ export TEST_RUNNER_EXTRA="--exclude rpc_bind --exclude feature_bind_extra"
 export RUN_FUNCTIONAL_TESTS=true
 export GOAL="install"
 export BITCOIN_CONFIG="\
+  -DBUILD_WEBUI=OFF \
   --preset=dev-mode \
   -DREDUCE_EXPORTS=ON \
 "

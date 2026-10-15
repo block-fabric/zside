@@ -424,10 +424,16 @@ RPCMethod importdescriptors()
 
     // Rescan the blockchain using the lowest timestamp
     if (rescan) {
-        int64_t scanned_time = pwallet->RescanFromTime(lowest_timestamp, reserver);
+        bool aborted{false};
+        int64_t scanned_time = pwallet->RescanFromTime(lowest_timestamp, reserver, &aborted);
         pwallet->ResubmitWalletTransactions(node::TxBroadcast::MEMPOOL_NO_BROADCAST, /*force=*/true);
 
-        if (pwallet->IsAbortingRescan()) {
+        // Stopped by the unloading of the wallet or a shutdown, not the user: the descriptors are
+        // imported, and the rescan is what is left to do, when the wallet is loaded again.
+        if (aborted && (pwallet->IsUnloading() || pwallet->chain().shutdownRequested())) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted: the wallet is being unloaded. The descriptors were imported, and the wallet resumes the rescan when it is loaded again.");
+        }
+        if (aborted || pwallet->IsAbortingRescan()) {
             throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted by user.");
         }
 

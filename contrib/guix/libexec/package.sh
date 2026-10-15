@@ -86,15 +86,10 @@ set -o errexit -o pipefail
     # Finally make tarballs for codesigning
     case "$HOST" in
         *mingw*)
-            # Make the installer
-            cmake -D BIN_DIR="${INSTALLPATH}/bin" -D LIBEXEC_DIR="${INSTALLPATH}/libexec" -P build/GenerateWindowsInstaller.cmake
-            mv build/bitcoin-win64-setup.exe "${OUTDIR}/${DISTNAME}-win64-setup-unsigned.exe"
-
             cp -rf --target-directory=. contrib/windeploy
             (
                 cd ./windeploy
                 mkdir -p unsigned
-                cp --target-directory=unsigned/ "${OUTDIR}/${DISTNAME}-win64-setup-unsigned.exe"
                 cp -r --target-directory=unsigned/ "${INSTALLPATH}"
                 find unsigned/ -name "*.dbg" -print0 \
                     | xargs -0r rm
@@ -106,12 +101,9 @@ set -o errexit -o pipefail
             )
             ;;
         *darwin*)
-            cmake --build build --target deploy
-            mv build/dist/bitcoin-macos-app.zip "${OUTDIR}/${DISTNAME}-${HOST}-unsigned.zip"
             mkdir -p "unsigned-app-${HOST}"
             cp  --target-directory="unsigned-app-${HOST}" \
                 contrib/macdeploy/detached-sig-create.sh
-            mv --target-directory="unsigned-app-${HOST}" build/dist
             cp -r --target-directory="unsigned-app-${HOST}" "${INSTALLPATH}"
             (
                 cd "unsigned-app-${HOST}"

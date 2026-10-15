@@ -29,7 +29,8 @@ export BITCOIN_CONFIG="-DCMAKE_C_COMPILER=/opt/riscv-ilp32/bin/riscv32-unknown-e
  -DENABLE_IPC=OFF \
  -DCMAKE_SYSTEM_NAME=Generic \
  -DIFADDR_LINKS_WITHOUT_LIBSOCKET=ON \
- "
+ -DBUILD_WEBUI=OFF \
+"
 
 export BARE_METAL_RISCV=true
 export RUN_UNIT_TESTS=false

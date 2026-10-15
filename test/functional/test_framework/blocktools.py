@@ -50,7 +50,8 @@ from .util import assert_equal
 MAX_BLOCK_SIGOPS = 20000
 MAX_BLOCK_SIGOPS_WEIGHT = MAX_BLOCK_SIGOPS * WITNESS_SCALE_FACTOR
 MAX_STANDARD_TX_SIGOPS = 4000
-MAX_STANDARD_TX_WEIGHT = 400000
+# Chains: the 400,000 the transactions of a block may weigh, less a margin (policy/policy.h).
+MAX_STANDARD_TX_WEIGHT = 392000
 
 # Genesis block time (regtest)
 TIME_GENESIS_BLOCK = 1296688602

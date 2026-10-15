@@ -26,8 +26,7 @@ make -C depends --jobs="$JOBS" HOST="$HOST" \
                                    ${build_RANLIB+build_RANLIB="$build_RANLIB"} \
                                    ${build_OBJDUMP+build_OBJDUMP="$build_OBJDUMP"} \
                                    ${build_NM+build_NM="$build_NM"} \
-                                   ${build_STRIP+build_STRIP="$build_STRIP"} \
-                                   NO_QT=1
+                                   ${build_STRIP+build_STRIP="$build_STRIP"}
 
 mkdir -p "$DISTSRC"
 (
@@ -41,8 +40,7 @@ mkdir -p "$DISTSRC"
           --toolchain "${BASEPREFIX}/${HOST}/toolchain.cmake" \
           -DBUILD_BENCH=OFF \
           -DBUILD_FUZZ_BINARY=OFF \
-          -DBUILD_GUI=OFF \
-          -DBUILD_GUI_TESTS=OFF \
+          -DBUILD_WEBUI=OFF \
           -DCMAKE_INSTALL_PREFIX="${INSTALLPATH}" \
           -DCMAKE_SKIP_RPATH=TRUE \
           -DREDUCE_EXPORTS=ON \

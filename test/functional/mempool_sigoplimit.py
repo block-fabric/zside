@@ -165,7 +165,8 @@ class BytesPerSigOpTest(BitcoinTestFramework):
         self.log.info("Test a overly-large sigops-vbyte hits package limits")
         # Make a 2-transaction package which fails vbyte checks even though
         # separately they would work.
-        self.restart_node(0, extra_args=["-bytespersigop=5000","-permitbaremultisig=1"])
+        # (Chains: 4,800 rather than 5,000, so that one transaction stays within the cluster size limit of 99 kvB.)
+        self.restart_node(0, extra_args=["-bytespersigop=4800","-permitbaremultisig=1"])
 
         def create_bare_multisig_tx(utxo_to_spend=None):
             _, pubkey = generate_keypair()
@@ -185,7 +186,7 @@ class BytesPerSigOpTest(BitcoinTestFramework):
         # Separately, the parent tx is ok
         parent_individual_testres = self.nodes[0].testmempoolaccept([tx_parent.serialize().hex()])[0]
         assert parent_individual_testres["allowed"]
-        max_multisig_vsize = MAX_PUBKEYS_PER_MULTISIG * 5000
+        max_multisig_vsize = MAX_PUBKEYS_PER_MULTISIG * 4800
         assert_equal(parent_individual_testres["vsize_adjusted"], max_multisig_vsize)
 
         # But together, it's exceeding limits in the *package* context. If sigops adjusted vsize wasn't being checked

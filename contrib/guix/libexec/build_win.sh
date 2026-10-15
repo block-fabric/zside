@@ -19,8 +19,7 @@ make -C depends --jobs="$JOBS" HOST="$HOST" \
                                    ${SOURCES_PATH+SOURCES_PATH="$SOURCES_PATH"} \
                                    ${BASE_CACHE+BASE_CACHE="$BASE_CACHE"} \
                                    ${build_CC+build_CC="$build_CC"} \
-                                   ${build_CXX+build_CXX="$build_CXX"} \
-                                   NO_QT=1
+                                   ${build_CXX+build_CXX="$build_CXX"}
 
 # CFLAGS
 HOST_CFLAGS="-O2 -g"
@@ -47,8 +46,7 @@ mkdir -p "$DISTSRC"
           --toolchain "${BASEPREFIX}/${HOST}/toolchain.cmake" \
           -DBUILD_BENCH=OFF \
           -DBUILD_FUZZ_BINARY=OFF \
-          -DBUILD_GUI=OFF \
-          -DBUILD_GUI_TESTS=OFF \
+          -DBUILD_WEBUI=OFF \
           -DCMAKE_INSTALL_PREFIX="${INSTALLPATH}" \
           -DREDUCE_EXPORTS=ON \
           -DWITH_CCACHE=OFF

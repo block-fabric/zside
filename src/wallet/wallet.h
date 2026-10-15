@@ -320,6 +320,9 @@ private:
     bool Unlock(const CKeyingMaterial& vMasterKeyIn);
 
     std::atomic<bool> fAbortRescan{false};
+    //! Set once the wallet is being unloaded: every rescan from then on is aborted, a rescan
+    //! reserved later (by an RPC that still holds the wallet) included.
+    std::atomic<bool> m_unloading{false};
     std::atomic<bool> fScanningWallet{false}; // controlled by WalletRescanReserver
     std::atomic<bool> m_scanning_with_passphrase{false};
     std::atomic<SteadyClock::time_point> m_scanning_start{SteadyClock::time_point{}};
@@ -422,6 +425,18 @@ private:
      * that the wallet has scanned sequentially all blocks up to this one.
      */
     int m_last_block_processed_height GUARDED_BY(cs_wallet) = -1;
+
+    /** Drivechain transactions the mempool dropped whose abandoning waits for the wallet to learn
+     * that a transaction spending them left the mempool too (see transactionRemovedFromMempool). */
+    std::set<Txid> m_drivechain_abandon_retry GUARDED_BY(cs_wallet);
+
+    /** While a rescan is under way, the block it resumes from (the last one it scanned, or the one
+     * it starts at): the best block saved is that one, not the tip, as the history after it may be
+     * missing (keys just imported, say). Kept after a rescan the unloading of the wallet or a
+     * shutdown stopped, so that the wallet resumes the rescan when loaded again. */
+    std::optional<uint256> m_rescan_resume_block GUARDED_BY(cs_wallet);
+    /** Abandon the drivechain transactions of m_drivechain_abandon_retry that now can be. */
+    void RetryDrivechainAbandons() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     std::map<OutputType, ScriptPubKeyMan*> m_external_spk_managers;
     std::map<OutputType, ScriptPubKeyMan*> m_internal_spk_managers;
@@ -592,7 +607,11 @@ public:
      * Rescan abort properties
      */
     void AbortRescan() { fAbortRescan = true; }
+    /** The wallet is being unloaded: abort the rescan under way, and any reserved later. */
+    void AbortRescansForUnload() { m_unloading = true; fAbortRescan = true; }
     bool IsAbortingRescan() const { return fAbortRescan; }
+    //! Whether the wallet is being unloaded (which aborts its rescans).
+    bool IsUnloading() const { return m_unloading; }
     bool IsScanning() const { return fScanningWallet; }
     bool IsScanningWithPassphrase() const { return m_scanning_with_passphrase; }
     SteadyClock::duration ScanningDuration() const { return fScanningWallet ? SteadyClock::now() - m_scanning_start.load() : SteadyClock::duration{}; }
@@ -647,7 +666,7 @@ public:
     void blockConnected(const kernel::ChainstateRole& role, const interfaces::BlockInfo& block) override;
     void blockDisconnected(const interfaces::BlockInfo& block) override;
     void updatedBlockTip() override;
-    int64_t RescanFromTime(int64_t startTime, const WalletRescanReserver& reserver);
+    int64_t RescanFromTime(int64_t startTime, const WalletRescanReserver& reserver, bool* aborted = nullptr);
 
     struct ScanResult {
         enum { SUCCESS, FAILURE, USER_ABORT } status = SUCCESS;
@@ -841,6 +860,9 @@ public:
 
     //! Check if a given transaction has any of its outputs spent by another transaction in the wallet
     bool HasWalletSpend(const CTransactionRef& tx) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    /** The transactions of the wallet spending an output of txid, or of one of those, further down,
+     * that it marks as in the mempool. */
+    std::vector<Txid> GetMempoolDescendants(const Txid& txid) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     //! Close wallet database
     void Close();
@@ -1141,6 +1163,9 @@ public:
         // that an abort requested while the reservation is held always applies
         // to abort this rescan, even if it arrives before the scan loop starts.
         m_wallet.fAbortRescan = false;
+        // But a wallet being unloaded rescans no more: the abort is kept. (Read after the reset:
+        // AbortRescansForUnload sets the flag before the abort, so one of the two sees the other.)
+        if (m_wallet.m_unloading) m_wallet.fAbortRescan = true;
         m_wallet.m_scanning_with_passphrase.exchange(with_passphrase);
         m_wallet.m_scanning_start = SteadyClock::now();
         m_wallet.m_scanning_progress = 0;

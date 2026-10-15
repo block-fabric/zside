@@ -42,7 +42,7 @@ Processes and socket connection.
 This section describes the major components of the Inter-Process Communication (IPC) framework covering the relevant source files, generated files, tools, and libraries.
 
 ### Abstract C++ Classes in [`src/interfaces/`](../../src/interfaces/)
-- The foundation of the IPC implementation lies in the abstract C++ classes within the [`src/interfaces/`](../../src/interfaces/) directory. These classes define pure virtual methods that code in [`src/node/`](../../src/node/), [`src/wallet/`](../../src/wallet/), and [`src/qt/`](../../src/qt/) directories call to interact with each other.
+- The foundation of the IPC implementation lies in the abstract C++ classes within the [`src/interfaces/`](../../src/interfaces/) directory. These classes define pure virtual methods that code in [`src/node/`](../../src/node/), [`src/wallet/`](../../src/wallet/), and [`src/webui/`](../../src/webui/) directories call to interact with each other.
 - Each abstract class in this directory represents a distinct interface that the different modules (node, wallet, GUI) implement and use for cross-process communication.
 - The classes are written following conventions described in [Internal Interface
   Guidelines](../developer-notes.md#internal-interface-guidelines) to ensure

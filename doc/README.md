@@ -15,7 +15,7 @@ The following are some helpful notes on how to run Bitcoin Core on your native p
 
 Unpack the files into a directory and run:
 
-- `bin/bitcoin-qt` (GUI) or
+- `bin/chains-app` (GUI) or
 - `bin/bitcoind` (headless)
 - `bin/bitcoin` (wrapper command)
 
@@ -23,7 +23,7 @@ The `bitcoin` command supports subcommands like `bitcoin gui`, `bitcoin node`, a
 
 ### Windows
 
-Unpack the files into a directory, and then run bitcoin-qt.exe.
+Run `chains-app-<version>-win64-setup.exe`, or unpack its zip into a directory and run `chains-app.exe`.
 
 ### macOS
 

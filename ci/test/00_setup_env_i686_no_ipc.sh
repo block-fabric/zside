@@ -17,6 +17,7 @@ export DEP_OPTS="DEBUG=1 NO_IPC=1"
 export GOAL="install"
 export CI_LIMIT_STACK_SIZE=1
 export BITCOIN_CONFIG="\
+ -DBUILD_WEBUI=OFF \
  --preset=dev-mode \
  -DENABLE_IPC=OFF \
  -DCMAKE_BUILD_TYPE=Debug \

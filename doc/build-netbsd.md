@@ -2,7 +2,7 @@
 
 Bitcoin Core is supported on all [supported NetBSD releases](https://www.netbsd.org/releases/).
 
-This guide describes how to build bitcoind, command-line utilities, and GUI on the latest release.
+This guide describes how to build bitcoind and command-line utilities on the latest release.
 
 ## Preparation
 
@@ -44,24 +44,9 @@ git clone https://github.com/bitcoin/bitcoin.git
 ### 3. Install Optional Dependencies
 
 #### GUI Dependencies
-###### Qt6
 
-Bitcoin Core includes a GUI built with the cross-platform Qt Framework. To compile the GUI, we need to install
-the necessary parts of Qt, the libqrencode and pass `-DBUILD_GUI=ON`. Skip if you don't intend to use the GUI.
-
-```bash
-pkgin install qt6-qtbase qt6-qttools
-```
-
-###### libqrencode
-
-The GUI will be able to encode addresses in QR codes unless this feature is explicitly disabled. To install libqrencode, run:
-
-```bash
-pkgin install qrencode
-```
-
-Otherwise, if you don't need QR encoding support, use the `-DWITH_QRENCODE=OFF` option to disable this feature in order to compile the GUI.
+The GUI of Chains, `chains-app` (an HTML interface in a native web view), is made for Linux and
+Windows; this system is not supported yet. Configure with `-DBUILD_WEBUI=OFF`.
 
 #### Notifications
 ###### ZeroMQ
@@ -92,10 +77,10 @@ pkgin install lsof
 ### 1. Configuration
 
 There are many ways to configure Bitcoin Core. Here is an example that
-explicitly disables the wallet and GUI:
+explicitly disables the wallet and the GUI:
 
 ```bash
-cmake -B build -DENABLE_WALLET=OFF -DBUILD_GUI=OFF
+cmake -B build -DENABLE_WALLET=OFF -DBUILD_WEBUI=OFF
 ```
 
 Run `cmake -B build -LH` to see the full list of available options.

@@ -4,6 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test Miniscript descriptors integration in the wallet."""
 
+from test_framework.blocktools import MAX_STANDARD_TX_WEIGHT
 from test_framework.descriptors import descsum_create
 from test_framework.psbt import PSBT, PSBT_IN_SHA256
 from test_framework.test_framework import BitcoinTestFramework
@@ -376,7 +377,7 @@ class WalletMiniscriptTest(BitcoinTestFramework):
         # for a TapMiniscript (see cpp file for details). Then pad a simple pubkey check up
         # to the maximum size. Make sure we can import and spend this script.
         leeway_weight = (4 + 4 + 1 + 36 + 4 + 1 + 1 + 8 + 1 + 1 + 33) * 4 + 2
-        max_tapmini_size = 400_000 - 3 - (1 + 65) * 1_000 - 3 - (33 + 32 * 128) - leeway_weight - 5
+        max_tapmini_size = MAX_STANDARD_TX_WEIGHT - 3 - (1 + 65) * 1_000 - 3 - (33 + 32 * 128) - leeway_weight - 5
         padding = max_tapmini_size - 33 - 1
         ms = f"pk({TPRVS[0]}/*)"
         ms = "n" * padding + ":" + ms

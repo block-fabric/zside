@@ -2,7 +2,7 @@
 
 Bitcoin Core is supported on all [supported FreeBSD releases](https://www.freebsd.org/security/#sup).
 
-This guide describes how to build bitcoind, command-line utilities, and GUI on the most recent production release.
+This guide describes how to build bitcoind and command-line utilities on the most recent production release.
 
 ## Preparation
 
@@ -40,24 +40,9 @@ git clone https://github.com/bitcoin/bitcoin.git
 ### 3. Install Optional Dependencies
 
 #### GUI Dependencies
-###### Qt6
 
-Bitcoin Core includes a GUI built with the cross-platform Qt Framework. To compile the GUI, we need to install
-the necessary parts of Qt, the libqrencode and pass `-DBUILD_GUI=ON`. Skip if you don't intend to use the GUI.
-
-```bash
-pkg install qt6-base qt6-tools
-```
-
-###### libqrencode
-
-The GUI will be able to encode addresses in QR codes unless this feature is explicitly disabled. To install libqrencode, run:
-
-```bash
-pkg install libqrencode
-```
-
-Otherwise, if you don't need QR encoding support, use the `-DWITH_QRENCODE=OFF` option to disable this feature in order to compile the GUI.
+The GUI of Chains, `chains-app` (an HTML interface in a native web view), is made for Linux and
+Windows; this system is not supported yet. Configure with `-DBUILD_WEBUI=OFF`.
 
 ---
 
@@ -84,17 +69,17 @@ pkg install python3 databases/py-sqlite3 net/py-pyzmq lsof
 
 There are many ways to configure Bitcoin Core, here are a few common examples:
 
-##### Wallet and GUI:
-This enables the GUI, assuming `sqlite` and `qt` are installed.
+##### Wallet:
+
 ```bash
-cmake -B build -DBUILD_GUI=ON
+cmake -B build -DBUILD_WEBUI=OFF
 ```
 
 Run `cmake -B build -LH` to see the full list of available options.
 
-##### No Wallet or GUI
+##### No Wallet
 ```bash
-cmake -B build -DENABLE_WALLET=OFF
+cmake -B build -DENABLE_WALLET=OFF -DBUILD_WEBUI=OFF
 ```
 
 ### 2. Compile

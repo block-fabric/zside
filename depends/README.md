@@ -10,10 +10,6 @@ as well as [packages.md](packages.md) for how to add packages.
 
     apt install cmake curl make patch
 
-Skip the following packages if you don't intend to use the GUI and will build with [`NO_QT=1`](#dependency-options):
-
-    apt install bison g++ ninja-build pkgconf python3 xz-utils
-
 To build dependencies for the current arch+OS:
 
     make
@@ -33,10 +29,6 @@ To build dependencies for the current arch+OS:
 
     pkg install bash cmake curl gmake
 
-Skip the following packages if you don't intend to use the GUI and will build with [`NO_QT=1`](#dependency-options):
-
-    pkg install bison ninja pkgconf python3
-
 To build dependencies for the current arch+OS:
 
     gmake
@@ -53,10 +45,6 @@ To build dependencies for the current arch+OS:
 
     pkg_add bash cmake curl gmake gtar
 
-Skip the following packages if you don't intend to use the GUI and will build with [`NO_QT=1`](#dependency-options):
-
-    pkg_add bison ninja
-
 To build dependencies for the current arch+OS:
 
     gmake
@@ -64,10 +52,6 @@ To build dependencies for the current arch+OS:
 ### Alpine
 
     apk add bash build-base cmake curl make patch
-
-Skip the following packages if you don't intend to use the GUI and will build with [`NO_QT=1`](#dependency-options):
-
-    apk add bison linux-headers samurai pkgconf python3
 
 To build dependencies for the current arch+OS:
 
@@ -94,11 +78,12 @@ The following can be set when running make: `make FOO=bar`
 - `C_STANDARD`: Set the C standard version used. Defaults to `c11`.
 - `CXX_STANDARD`: Set the C++ standard version used. Defaults to `c++20`.
 - `NO_BOOST`: Don't download/build/cache Boost
-- `NO_QT`: Don't download/build/cache Qt and its dependencies
-- `NO_QR`: Don't download/build/cache packages needed for enabling qrencode
 - `NO_ZMQ`: Don't download/build/cache packages needed for enabling ZeroMQ
 - `NO_WALLET`: Don't download/build/cache libs needed to enable the wallet (SQLite)
 - `NO_USDT`: Don't download/build/cache packages needed for enabling USDT tracepoints
+- `NO_WEBUI`: Don't download the WebView2 headers chains-app needs on Windows (a build without chains-app).
+  chains-app, the GUI, is built from the depends for Windows only: on the other systems it uses the
+  web view of the system (WebKitGTK), so a depends build for them is made without it.
 - `NO_IPC`: Don't build Cap’n Proto and libmultiprocess packages. Default on Windows.
 - `DEBUG`: Disable some optimizations and enable more runtime checking
 - `HOST_ID_SALT`: Optional salt to use when generating host package ids
@@ -114,7 +99,7 @@ variables will be set when generating the Bitcoin Core buildsystem. In this case
 ## Compiler Configuration
 
 `CC` and `CXX` control target compilers. `build_CC` and `build_CXX` control
-compilers for native build tools (e.g. `native_capnp`, `native_qt`), which
+compilers for native build tools (e.g. `native_capnp`), which
 default to `gcc`/`g++` on Linux and `clang`/`clang++` on macOS/FreeBSD/OpenBSD
 (see `./depends/builders/*.mk`).
 

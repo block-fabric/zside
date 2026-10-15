@@ -17,7 +17,7 @@ export OPENBSD_SDK_SHA256SUMS="\
 21a67af20aebcabf85b09f4206fc95b4cae0a35d42b154b976f0159f457724f9  comp79.tgz"
 export PACKAGES="clang-${APT_LLVM_V} llvm-${APT_LLVM_V} lld-${APT_LLVM_V}"
 export SYSROOT="--sysroot=${DEPENDS_DIR}/SDKs/${OPENBSD_SDK_BASENAME}"
-export DEP_OPTS="NO_QT=1 build_CC=clang build_CXX=clang++ \
+export DEP_OPTS="build_CC=clang build_CXX=clang++ \
  CC='clang --target=${HOST} ${SYSROOT}' \
  CXX='clang++ --target=${HOST} ${SYSROOT} -stdlib=libc++' \
  LDFLAGS='-fuse-ld=lld' \
@@ -30,7 +30,7 @@ export DEP_OPTS="NO_QT=1 build_CC=clang build_CXX=clang++ \
 export GOAL="install"
 export BITCOIN_CONFIG="\
  --preset=dev-mode \
- -DBUILD_GUI=OFF \
+ -DBUILD_WEBUI=OFF \
  -DREDUCE_EXPORTS=ON \
  -DWITH_USDT=OFF \
 "

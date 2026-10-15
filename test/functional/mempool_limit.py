@@ -261,7 +261,7 @@ class MempoolLimitTest(BitcoinTestFramework):
             worst_feerate_btcvb = min(worst_feerate_btcvb, entry["fees"]["descendant"] / entry["descendantsize"])
         # Needs to be large enough to trigger eviction
         # (note that the mempool usage of a tx is about three times its vsize)
-        target_vsize_each = 50000
+        target_vsize_each = 49000
         assert_greater_than(target_vsize_each * 2 * 3, node.getmempoolinfo()["maxmempool"] - node.getmempoolinfo()["bytes"])
         # Should be a true CPFP: parent's feerate is just below mempool min feerate
         parent_feerate = mempoolmin_feerate - Decimal("0.0000001")  # 0.01 sats/vbyte below min feerate
@@ -282,9 +282,10 @@ class MempoolLimitTest(BitcoinTestFramework):
         for wtxid in [tx_parent_just_below["wtxid"], tx_child_just_above["wtxid"]]:
             assert_equal(res["tx-results"][wtxid]["error"], "mempool full")
 
-        self.log.info('Test passing a value below the minimum (5 MB) to -maxmempool throws an error')
+        # (Chains: 40 times the cluster size limit of 99 kvB, rounded up)
+        self.log.info('Test passing a value below the minimum (4 MB) to -maxmempool throws an error')
         self.stop_node(0)
-        self.nodes[0].assert_start_raises_init_error(["-maxmempool=4"], "Error: -maxmempool must be at least 5 MB")
+        self.nodes[0].assert_start_raises_init_error(["-maxmempool=3"], "Error: -maxmempool must be at least 4 MB")
 
         self.test_mid_package_eviction_success()
         self.test_mid_package_replacement()

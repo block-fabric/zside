@@ -13,13 +13,13 @@ LIBCXX_DIR="/cxx_build/"
 LIBCXX_FLAGS="-fsanitize=thread -nostdinc++ -nostdlib++ -isystem ${LIBCXX_DIR}include/c++/v1 -L${LIBCXX_DIR}lib -Wl,-rpath,${LIBCXX_DIR}lib -lc++ -lc++abi -lpthread -Wno-unused-command-line-argument"
 export PACKAGES="clang-${APT_LLVM_V} llvm-${APT_LLVM_V} llvm-${APT_LLVM_V}-dev libclang-${APT_LLVM_V}-dev libclang-rt-${APT_LLVM_V}-dev python3-zmq python3-pip"
 export PIP_PACKAGES="--break-system-packages pycapnp"
-export DEP_OPTS="CC=clang CXX=clang++ CXXFLAGS='${LIBCXX_FLAGS}' NO_QT=1"
+export DEP_OPTS="CC=clang CXX=clang++ CXXFLAGS='${LIBCXX_FLAGS}'"
 export GOAL="install"
 export CI_LIMIT_STACK_SIZE=1
 # Disable fortification with -U_FORTIFY_SOURCE to work around https://github.com/bitcoin/bitcoin/issues/30586
 export BITCOIN_CONFIG="\
   --preset=dev-mode \
-  -DBUILD_GUI=OFF \
+  -DBUILD_WEBUI=OFF \
   -DSANITIZERS=thread \
   -DAPPEND_CPPFLAGS='-DARENA_DEBUG -DDEBUG_LOCKCONTENTION -D_LIBCPP_REMOVE_TRANSITIVE_INCLUDES -U_FORTIFY_SOURCE' \
 "

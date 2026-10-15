@@ -7,6 +7,7 @@ target_sources(fuzz
     coincontrol.cpp
     coinselection.cpp
     crypter.cpp
+    drivechain_notifications.cpp
     fees.cpp
     scriptpubkeyman.cpp
     spend.cpp

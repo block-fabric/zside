@@ -57,13 +57,11 @@ Release Process
   - Run the script. It works fine in CPython, but PyPy is much faster (seconds instead of minutes): `pypy3 contrib/devtools/headerssync-params.py`.
   - Paste the output defining the header `commitment_period` and `redownload_buffer_size` into the mainnet section of [`src/kernel/chainparams.cpp`](/src/kernel/chainparams.cpp).
 - Clear the release notes and move them to the wiki (see "Write the release notes" below).
-- Translations on Transifex:
-    - Pull translations from Transifex into the master branch.
-    - Create [a new resource](https://app.transifex.com/bitcoin/bitcoin/content/) named after the major version with the slug `qt-translation-<RRR>x`, where `RRR` is the major branch number padded with zeros. Use `src/qt/locale/bitcoin_en.ts` to create it.
-    - In the project workflow settings, ensure that [Translation Memory Fill-up](https://help.transifex.com/en/articles/6224817-setting-up-translation-memory-fill-up) is enabled and that [Translation Memory Context Matching](https://help.transifex.com/en/articles/6224753-translation-memory-with-context) is disabled.
-    - Update the Transifex slug in [`.tx/config`](/.tx/config) to the slug of the resource created in the first step. This identifies which resource the translations will be synchronized from.
-    - Make an announcement that translators can start translating for the new version. You can use one of the [previous announcements](https://app.transifex.com/bitcoin/communication/) as a template.
-    - Change the auto-update URL for the resource to `master`, e.g. `https://raw.githubusercontent.com/bitcoin/bitcoin/master/src/qt/locale/bitcoin_en.ts`. (Do this only after the previous steps, to prevent an auto-update from interfering.)
+- Translations: pull them and make the catalogs of chains-app again, as
+  [translation_process.md](translation_process.md) says (`tx pull --all --force`, then
+  `npm run i18n` in `src/webui/app`). Chains takes the catalogs of Bitcoin Core: when Bitcoin Core
+  opens the resource of a newer major version on Transifex, update its slug in
+  [`.tx/config`](/.tx/config).
 
 #### After branch-off (on the major release branch)
 
@@ -71,8 +69,6 @@ Release Process
 - Create the draft, named "*version* Release Notes Draft", as a [collaborative wiki](https://github.com/bitcoin-core/bitcoin-devwiki/wiki/_new).
 - Clear the release notes: `cp doc/release-notes-empty-template.md doc/release-notes.md`
 - Create a pinned meta-issue for testing the release candidate (see [this issue](https://github.com/bitcoin/bitcoin/issues/27621) for an example) and provide a link to it in the release announcements where useful.
-- Translations on Transifex
-    - Change the auto-update URL for the new major version's resource away from `master` and to the branch, e.g. `https://raw.githubusercontent.com/bitcoin/bitcoin/<branch>/src/qt/locale/bitcoin_en.ts`. Do not forget this or it will keep tracking the translations on master instead, drifting away from the specific major release.
 - Prune inputs from the qa-assets repo (See [pruning
   inputs](https://github.com/bitcoin-core/qa-assets#pruning-inputs)).
 
@@ -114,6 +110,25 @@ For the period during which the notes are being edited on the wiki, the version 
 Generate list of authors:
 
     git log --format='- %aN' v(current version, e.g. 25.0)..v(new version, e.g. 25.1) | grep -v 'merge-script' | sort -fiu
+
+### The release of chains-app
+
+The Guix builds make the programs of the node (without the GUI). The GUI, chains-app, is released
+by the `deploy-app` target, from a build without the test hooks (`-DWEBUI_TEST_HOOKS=OFF`, the
+default; `deploy-app` refuses a build that has them):
+
+```sh
+# Linux: release-app/chains-app-<version>-x86_64-linux-gnu.tar.gz and SHA256SUMS
+cmake -B build && cmake --build build --target deploy-app
+# Windows (cross-compiled, see doc/build-windows.md): release-app/chains-app-<version>-win64.zip,
+# -setup.exe and SHA256SUMS
+make -C depends HOST=x86_64-w64-mingw32
+cmake -B build_win --toolchain depends/x86_64-w64-mingw32/toolchain.cmake
+cmake --build build_win --target deploy-app
+```
+
+Before it, run the tests of the app ([webui.md](webui.md#tests) and
+[webui-verification.md](webui-verification.md)).
 
 ### Setup and perform Guix builds
 

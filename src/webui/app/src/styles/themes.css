@@ -1,0 +1,268 @@
+/* The looks of chains-app. Colours come from the themes of chains-qt (src/qt/theme.cpp), given
+   depth here: a page colour, a surface for panels and cards, a raised colour for controls, and an
+   ambient glow of the accent behind the page. Midnight, the default, is the look of chains-app
+   itself: a charcoal base, soft depth, a lime accent. The classic Drivechain theme takes its
+   colours from QDarkStyleSheet (MIT), as chains-qt does. --accent fills (buttons, the current
+   page, bars); --accent-fg is the accent drawn on the page (icons, a word, a line).
+   Every pair of text and background colours here passes WCAG AA (test/contrast.test.ts). */
+
+:root,
+:root[data-theme='light'] {
+  --bg: #eef1f4;
+  --surface: #ffffff;
+  --surface-2: #f6f8fa;
+  --raised: #e8ecf0;
+  --line: #dde2e8;
+  --line-strong: #c3cbd4;
+  --text: #15191e;
+  --text-muted: #525c69;
+  /* The chevron of the dropdowns (Icon "chevron"), in --text-muted: test/controls.test.ts keeps them equal. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23525c69' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  color-scheme: light;
+  --text-faint: #646e7a;
+  --accent: #087a52;
+  --accent-strong: #06663f;
+  --accent-soft: #dcf3e8;
+  --accent-fg: #087a52;
+  --on-accent: #ffffff;
+  --link: #076b47;
+  --positive: #087a52;
+  --negative: #b8302a;
+  --warning: #8a5000;
+  --warning-soft: #fff1d6;
+  --danger-soft: #fde4e2;
+  --focus: #2b7cff;
+  --shadow: 0 1px 2px rgb(23 26 31 / 6%), 0 8px 24px rgb(23 26 31 / 8%);
+  --shadow-card: 0 1px 1px rgb(23 26 31 / 4%), 0 10px 30px -12px rgb(16 60 40 / 16%);
+  --overlay: rgb(16 20 26 / 45%);
+  --chain-link: #c3cbd4;
+  /* The ambient light behind the page, and the light from above on cards. */
+  --ambient: rgb(8 122 82 / 9%);
+  --ambient-2: rgb(43 124 255 / 6%);
+  --card-top: rgb(255 255 255 / 0%);
+  --chart-fill: rgb(8 122 82 / 22%);
+  --font-ui: 'Inter Variable', 'Segoe UI', 'Noto Sans', system-ui, sans-serif;
+  --font-num: 'Inter Variable', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'DejaVu Sans Mono', ui-monospace, monospace;
+  --radius-s: 8px;
+  --radius-m: 12px;
+  --radius-l: 16px;
+  --radius-xl: 20px;
+}
+
+:root[data-theme='midnight'] {
+  --bg: #111413;
+  --surface: #191d1b;
+  --surface-2: #1e2320;
+  --raised: #272d29;
+  --line: #262c29;
+  --line-strong: #37403b;
+  --text: #eef3ee;
+  --text-muted: #a9b4ad;
+  /* The chevron of the dropdowns (Icon "chevron"), in --text-muted: test/controls.test.ts keeps them equal. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a9b4ad' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  color-scheme: dark;
+  --text-faint: #8c9790;
+  --accent: #b5f27e;
+  --accent-strong: #cdf8a8;
+  --accent-soft: #263521;
+  --accent-fg: #b5f27e;
+  --on-accent: #10200a;
+  --link: #bff590;
+  --positive: #94e48b;
+  --negative: #ff8577;
+  --warning: #f4c662;
+  --warning-soft: #352d17;
+  --danger-soft: #3b1d1a;
+  --focus: #cdf8a8;
+  --shadow: 0 1px 2px rgb(0 0 0 / 45%), 0 14px 36px rgb(0 0 0 / 40%);
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 3%) inset, 0 18px 40px -18px rgb(0 0 0 / 70%);
+  --overlay: rgb(4 6 5 / 65%);
+  --chain-link: #37403b;
+  --ambient: rgb(140 220 90 / 21%);
+  --ambient-2: rgb(90 170 70 / 14%);
+  --card-top: rgb(200 255 170 / 4%);
+  --chart-fill: rgb(181 242 126 / 30%);
+  --radius-xl: 22px;
+}
+
+:root[data-theme='dark'] {
+  --bg: #141619;
+  --surface: #1b1e22;
+  --surface-2: #202328;
+  --raised: #292d33;
+  --line: #2a2e35;
+  --line-strong: #3b414a;
+  --text: #e9ebee;
+  --text-muted: #a6aeb9;
+  /* The chevron of the dropdowns (Icon "chevron"), in --text-muted: test/controls.test.ts keeps them equal. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a6aeb9' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  color-scheme: dark;
+  --text-faint: #8b939f;
+  --accent: #5aa6ff;
+  --accent-strong: #8cc0ff;
+  --accent-soft: #182b42;
+  --accent-fg: #7ab4ff;
+  --on-accent: #051221;
+  --link: #8cc0ff;
+  --positive: #45d394;
+  --negative: #ff7a70;
+  --warning: #f5b544;
+  --warning-soft: #332611;
+  --danger-soft: #3a1714;
+  --focus: #8cc0ff;
+  --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 10px 30px rgb(0 0 0 / 35%);
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 3%) inset, 0 16px 36px -18px rgb(0 0 0 / 65%);
+  --overlay: rgb(0 0 0 / 60%);
+  --chain-link: #3b414a;
+  --ambient: rgb(90 166 255 / 12%);
+  --ambient-2: rgb(120 90 255 / 7%);
+  --card-top: rgb(180 210 255 / 4%);
+  --chart-fill: rgb(90 166 255 / 30%);
+  --radius-xl: 20px;
+}
+
+:root[data-theme='ocean'] {
+  --bg: #04202a;
+  --surface: #072a36;
+  --surface-2: #0a3240;
+  --raised: #123f4e;
+  --line: #164556;
+  --line-strong: #23596c;
+  --text: #d6f0f5;
+  --text-muted: #9cc4ce;
+  /* The chevron of the dropdowns (Icon "chevron"), in --text-muted: test/controls.test.ts keeps them equal. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239cc4ce' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  color-scheme: dark;
+  --text-faint: #86b0bb;
+  --accent: #2ec4b6;
+  --accent-strong: #5fdcd0;
+  --accent-soft: #0d3f45;
+  --accent-fg: #2ec4b6;
+  --on-accent: #032027;
+  --link: #74d8f0;
+  --positive: #5fe0a6;
+  --negative: #ff8a7a;
+  --warning: #f3c969;
+  --warning-soft: #2e3215;
+  --danger-soft: #3b1f22;
+  --focus: #74d8f0;
+  --shadow: 0 1px 2px rgb(0 10 14 / 50%), 0 12px 30px rgb(0 10 14 / 40%);
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 4%) inset, 0 16px 36px -18px rgb(0 8 12 / 75%);
+  --overlay: rgb(1 14 19 / 65%);
+  --chain-link: #23596c;
+  --ambient: rgb(46 196 182 / 15%);
+  --ambient-2: rgb(116 216 240 / 9%);
+  --card-top: rgb(160 240 240 / 4%);
+  --chart-fill: rgb(46 196 182 / 32%);
+  --font-ui: 'Nunito Variable', 'Ubuntu', 'Cantarell', system-ui, sans-serif;
+  --font-num: 'Nunito Variable', system-ui, sans-serif;
+  --radius-s: 9px;
+  --radius-m: 14px;
+  --radius-l: 20px;
+  --radius-xl: 24px;
+}
+
+:root[data-theme='matrix'] {
+  --bg: #000000;
+  --surface: #020c05;
+  --surface-2: #041509;
+  --raised: #061e0c;
+  --line: #0b3a18;
+  --line-strong: #12602a;
+  --text: #33ff66;
+  --text-muted: #2bc955;
+  /* The chevron of the dropdowns (Icon "chevron"), in --text-muted: test/controls.test.ts keeps them equal. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232bc955' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  color-scheme: dark;
+  --text-faint: #23a646;
+  --accent: #00ff41;
+  --accent-strong: #7dff9d;
+  --accent-soft: #04260f;
+  --accent-fg: #00ff41;
+  --on-accent: #000000;
+  --link: #7dff9d;
+  --positive: #00ff41;
+  --negative: #ff5c5c;
+  --warning: #e6ff4d;
+  --warning-soft: #1e2306;
+  --danger-soft: #2a0909;
+  --focus: #7dff9d;
+  --shadow: 0 0 0 1px #0b3a18, 0 0 24px rgb(0 255 65 / 8%);
+  --shadow-card: 0 0 0 1px #0b3a18, 0 0 28px rgb(0 255 65 / 7%);
+  --overlay: rgb(0 0 0 / 75%);
+  --chain-link: #12602a;
+  --ambient: rgb(0 255 65 / 10%);
+  --ambient-2: rgb(0 255 65 / 5%);
+  --card-top: rgb(0 255 65 / 3%);
+  --chart-fill: rgb(0 255 65 / 30%);
+  --font-ui: 'JetBrains Mono Variable', 'DejaVu Sans Mono', ui-monospace, monospace;
+  --font-num: 'JetBrains Mono Variable', ui-monospace, monospace;
+  --radius-s: 2px;
+  --radius-m: 3px;
+  --radius-l: 4px;
+  --radius-xl: 6px;
+}
+
+:root[data-theme='qdarkstyle'] {
+  --bg: #19232d;
+  --surface: #1c2a36;
+  --surface-2: #213242;
+  --raised: #32414b;
+  --line: #32414b;
+  --line-strong: #455364;
+  --text: #f0f0f0;
+  --text-muted: #b5bfc8;
+  /* The chevron of the dropdowns (Icon "chevron"), in --text-muted: test/controls.test.ts keeps them equal. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b5bfc8' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  color-scheme: dark;
+  --text-faint: #9aa6b1;
+  --accent: #1464a0;
+  --accent-strong: #66b4e2;
+  --accent-soft: #132f48;
+  --accent-fg: #62b4f0;
+  --on-accent: #ffffff;
+  --link: #66b4e2;
+  --positive: #5bcb85;
+  --negative: #f39188;
+  --warning: #e8b54d;
+  --warning-soft: #3a3320;
+  --danger-soft: #3d2023;
+  --focus: #3da2e0;
+  --shadow: 0 1px 3px rgb(0 0 0 / 40%);
+  --shadow-card: 0 1px 3px rgb(0 0 0 / 35%), 0 12px 28px -16px rgb(0 0 0 / 60%);
+  --overlay: rgb(10 15 20 / 65%);
+  --chain-link: #455364;
+  --ambient: rgb(20 140 210 / 12%);
+  --ambient-2: rgb(20 100 160 / 8%);
+  --card-top: rgb(255 255 255 / 2.5%);
+  --chart-fill: rgb(61 162 224 / 30%);
+  --font-ui: system-ui, 'Segoe UI', 'Noto Sans', sans-serif;
+  --font-num: system-ui, 'Segoe UI', sans-serif;
+  --radius-s: 4px;
+  --radius-m: 5px;
+  --radius-l: 7px;
+  --radius-xl: 9px;
+}
+
+/* A font chosen apart from the colours (Settings, Display: the custom look of chains-qt). */
+:root[data-theme][data-font='inter'] {
+  --font-ui: 'Inter Variable', 'Segoe UI', 'Noto Sans', system-ui, sans-serif;
+  --font-num: 'Inter Variable', 'Segoe UI', system-ui, sans-serif;
+}
+:root[data-theme][data-font='nunito'] {
+  --font-ui: 'Nunito Variable', 'Ubuntu', 'Cantarell', system-ui, sans-serif;
+  --font-num: 'Nunito Variable', system-ui, sans-serif;
+}
+:root[data-theme][data-font='mono'] {
+  --font-ui: 'JetBrains Mono Variable', 'DejaVu Sans Mono', ui-monospace, monospace;
+  --font-num: 'JetBrains Mono Variable', ui-monospace, monospace;
+}
+:root[data-theme][data-font='system'] {
+  --font-ui: system-ui, 'Segoe UI', 'Noto Sans', sans-serif;
+  --font-num: system-ui, 'Segoe UI', sans-serif;
+}
+/* The font of amounts: the monospaced font of the desktop (FontForMoney "best system"). */
+:root[data-theme][data-money-font='system'] {
+  --font-num: ui-monospace, 'DejaVu Sans Mono', monospace;
+}

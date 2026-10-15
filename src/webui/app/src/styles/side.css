@@ -1,0 +1,257 @@
+/* The pages of a sidechain (Peg, Merged mining, its home): shared pieces, in the colour tokens of
+   themes.css only. */
+
+/* The peg, drawn: the mainchain and this chain, coins going down and up between them. */
+.side-bridge {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, 1.2fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.8rem;
+  padding: 1rem 1.2rem;
+}
+.side-chain {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+.side-chain .caps {
+  display: block;
+}
+.side-chain strong {
+  font-size: 1.15rem;
+  overflow-wrap: anywhere;
+}
+.side-chain.end {
+  text-align: right;
+  align-items: flex-end;
+}
+.side-flows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.side-flow {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.side-flow .line {
+  flex: 1;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--line-strong), var(--accent));
+}
+.side-flow.up .line {
+  background: linear-gradient(90deg, var(--accent), var(--line-strong));
+}
+.side-flow svg {
+  color: var(--accent-fg);
+  flex: none;
+}
+
+/* Rows of figures: a stat each. */
+.side-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(12.5rem, 100%), 1fr));
+  gap: 0.8rem;
+  margin: 1rem 0;
+}
+.side-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.85rem 1rem;
+  min-width: 0;
+}
+.side-stat strong {
+  font-size: 1.35rem;
+  overflow-wrap: anywhere;
+}
+.side-stat .faint {
+  font-size: 0.82rem;
+}
+
+/* Two columns that become one on a narrow window. */
+.side-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(24rem, 100%), 1fr));
+  gap: 1rem;
+  margin-bottom: 1rem;
+  align-items: start;
+}
+.side-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.side-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  max-width: 80ch;
+}
+.side-warn {
+  color: var(--warning);
+}
+.side-bad {
+  color: var(--negative);
+}
+.side-good {
+  color: var(--positive);
+}
+
+/* A value to copy: an address, a hash. */
+.side-code {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m, 10px);
+  background: var(--surface-2);
+  min-width: 0;
+}
+.side-code .mono {
+  flex: 1;
+  overflow-wrap: anywhere;
+  font-size: 0.9rem;
+}
+
+/* Tables of the pages: rows, a pill for the state of each. */
+.side-table-wrap {
+  overflow-x: auto;
+  container-type: inline-size;
+}
+/* In a narrow panel (a window of 480 px), a table is a list of cards: every cell under the words of its column
+   (use:stacked), none hidden behind a scroll (audit port-1 #9). */
+@container (max-width: 36rem) {
+  table.side-table,
+  table.side-table tbody,
+  table.side-table tr,
+  table.side-table td {
+    display: block;
+  }
+  table.side-table thead {
+    display: none;
+  }
+  table.side-table tr {
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+  table.side-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 0.2rem 0.8rem;
+    border: 0;
+    text-align: right;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  table.side-table td[data-label]::before {
+    content: attr(data-label);
+    flex: none;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    text-align: left;
+  }
+  table.side-table td.cut {
+    max-width: none;
+    white-space: normal;
+  }
+}
+table.side-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+table.side-table th {
+  text-align: left;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 0.45rem 0.8rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+table.side-table td {
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+table.side-table tr.chosen {
+  background: var(--accent-soft);
+}
+table.side-table .end {
+  text-align: right;
+}
+table.side-table .cut {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-empty {
+  padding: 1rem 1.2rem;
+  color: var(--text-muted);
+}
+
+/* The connection to the mainchain node: a dot and a word. */
+.side-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.side-link .dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.side-link.on {
+  color: var(--positive);
+}
+.side-link.on .dot {
+  background: var(--positive);
+}
+.side-link.off {
+  color: var(--negative);
+}
+.side-link.off .dot {
+  background: var(--negative);
+}
+
+/* The mainchain blocks of a window, one mark each: committed to this chain or not. */
+.side-blocks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(0.95rem, 1fr));
+  gap: 3px;
+}
+.side-blocks span {
+  height: 1.6rem;
+  border-radius: 3px;
+  background: var(--raised);
+}
+.side-blocks span.hit {
+  background: var(--accent);
+}
+.side-blocks span.miss {
+  background: var(--raised);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+@media (max-width: 760px) {
+  .side-bridge {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .side-chain.end {
+    text-align: left;
+    align-items: flex-start;
+  }
+}

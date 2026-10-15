@@ -1083,11 +1083,6 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         if not self.is_ipc_compiled():
             raise SkipTest("ipc has not been compiled.")
 
-    def skip_if_no_gui(self):
-        """Skip the running test if the GUI has not been compiled."""
-        if not self.is_gui_compiled():
-            raise SkipTest("GUI has not been compiled.")
-
     def skip_if_no_previous_releases(self):
         """Skip the running test if previous releases are not available."""
         if not self.has_previous_releases():
@@ -1169,10 +1164,6 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
     def is_ipc_compiled(self):
         """Checks whether ipc was compiled."""
         return self.config.getboolean("components", "ENABLE_IPC")
-
-    def is_gui_compiled(self):
-        """Checks whether the GUI was compiled."""
-        return self.config.getboolean("components", "BUILD_GUI")
 
     def has_blockfile(self, node, filenum: str):
         return (node.blocks_path/ f"blk{filenum}.dat").is_file()

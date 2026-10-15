@@ -933,6 +933,7 @@ RPCMethod rescanblockchain()
     case CWallet::ScanResult::FAILURE:
         throw JSONRPCError(RPC_MISC_ERROR, "Rescan failed. Potentially corrupted data files.");
     case CWallet::ScanResult::USER_ABORT:
+        if (pwallet->IsUnloading() || pwallet->chain().shutdownRequested()) throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted: the wallet is being unloaded. It resumes the rescan when it is loaded again.");
         throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted.");
     } // no default case, so the compiler can warn about missing cases
     UniValue response(UniValue::VOBJ);

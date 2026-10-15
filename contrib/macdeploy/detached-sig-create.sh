@@ -9,12 +9,9 @@ set -e
 SIGNAPPLE=signapple
 TEMPDIR=sign.temp
 
-BUNDLE_ROOT=dist
-BUNDLE_NAME="Bitcoin-Qt.app"
-UNSIGNED_BUNDLE="${BUNDLE_ROOT}/${BUNDLE_NAME}"
-UNSIGNED_BINARY="${UNSIGNED_BUNDLE}/Contents/MacOS/Bitcoin-Qt"
+FIRST_BINARY=$(find . -maxdepth 3 -wholename "*/bin/*" -type f | head -n 1)
 
-ARCH=$(${SIGNAPPLE} info ${UNSIGNED_BINARY} | head -n 1 | cut -d " " -f 1)
+ARCH=$(${SIGNAPPLE} info "${FIRST_BINARY}" | head -n 1 | cut -d " " -f 1)
 
 OUTDIR="osx/${ARCH}-apple-darwin"
 OUTROOT="${TEMPDIR}/${OUTDIR}"
@@ -37,11 +34,6 @@ printf "Enter the passphrase for %s: " "$2"
 read api_key_pass
 printf "\n"
 stty echo
-
-# Sign and notarize app bundle
-${SIGNAPPLE} sign -f --hardened-runtime --detach "${OUTROOT}/${BUNDLE_ROOT}" --passphrase "${cs_key_pass}" "$1" "${UNSIGNED_BUNDLE}"
-${SIGNAPPLE} apply "${UNSIGNED_BUNDLE}" "${OUTROOT}/${BUNDLE_ROOT}/${BUNDLE_NAME}"
-${SIGNAPPLE} notarize --detach "${OUTROOT}/${BUNDLE_ROOT}" --passphrase "${api_key_pass}" "$2" "$3" "${UNSIGNED_BUNDLE}"
 
 # Sign each binary
 find . -maxdepth 3 \( -wholename "*/bin/*" -o -wholename "*/libexec/*" \) -type f -exec realpath --relative-to=. {} \; | while read -r bin

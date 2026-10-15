@@ -13,6 +13,10 @@
 inline constexpr unsigned int MAX_BLOCK_SERIALIZED_SIZE{4'000'000};
 /** The maximum allowed weight for a block, see BIP 141 (network rule) */
 inline constexpr unsigned int MAX_BLOCK_WEIGHT{4'000'000};
+/** Chains: the weight the transactions of a block other than the coinbase may have on the main, test and signet networks (Consensus::Params::max_block_tx_weight). */
+inline constexpr unsigned int CHAINS_MAX_BLOCK_TX_WEIGHT{400'000};
+/** Chains: the weight of a whole block on those networks; the rest is the coinbase's (Consensus::Params::max_block_weight). */
+inline constexpr unsigned int CHAINS_MAX_BLOCK_WEIGHT{800'000};
 /** The maximum allowed number of signature check operations in a block (network rule) */
 inline constexpr int64_t MAX_BLOCK_SIGOPS_COST{80'000};
 /** Coinbase transaction outputs can only be spent after this number of new blocks (network rule) */

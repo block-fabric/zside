@@ -8,7 +8,7 @@ export LC_ALL=C.UTF-8
 
 export HOST=arm-linux-gnueabihf
 export DPKG_ADD_ARCH="armhf"
-export PACKAGES="python3-pip python3-zmq g++-arm-linux-gnueabihf libc6:armhf libstdc++6:armhf libfontconfig1:armhf libxcb1:armhf"
+export PACKAGES="python3-pip python3-zmq g++-arm-linux-gnueabihf libc6:armhf libstdc++6:armhf"
 export PIP_PACKAGES="--break-system-packages pycapnp"
 export CONTAINER_NAME=ci_arm_linux
 export CI_IMAGE_NAME_TAG="mirror.gcr.io/debian:trixie"  # Check that https://packages.debian.org/trixie/g++-arm-linux-gnueabihf (version 14.x, similar to guix) can cross-compile
@@ -21,4 +21,5 @@ export BITCOIN_CONFIG=" \
   --preset=dev-mode \
   -DREDUCE_EXPORTS=ON \
   -DCMAKE_CXX_FLAGS='-Wno-psabi -Wno-error=maybe-uninitialized' \
+  -DBUILD_WEBUI=OFF \
 "

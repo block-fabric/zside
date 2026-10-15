@@ -15,7 +15,6 @@ Other options may work, but are not officially tested:
 
 The instructions below work on Ubuntu and Debian. Make sure the distribution's `g++-mingw-w64-x86-64-posix`
 package meets the minimum required GCC version specified in [dependencies.md](dependencies.md).
-If compiling with the GUI (default in depends), at least GCC version 13 is required.
 
 Installing Windows Subsystem for Linux
 ---------------------------------------
@@ -32,7 +31,10 @@ installing the toolchain will be different.
 See [README.md](../depends/README.md) in the depends directory for which
 dependencies to install and [dependencies.md](dependencies.md) for a complete overview.
 
-If you want to build the Windows installer using the `deploy` build target, you will need [NSIS](https://nsis.sourceforge.io/Main_Page):
+The GUI, `chains-app` (an HTML interface in WebView2), is built by default from the depends
+for Windows. Its interface is built with Node.js and npm (`apt install nodejs npm`; the first
+build runs `npm ci`). If you want to build the release (a zip and an installer) using the
+`deploy-app` build target, you will need [NSIS](https://nsis.sourceforge.io/Main_Page):
 
     apt install nsis
 
@@ -76,7 +78,11 @@ if you do not need the debug information, you can prune it during install by cal
 cmake --install build --prefix /mnt/c/workspace/bitcoin --strip
 ```
 
-You can also create an installer using:
+You can also create the release of chains-app (`chains-app-<version>-win64.zip` and
+`-setup.exe`, with the programs of the node, in `build/release-app`) using:
 ```shell
-cmake --build build --target deploy
+cmake --build build --target deploy-app
 ```
+
+A release is built without the hooks of the end-to-end tests (`-DWEBUI_TEST_HOOKS=OFF`, the
+default); `deploy-app` refuses a build that has them. See [webui.md](webui.md).

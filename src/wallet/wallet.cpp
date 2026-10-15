@@ -192,7 +192,7 @@ bool RemoveWallet(WalletContext& context, const std::shared_ptr<CWallet>& wallet
     // A rescan under way (rescanblockchain, importdescriptors, a sidechain wallet's own background
     // scan through ScanForWalletTransactions) holds the wallet until it ends: stop it, so that the
     // wallet is released promptly. The RPC that started it fails with "Rescan aborted".
-    wallet->AbortRescan();
+    wallet->AbortRescansForUnload();
     WITH_LOCK(wallet->cs_wallet, wallet->WriteBestBlock());
 
     // Unregister with the validation interface which also drops shared pointers, and wait for a
@@ -301,8 +301,8 @@ void WaitForDeleteWallet(std::shared_ptr<CWallet>&& wallet)
     }
 
     // Stop a rescan that began after RemoveWallet aborted the ones under way: it would hold the
-    // wallet until its end.
-    wallet->AbortRescan();
+    // wallet until its end. (Rescans reserved from now on are aborted as well.)
+    wallet->AbortRescansForUnload();
 
     // Time to ditch our shared_ptr and wait for FlushAndDeleteWallet call.
     wallet.reset();
@@ -1376,6 +1376,31 @@ void CWallet::MarkInputsDirty(const CTransactionRef& tx)
     }
 }
 
+std::vector<Txid> CWallet::GetMempoolDescendants(const Txid& txid) const
+{
+    AssertLockHeld(cs_wallet);
+    std::vector<Txid> in_mempool;
+    std::set<Txid> seen{txid};
+    std::vector<Txid> todo{txid};
+    while (!todo.empty()) {
+        const Txid now{todo.back()};
+        todo.pop_back();
+        const auto parent{mapWallet.find(now)};
+        if (parent == mapWallet.end()) continue;
+        for (unsigned int i = 0; i < parent->second.GetTx()->vout.size(); ++i) {
+            const auto range{mapTxSpends.equal_range(COutPoint(now, i))};
+            for (auto spend{range.first}; spend != range.second; ++spend) {
+                if (!seen.insert(spend->second).second) continue;
+                const auto child{mapWallet.find(spend->second)};
+                if (child == mapWallet.end()) continue;
+                if (child->second.InMempool()) in_mempool.push_back(spend->second);
+                todo.push_back(spend->second);
+            }
+        }
+    }
+    return in_mempool;
+}
+
 bool CWallet::AbandonTransaction(const Txid& hashTx)
 {
     LOCK(cs_wallet);
@@ -1390,6 +1415,12 @@ bool CWallet::AbandonTransaction(CWalletTx& tx)
     if (GetTxDepthInMainChain(tx) != 0 || tx.InMempool()) {
         return false;
     }
+    // Nor while a transaction spending it, or one further down, is still known to be in the mempool:
+    // abandoning marks those too, and they cannot be abandoned while there. The wallet can learn that
+    // a parent left the mempool before it learns that its children did (a BMM request whose change the
+    // next request spends, abandoned when a block makes it stale): it waits for the mempool's
+    // notifications instead.
+    if (!GetMempoolDescendants(tx.GetHash()).empty()) return false;
 
     auto try_updating_state = [](CWalletTx& wtx) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet) {
         // If the orig tx was not in block/mempool, none of its spends can be.
@@ -1595,14 +1626,23 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
     // (ShieldedNotes); abandoned, they are the account's again (and if it is mined after all, it is
     // the wallet's again).
     it = mapWallet.find(tx->GetHash());
-    if (((reason == MemPoolRemovalReason::CONFLICT || reason == MemPoolRemovalReason::REPLACED) &&
-         (drivechain::GetBmmRequest(*tx) || std::any_of(tx->vout.begin(), tx->vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); }))) ||
-        (reason == MemPoolRemovalReason::CONFLICT && zside::HasShieldedMarker(*tx))) {
-        if (it != mapWallet.end() && !it->second.isAbandoned() && GetTxDepthInMainChain(it->second) == 0 && !it->second.InMempool()) {
-            AbandonTransaction(tx->GetHash());
-            WalletLogPrintf("Abandoned drivechain or shielded transaction %s, which the mempool dropped for good\n", tx->GetHash().ToString());
+    if (it != mapWallet.end() &&
+        (((reason == MemPoolRemovalReason::CONFLICT || reason == MemPoolRemovalReason::REPLACED) &&
+          (drivechain::GetBmmRequest(*tx) || std::any_of(tx->vout.begin(), tx->vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); }))) ||
+         (reason == MemPoolRemovalReason::CONFLICT && zside::HasShieldedMarker(*tx)))) {
+        if (!it->second.isAbandoned() && GetTxDepthInMainChain(it->second) == 0 && !it->second.InMempool()) {
+            if (AbandonTransaction(it->second)) {
+                WalletLogPrintf("Abandoned drivechain or shielded transaction %s, which the mempool dropped and can never be mined\n", tx->GetHash().ToString());
+            } else {
+                // A transaction spending it (the next request, paid from its change; the next deposit,
+                // spending its treasury output; a shielded payment spending its change note) is still marked
+                // as in the mempool: the mempool notifies the removals of a parent and of its children in any
+                // order. Abandoned once the wallet learns that those left too.
+                m_drivechain_abandon_retry.insert(tx->GetHash());
+            }
         }
     }
+    RetryDrivechainAbandons();
 
     const Txid& txid = tx->GetHash();
 
@@ -1643,6 +1683,23 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
     }
 }
 
+void CWallet::RetryDrivechainAbandons()
+{
+    AssertLockHeld(cs_wallet);
+    for (auto txid{m_drivechain_abandon_retry.begin()}; txid != m_drivechain_abandon_retry.end();) {
+        const auto it{mapWallet.find(*txid)};
+        // Gone, abandoned already (as a descendant), mined, or back in the mempool: nothing to do.
+        if (it == mapWallet.end() || !it->second.isInactive() || it->second.isAbandoned() || it->second.InMempool()) {
+            txid = m_drivechain_abandon_retry.erase(txid);
+        } else if (AbandonTransaction(it->second)) {
+            WalletLogPrintf("Abandoned drivechain transaction %s, which the mempool dropped and can never be mined\n", txid->ToString());
+            txid = m_drivechain_abandon_retry.erase(txid);
+        } else {
+            ++txid;
+        }
+    }
+}
+
 void CWallet::blockConnected(const ChainstateRole& role, const interfaces::BlockInfo& block)
 {
     if (role.historical) {
@@ -1665,6 +1722,55 @@ void CWallet::blockConnected(const ChainstateRole& role, const interfaces::Block
         wallet_updated |= SyncTransaction(block.data->vtx[index], TxStateConfirmed{block.hash, block.height, static_cast<int>(index)});
         transactionRemovedFromMempool(block.data->vtx[index], MemPoolRemovalReason::BLOCK);
     }
+
+    // A BMM request is for the block after the one it names: once another block is the tip, it can
+    // never be mined. The mempool drops those it holds (and the wallet then abandons them, see
+    // transactionRemovedFromMempool); one the mempool never held (with -walletbroadcast=0, or one
+    // the user has yet to send) is abandoned here, which gives its coins back. (A deposit whose
+    // treasury input another deposit spent in a block is marked conflicted by SyncTransaction.)
+    // So is a deposit of the wallet's out of the mempool that does not spend the treasury output
+    // the sidechain has now: the mempool dropped it for another deposit (whatever the order the
+    // wallet learnt that in, and across a restart), or it was never sent and can no longer be. One
+    // that spends an unconfirmed transaction of the wallet's waits for that one.
+    std::vector<Txid> stale_requests;
+    std::vector<Txid> stale_deposits;
+    std::map<drivechain::SidechainId, interfaces::Chain::SidechainEscrow> escrows;
+    for (const auto& [txid, wtx] : mapWallet) {
+        if (!wtx.isInactive() || wtx.isAbandoned() || wtx.InMempool()) continue;
+        const CTransaction& tx{*wtx.GetTx()};
+        const auto request{drivechain::GetBmmRequest(tx)};
+        if (request) {
+            if (request->prev_main_block_hash != block.hash) stale_requests.push_back(txid);
+            continue;
+        }
+        std::optional<drivechain::SidechainId> slot;
+        for (const CTxOut& out : tx.vout) {
+            if ((slot = drivechain::ParseEscrowScript(out.scriptPubKey))) break;
+        }
+        if (!slot || !IsFromMe(tx)) continue;
+        if (std::any_of(tx.vin.begin(), tx.vin.end(), [&](const CTxIn& in) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet) {
+                const auto parent{mapWallet.find(in.prevout.hash)};
+                return parent != mapWallet.end() && GetTxDepthInMainChain(parent->second) == 0;
+            })) continue;
+        auto escrow{escrows.find(*slot)};
+        if (escrow == escrows.end()) escrow = escrows.emplace(*slot, chain().getSidechainEscrow(*slot)).first;
+        if (!escrow->second.active || !escrow->second.has_output) continue;
+        if (std::none_of(tx.vin.begin(), tx.vin.end(), [&](const CTxIn& in) { return in.prevout == escrow->second.outpoint; })) {
+            stale_deposits.push_back(txid);
+        }
+    }
+    for (const Txid& txid : stale_requests) {
+        // (An earlier one may have abandoned it already, as a descendant.)
+        if (const auto it{mapWallet.find(txid)}; it != mapWallet.end() && !it->second.isAbandoned() && AbandonTransaction(it->second)) {
+            WalletLogPrintf("Abandoned BMM request %s, for a block that can no longer be mined\n", txid.ToString());
+        }
+    }
+    for (const Txid& txid : stale_deposits) {
+        if (const auto it{mapWallet.find(txid)}; it != mapWallet.end() && !it->second.isAbandoned() && AbandonTransaction(it->second)) {
+            WalletLogPrintf("Abandoned deposit %s, whose treasury input another deposit spends\n", txid.ToString());
+        }
+    }
+    RetryDrivechainAbandons();
 
     // Update on disk if this block resulted in us updating a tx, or periodically every 144 blocks (~1 day)
     if (wallet_updated || block.height % 144 == 0) {
@@ -1939,8 +2045,9 @@ void CWallet::MaybeUpdateBirthTime(int64_t time)
  * @return Earliest timestamp that could be successfully scanned from. Timestamp
  * returned will be higher than startTime if relevant blocks could not be read.
  */
-int64_t CWallet::RescanFromTime(int64_t startTime, const WalletRescanReserver& reserver)
+int64_t CWallet::RescanFromTime(int64_t startTime, const WalletRescanReserver& reserver, bool* aborted)
 {
+    if (aborted) *aborted = false;
     // Find starting block. May be null if nCreateTime is greater than the
     // highest blockchain timestamp, in which case there is nothing that needs
     // to be scanned.
@@ -1950,8 +2057,8 @@ int64_t CWallet::RescanFromTime(int64_t startTime, const WalletRescanReserver& r
     WalletLogPrintf("%s: Rescanning last %i blocks\n", __func__, start ? WITH_LOCK(cs_wallet, return GetLastBlockHeight()) - start_height + 1 : 0);
 
     if (start) {
-        // TODO: this should take into account failure by ScanResult::USER_ABORT
         ScanResult result = ScanForWalletTransactions(start_block, start_height, /*max_height=*/{}, reserver, /*save_progress=*/false);
+        if (aborted) *aborted = result.status == ScanResult::USER_ABORT;
         if (result.status == ScanResult::FAILURE) {
             int64_t time_max;
             CHECK_NONFATAL(chain().findBlock(result.last_failed_block, FoundBlock().maxTime(time_max)));
@@ -2007,6 +2114,10 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
     double progress_end = chain().guessVerificationProgress(end_hash);
     double progress_current = progress_begin;
     int block_height = start_height;
+    // Until it ends, the wallet saves no best block past the scan (see WriteBestBlock); nor past a
+    // block it could not read.
+    WITH_LOCK(cs_wallet, m_rescan_resume_block = start_block);
+    bool read_failure{false};
     while (!fAbortRescan && !chain().shutdownRequested()) {
         if (progress_end - progress_begin > 0.0) {
             m_scanning_progress = (progress_current - progress_begin) / (progress_end - progress_begin);
@@ -2033,6 +2144,7 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
                 } else {
                     result.last_scanned_block = block_hash;
                     result.last_scanned_height = block_height;
+                    if (!read_failure) WITH_LOCK(cs_wallet, m_rescan_resume_block = block_hash);
                     fetch_block = false;
                 }
             } else {
@@ -2071,6 +2183,7 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
                 // scan succeeded, record block as most recent successfully scanned
                 result.last_scanned_block = block_hash;
                 result.last_scanned_height = block_height;
+                if (!read_failure) m_rescan_resume_block = block_hash;
 
                 if (!loc.IsNull()) {
                     WalletLogPrintf("Saving scan progress %d.\n", block_height);
@@ -2081,6 +2194,7 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
                 // could not scan block, keep scanning but record this block as the most recent failure
                 result.last_failed_block = block_hash;
                 result.status = ScanResult::FAILURE;
+                read_failure = true;
             }
         }
         if (max_height && block_height >= *max_height) {
@@ -2130,6 +2244,16 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
         WalletLogPrintf("Rescan completed in %15dms\n", Ticks<std::chrono::milliseconds>(reserver.now() - start_time));
         // zSide: the blocks the shielded account was to have scanned again, if these.
         if (result.status == ScanResult::SUCCESS && !max_height) WITH_LOCK(cs_wallet, ShieldedScanned(*this, start_height));
+    }
+    // A rescan that the unloading of the wallet or a shutdown stopped is resumed when the wallet is
+    // loaded again: the best block saved stays the block it got to. (One the user aborted is not.)
+    if (!((fAbortRescan && m_unloading) || chain().shutdownRequested())) {
+        WITH_LOCK(cs_wallet, m_rescan_resume_block.reset());
+    } else {
+        // (Saved now: the unloading may have saved the best block before this rescan began.)
+        LOCK(cs_wallet);
+        WriteBestBlock();
+        WalletLogPrintf("The rescan resumes from block %s when the wallet is loaded again\n", m_rescan_resume_block->ToString());
     }
     return result;
 }
@@ -4735,9 +4859,11 @@ void CWallet::WriteBestBlock() const
 {
     AssertLockHeld(cs_wallet);
 
-    if (!m_last_block_processed.IsNull()) {
+    // Not past a rescan under way, or one the unloading of the wallet stopped.
+    const uint256& best_block{m_rescan_resume_block ? *m_rescan_resume_block : m_last_block_processed};
+    if (!best_block.IsNull()) {
         CBlockLocator loc;
-        chain().findBlock(m_last_block_processed, FoundBlock().locator(loc));
+        chain().findBlock(best_block, FoundBlock().locator(loc));
 
         if (!loc.IsNull()) {
             WalletBatch batch(GetDatabase());

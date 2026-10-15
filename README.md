@@ -12,7 +12,12 @@ coins in it move without showing who pays whom, or how much; only the sender and
 | RPC port | 9454 (testnet 19454, signet 39454, regtest 29454) |
 
 zSide is the [sidechain template](doc/sidechain.md) of Chains with the shielded pool added. A zSide node needs a
-Chains node (`chainsd` or `chains-qt`) to follow, reached over its RPC interface.
+Chains node (`chainsd` or `chains-app`) to follow, reached over its RPC interface.
+
+Its GUI is `zside-app`: the node and its wallet with an HTML interface in a native web view
+(WebKitGTK on Linux, WebView2 on Windows), with pages for the shielded wallet: private payments with
+memos, shielding and unshielding, the memos received, melt & cast and the notes
+([doc/webui.md](doc/webui.md)). There is no Qt GUI.
 
 ## Installing
 
@@ -24,12 +29,12 @@ On Debian or Ubuntu (24.04):
 
 ```sh
 sudo apt install build-essential cmake pkgconf python3 libevent-dev libboost-dev \
-    libsqlite3-dev libzmq3-dev qt6-base-dev qt6-tools-dev qt6-l10n-tools libqrencode-dev
+    libsqlite3-dev libzmq3-dev libgtk-3-dev libwebkit2gtk-4.1-dev nodejs npm
 # The Orchard library is Rust: install a current stable toolchain.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-git clone https://github.com/block-fabric/zside.git
-cd zside
-cmake -B build -DBUILD_GUI=ON
+git clone https://github.com/block-fabric/zside-app.git
+cd zside-app
+cmake -B build
 cmake --build build -j$(nproc)
 ```
 
@@ -37,14 +42,15 @@ CMake builds the Rust library (`src/rust`) with `cargo`, with the crate versions
 `Cargo.lock`; the first build downloads them. It looks for `cargo` in the `PATH` and in
 `~/.cargo/bin`. `-DZSIDE_CARGO_JOBS=<n>` sets how many jobs cargo uses (default 4).
 
-Leave out `-DBUILD_GUI=ON` (and the Qt packages) for a node without a window. Other systems and
+`-DBUILD_WEBUI=OFF` (and no GTK, WebKitGTK or Node.js) for a node without a window. Windows: cross-built
+with the depends system (`make -C depends HOST=x86_64-w64-mingw32 NO_QT=1`), see [doc/webui.md](doc/webui.md). Other systems and
 options: [doc/build-unix.md](doc/build-unix.md) and the other `doc/build-*.md`.
 
 The programs, in `build/bin`:
 
 | Program | What it is |
 |---|---|
-| `zside-qt` | the wallet, with its window |
+| `zside-app` | the wallet, with its window |
 | `zsided` | the node, without a window |
 | `zside-cli` | commands for a running node or wallet |
 | `zside-wallet`, `zside-tx`, `zside-util` | tools that work without a node |
@@ -58,14 +64,14 @@ set to the folder of its programs.
 First a Chains node, with RPC on (`server=1` in `chains.conf`, or `-server`), on the same network.
 
 The simplest is to let the Chains wallet run zSide: in its **Sidechain Nodes** window, select
-zSide, press **Locate programs…** and choose the folder with `zsided` and `zside-qt`, then **Start node**
+zSide, press **Locate programs…** and choose the folder with `zsided` and `zside-app`, then **Start node**
 or **Open wallet**.
 
 By hand, on the same computer as the Chains node:
 
 ```sh
-zside-qt                 # the main network
-zside-qt -testnet        # the test network
+zside-app                # the main network
+zside-app -testnet       # the test network
 ```
 
 It finds the Chains node by itself: RPC on 127.0.0.1 at the port of the network, and the cookie
@@ -109,12 +115,12 @@ options are read only from the `[test]` section.
 
 ## Coins in and out
 
-- **Deposit.** In zSide, get a deposit address (`getdepositaddress`, or the **Mainchain** page):
-  `s6_<address>_<checksum>`. In Chains, send to it from the **Sidechains** page, or
+- **Deposit.** In zSide, get a deposit address (`getdepositaddress`, or the **Peg** page):
+  `s6_<address>_<checksum>`. In Chains, send to it from the **Sidechains** page (or let zside-app's deposit helper do it), or
   `chains-cli createsidechaindeposit 6 <deposit address> <amount>`. The coins appear with the
   next zSide block.
 - **Withdraw.** `createwithdrawal <Chains address> <amount> ( <fee for Chains miners> )`, or the
-  **Mainchain** page. Withdrawals are paid in bundles that Chains miners vote on (about three
+  **Peg** page. Withdrawals are paid in bundles that Chains miners vote on (about three
   months on the main network, 600 blocks on the test network). A withdrawal not in the bundle
   being voted on can be taken back: `refundwithdrawal <txid> <vout>`.
 - **Merged mining.** zSide blocks are mined by Chains miners, for a fee in CHN paid by the Chains
@@ -169,8 +175,12 @@ Sidechain, in the wallet: `getdepositaddress`, `createwithdrawal`, `refundwithdr
 
 ## Wallet
 
-The pages: Overview, Send, Receive, Transactions, **Mainchain** (deposits, withdrawals, merged
-mining), and **Private** (shielded balance, address with QR code, paying privately with a memo, shielding, melt & cast, history).
+The pages of zside-app: Overview, Send, Receive, Transactions, **Peg** (deposits, withdrawals, the
+bundle), **Merged mining**, and those of the shielded wallet: **Private** (the shielded and transparent
+balances, paying privately with a memo, shielding and unshielding, the proving of each payment shown as
+it goes), **Memos** (the memos received), **Melt & cast** (the plan and its steps) and **Notes** (the
+notes of the shielded account, and the pool). Every balance, address and transaction says whether it is
+private or public. What each page of zside-qt became: [doc/webui-parity.md](doc/webui-parity.md).
 
 ## Credits
 

@@ -16,7 +16,7 @@ BINARIES = [
 'bin/bitcoin-tx',
 'bin/bitcoin-wallet',
 'bin/bitcoin-util',
-'bin/bitcoin-qt',
+'bin/chains-app',
 ]
 
 parser = argparse.ArgumentParser(
@@ -50,11 +50,11 @@ mandir = os.getenv('MANDIR', os.path.join(topdir, 'doc/man'))
 versions = []
 for relpath in BINARIES:
     abspath = os.path.join(builddir, relpath)
-    # Prevent QT from emitting a localized version string for --version and --help
-    is_qt = relpath == "bin/bitcoin-qt"
+    # Prevent the GUI from emitting a localized version string for --version and --help
+    is_gui = relpath == "bin/chains-app"
     try:
         cmd_args = ["--version"]
-        if is_qt:
+        if is_gui:
             cmd_args.append("--lang=en")
         r = subprocess.run([abspath, *cmd_args], stdout=subprocess.PIPE, check=True, text=True)
     except IOError:
@@ -74,7 +74,7 @@ for relpath in BINARIES:
     copyright = r.stdout.split('\n')[1:]
     assert copyright[0].startswith('Copyright (C)')
 
-    versions.append((abspath, verstr, copyright, is_qt))
+    versions.append((abspath, verstr, copyright, is_gui))
 
 if not versions:
     print(f'No binaries found in {builddir}. Please ensure the binaries are present in {builddir}, or set another build path using the BUILDDIR env variable.')
@@ -98,9 +98,9 @@ with tempfile.NamedTemporaryFile('w', suffix='.h2m') as footer:
     footer.flush()
 
     # Call the binaries through help2man to produce a manual page for each of them.
-    for (abspath, verstr, _, is_qt) in versions:
+    for (abspath, verstr, _, is_gui) in versions:
         outname = os.path.join(mandir, os.path.basename(abspath) + '.1')
-        help_option = '--help-option=--help' + (' --lang=en' if is_qt else '')
+        help_option = '--help-option=--help' + (' --lang=en' if is_gui else '')
         print(f'Generating {outname}…')
         subprocess.run([
             help2man,

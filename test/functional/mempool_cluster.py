@@ -396,7 +396,7 @@ class MempoolClusterTest(BitcoinTestFramework):
 
         self.test_cluster_limit_rbf(DEFAULT_CLUSTER_LIMIT)
 
-        for cluster_size_limit_kvb in [10, 20, 33, 100, DEFAULT_CLUSTER_SIZE_LIMIT_KVB]:
+        for cluster_size_limit_kvb in [10, 20, 33, 98, DEFAULT_CLUSTER_SIZE_LIMIT_KVB]:
             self.log.info(f"-> Resetting node with -limitclustersize={cluster_size_limit_kvb}")
             self.restart_node(0, extra_args=[f"-limitclustersize={cluster_size_limit_kvb}"])
 

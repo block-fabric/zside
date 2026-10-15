@@ -14,11 +14,10 @@ fn get_pathspecs_exclude_whitespace() -> Vec<String> {
         [
             // Permanent excludes
             "*.patch",
-            "src/qt/locale",
+            "src/webui/locale",
             "contrib/windeploy/win-codesign.cert",
             "doc/README_windows.txt",
             // Temporary excludes, or existing violations
-            "src/qt/res/src/*.svg",
             "test/functional/test_framework/crypto/ellswift_decode_test_vectors.csv",
             "test/functional/test_framework/crypto/xswiftec_inv_test_vectors.csv",
         ]

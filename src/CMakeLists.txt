@@ -131,6 +131,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   common/netif.cpp
   common/pcp.cpp
   common/run_command.cpp
+  common/secretfile.cpp
   common/settings.cpp
   common/signmessage.cpp
   common/system.cpp
@@ -205,7 +206,7 @@ if(ENABLE_WALLET)
 endif()
 
 
-# P2P and RPC server functionality used by `bitcoind` and `bitcoin-qt` executables.
+# P2P and RPC server functionality used by `bitcoind` and `chains-app` executables.
 add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   addrdb.cpp
   addrman.cpp
@@ -444,8 +445,8 @@ if(BUILD_UTIL)
 endif()
 
 
-if(BUILD_GUI)
-  add_subdirectory(qt)
+if(BUILD_WEBUI)
+  add_subdirectory(webui)
 endif()
 
 
@@ -488,7 +489,7 @@ set(_bin ${CLIENT_BIN_NAME})
 foreach(name_pair
     "bitcoin:${_bin}" "bitcoind:${_bin}d" "bitcoin-node:${_bin}-node" "bitcoin-cli:${_bin}-cli"
     "bitcoin-tx:${_bin}-tx" "bitcoin-util:${_bin}-util" "bitcoin-wallet:${_bin}-wallet"
-    "bitcoin-chainstate:${_bin}-chainstate" "bitcoin-qt:${_bin}-qt" "bitcoin-gui:${_bin}-gui")
+    "bitcoin-chainstate:${_bin}-chainstate")
   string(REPLACE ":" ";" name_pair "${name_pair}")
   list(GET name_pair 0 target)
   list(GET name_pair 1 output_name)

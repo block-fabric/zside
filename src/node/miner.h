@@ -20,7 +20,9 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 class CBlockIndex;
@@ -91,6 +93,11 @@ private:
     uint64_t nBlockTx;
     uint64_t nBlockSigOpsCost;
     CAmount nFees;
+    //! Drivechain: the weight and sigops cost kept for the withdrawals that go at the end of the block.
+    uint64_t m_withdrawal_weight{0};
+    uint64_t m_withdrawal_sigops{0};
+    //! The mempool transactions in the block, for a second pass over the mempool.
+    std::set<Txid> m_in_block;
 
     // Chain context for the block
     int nHeight;
@@ -123,6 +130,11 @@ private:
     void resetBlock();
     /** Add a tx to the block */
     void AddToBlock(const CTxMemPoolEntry& entry);
+    /**
+     * Drivechain: the weight and sigops cost of those of `withdrawals` that fit, in order, in a block
+     * holding nothing else (the same check as when they are added).
+     */
+    std::pair<uint64_t, uint64_t> WithdrawalRoom(const std::vector<CTransactionRef>& withdrawals) const;
 
     // Methods for how to add transactions to a block.
     /** Add transactions based on chunk feerate

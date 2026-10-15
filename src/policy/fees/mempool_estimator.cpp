@@ -4,6 +4,7 @@
 
 #include <policy/fees/mempool_estimator.h>
 
+#include <drivechain/sidechain.h>
 #include <logging.h>
 #include <node/miner.h>
 #include <policy/feerate.h>
@@ -307,8 +308,17 @@ void MemPoolFeeRateEstimator::MempoolTxsRemovedForBlock(const std::shared_ptr<co
     LOCK(cs);
     Assert(!block->vtx.empty());
     // Accumulate total block weight and removed mempool tx weight, both excluding the coinbase.
-    const auto get_tx_weight = [](const CTransactionRef& tx) {
-        return static_cast<uint64_t>(GetTransactionWeight(*tx));
+    // Drivechain: both also leave out the treasury transactions (deposits and withdrawals, which
+    // spend and create a sidechain's escrow output). The miner adds the withdrawals of the bundles
+    // the miners voted through to its blocks itself; they never were in any mempool, and counting
+    // them would make a mempool that has every other transaction of the block look unrepresentative.
+    const uint32_t max_sidechains{m_chainman.GetConsensus().drivechain.max_sidechains};
+    const auto get_tx_weight = [&](const CTransactionRef& tx) -> uint64_t {
+        const bool treasury{std::any_of(tx->vout.begin(), tx->vout.end(), [&](const CTxOut& out) {
+            const auto slot{drivechain::ParseEscrowScript(out.scriptPubKey)};
+            return slot && *slot < max_sidechains;
+        })};
+        return treasury ? 0 : static_cast<uint64_t>(GetTransactionWeight(*tx));
     };
     // Skip vtx[0], which is the coinbase.
     const uint64_t block_weight = std::accumulate(std::next(block->vtx.begin()), block->vtx.end(), uint64_t{0},
