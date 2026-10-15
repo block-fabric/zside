@@ -5086,12 +5086,13 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         // An extended header the node has, with another extension (a signature the block hash does
         // not cover): the block it makes would be a mutated one (AcceptBlock). It is not
-        // reconstructed; the block comes whole, from this peer or another one. (BIP 152 lets peers
-        // relay compact blocks before they validate them: no punishment.) Unless the sidechain's
-        // rules find the other extension as valid: the same block, which the node takes with its own
-        // (ProcessNewBlock).
-        if (!sidechain::SameExtension(cmpctblock.header, *pindex) &&
-            sidechain::Hooks().CheckOtherExtension(cmpctblock.header, *pindex) != sidechain::OtherExtension::EQUIVALENT) {
+        // reconstructed; the block comes whole, from this peer or another one, and AcceptBlock judges
+        // the other extension then (ChainHooks::CheckOtherExtension). (BIP 152 lets peers relay
+        // compact blocks before they validate them: no punishment.) Not judged here: a compact block
+        // costs its sender some 200 bytes, and anyone could have the node check a signature for each
+        // one, for ever, of a header it has (its tip's, say) -- and only another valid signature of
+        // the same leader for the same header, which an honest one never makes, would change anything.
+        if (!sidechain::SameExtension(cmpctblock.header, *pindex)) {
             LogDebug(BCLog::CMPCTBLOCK, "%s sent us a compact block for %s without the extension of its header\n", pfrom.LogPeer(), blockhash.ToString());
             RemoveBlockRequest(blockhash, pfrom.GetId());
             return;

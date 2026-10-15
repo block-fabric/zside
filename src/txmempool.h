@@ -305,6 +305,21 @@ public:
     std::map<COutPoint, Txid> m_refunds GUARDED_BY(cs);
     //! On zSide: the nullifiers the shielded transactions reveal, by transaction.
     std::map<uint256, Txid> m_shielded_nullifiers GUARDED_BY(cs);
+    //! On a sidechain, the transactions with rules of its own (sidechain::ChainHooks::HasTxRules): the
+    //! keys of the state each one's rules read (TxRuleKeys), nothing if the hooks cannot tell...
+    std::map<Txid, std::optional<std::vector<std::vector<unsigned char>>>> m_rule_keys_of GUARDED_BY(cs);
+    //! ... the transactions by key ...
+    std::map<std::vector<unsigned char>, std::set<Txid>> m_rule_txs GUARDED_BY(cs);
+    //! ... and those whose keys the hooks cannot tell (checked again after every change of the tip).
+    std::set<Txid> m_rule_txs_any GUARDED_BY(cs);
+    //! Those to check again, in the order they were queued (QueueRuleCheck): by the number each was queued with.
+    std::map<Txid, uint64_t> m_rule_checks_queued GUARDED_BY(cs);
+    std::map<uint64_t, Txid> m_rule_checks GUARDED_BY(cs);
+    uint64_t m_rule_checks_next GUARDED_BY(cs){0};
+    /** Queue a transaction with rules of the sidechain's own to be checked again (once, however often queued before it is). */
+    void QueueRuleCheck(const Txid& txid) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    /** The first `max` transactions queued to be checked again, taken out of the queue. */
+    std::vector<Txid> TakeRuleChecks(size_t max) EXCLUSIVE_LOCKS_REQUIRED(cs);
     std::map<Txid, CAmount> mapDeltas GUARDED_BY(cs);
 
     using Options = kernel::MemPoolOptions;

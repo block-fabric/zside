@@ -16,6 +16,7 @@
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <random.h>
+#include <sidechain/hooks.h>
 #include <tinyformat.h>
 #include <util/check.h>
 #include <util/feefrac.h>
@@ -257,6 +258,15 @@ void CTxMemPool::addNewTransaction(CTxMemPool::txiter newit)
             for (const uint256& nf : bundle->Nullifiers()) m_shielded_nullifiers[nf] = tx.GetHash();
         }
     }
+    if (sidechain::Hooks().HasTxRules(tx)) {
+        auto keys{sidechain::Hooks().TxRuleKeys(tx)};
+        if (keys) {
+            for (const auto& key : *keys) m_rule_txs[key].insert(tx.GetHash());
+        } else {
+            m_rule_txs_any.insert(tx.GetHash());
+        }
+        m_rule_keys_of.emplace(tx.GetHash(), std::move(keys));
+    }
     // Don't bother worrying about child transactions of this one.
     // Normal case of a new transaction arriving is that there can't be any
     // children, because such children would be orphans.
@@ -276,6 +286,27 @@ void CTxMemPool::addNewTransaction(CTxMemPool::txiter newit)
         entry.GetTxSize(),
         entry.GetFee()
     );
+}
+
+void CTxMemPool::QueueRuleCheck(const Txid& txid)
+{
+    AssertLockHeld(cs);
+    if (!m_rule_keys_of.contains(txid)) return;
+    if (!m_rule_checks_queued.emplace(txid, m_rule_checks_next).second) return;
+    m_rule_checks.emplace(m_rule_checks_next++, txid);
+}
+
+std::vector<Txid> CTxMemPool::TakeRuleChecks(size_t max)
+{
+    AssertLockHeld(cs);
+    std::vector<Txid> taken;
+    while (taken.size() < max && !m_rule_checks.empty()) {
+        const auto first{m_rule_checks.begin()};
+        taken.push_back(first->second);
+        m_rule_checks_queued.erase(first->second);
+        m_rule_checks.erase(first);
+    }
+    return taken;
 }
 
 void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
@@ -330,6 +361,22 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
                 if (const auto entry{m_shielded_nullifiers.find(nf)}; entry != m_shielded_nullifiers.end() && entry->second == it->GetTx().GetHash()) m_shielded_nullifiers.erase(entry);
             }
         }
+    }
+    if (const auto rules{m_rule_keys_of.find(it->GetTx().GetHash())}; rules != m_rule_keys_of.end()) {
+        if (rules->second) {
+            for (const auto& key : *rules->second) {
+                if (const auto txs{m_rule_txs.find(key)}; txs != m_rule_txs.end()) {
+                    txs->second.erase(rules->first);
+                    if (txs->second.empty()) m_rule_txs.erase(txs);
+                }
+            }
+        }
+        m_rule_txs_any.erase(rules->first);
+        if (const auto queued{m_rule_checks_queued.find(rules->first)}; queued != m_rule_checks_queued.end()) {
+            m_rule_checks.erase(queued->second);
+            m_rule_checks_queued.erase(queued);
+        }
+        m_rule_keys_of.erase(rules);
     }
 
     RemoveUnbroadcastTx(it->GetTx().GetHash(), true /* add logging because unchecked */);
