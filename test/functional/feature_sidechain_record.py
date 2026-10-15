@@ -11,8 +11,9 @@ mainchain and acting on it.
 
 - A commitment dropped, then back: the block is taken off the chain, then checked again.
 - A candidate block whose parent lost its commitment is not accepted.
-- At startup, with a record that disagrees: VerifyDB stops at the block; blocks at the top without a
-  commitment go, a block whose commitment moved is checked again, blocks failed against the record that
+- At startup, with a record that disagrees: VerifyDB stops at the block; blocks without a commitment go
+  with those above them (also below a block committed to again, lower), a block whose commitment moved is
+  checked again, blocks failed against the record that
   have their commitment again are checked again; rebuilt under other parameters, the sidechain database
   stops at the block (the chain goes back), and a block the operator invalidated stays invalid.
 - A mainchain node that is syncing, too old, without the sidechain, refusing the credentials, answering
@@ -340,6 +341,23 @@ class SidechainRecordTest(BitcoinTestFramework):
         balance = node.getbalance()
         self.mine()
         assert_equal(node.getbalance(), balance + 1)
+
+        self.log.info("At startup, the commitment of a block dropped, and the block on it committed to again below it: both go, as when acted on at once")
+        base = node.getbestblockhash()
+        parent = self.mine()
+        tip = self.mine()
+        [parent_at] = [b["height"] for b in main.blocks if b.get("bmm") == parent]
+
+        def drop_and_move():
+            del main.blocks[parent_at:]
+            main.add_block(branch=5, bmm=tip)
+        self.change_unacted(drop_and_move)
+        self.stop_node(0)
+        main.fail_from = None
+        with node.assert_debug_log([f"Block {parent} and the blocks after it have no commitment on the mainchain"]):
+            self.start_node(0)
+            node.syncmainchain()
+        self.wait_until(lambda: node.getbestblockhash() == base)
 
         self.log.info("Rebuilt under other parameters, with a record that disagrees: the chain goes back; what the operator invalidated stays so")
         manual = self.mine()
