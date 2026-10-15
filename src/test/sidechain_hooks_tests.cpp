@@ -39,8 +39,10 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -1105,6 +1107,118 @@ BOOST_FIXTURE_TEST_CASE(block_extension_unknown_taken, SidechainSetup)
     // Connected: in the block files, its own file deleted.
     BOOST_CHECK(!node::BlockManager::IsVolatile(WITH_LOCK(::cs_main, return index->GetBlockPos())));
     WITH_LOCK(::cs_main, chainman.CheckUnchecked());
+}
+
+/**
+ * SignedHooks that keep one extended header on a parent for good (HeaderKept): a further one on the
+ * same parent is spare (HeaderSpare), as a chain whose signatures cost nothing would say.
+ */
+struct SpareHooks : SignedHooks {
+    mutable std::map<uint256, std::set<uint256>> kept;
+    bool HeaderSpare(const CBlockHeader& header, const CBlockIndex& prev) const override
+    {
+        const auto found{kept.find(prev.GetBlockHash())};
+        return header.IsExtended() && found != kept.end() && !found->second.empty();
+    }
+    void HeaderKept(const CBlockIndex& index) const override
+    {
+        if (index.m_ext && index.pprev) kept[index.pprev->GetBlockHash()].insert(index.GetBlockHash());
+    }
+};
+
+BOOST_FIXTURE_TEST_CASE(spare_headers_only_on_a_branch, SidechainSetup)
+{
+    // A spare header (the block index has as many like it as the chain can need) from a peer: alone,
+    // refused, not the peer's fault; with a header on top of it in the same message, taken unchecked
+    // (the peer's, gone with it), and kept for good once its block is connected. The node's own: taken.
+    auto owned{std::make_unique<SpareHooks>()};
+    SpareHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3f};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    {
+        LOCK(::cs_main);
+        chainman.UncheckedSourceAdded(5);
+        chainman.UncheckedSourceAdded(6);
+    }
+    const auto extended{[](CBlock block) {
+        block.nVersion |= BLOCK_EXTENSION_BIT;
+        block.ext.hashSections.SetNull();
+        block.ext.sig.fill(5);
+        return block;
+    }};
+    const CBlock model{Build()};
+    const uint256 tip{model.hashPrevBlock};
+    const CBlock a1{extended(model)};
+    const CBlock a2{extended(Build(model.nTime + 1))};
+    const CBlock a3{extended(Build(model.nTime + 2))};
+    BOOST_REQUIRE(a1.GetHash() != a2.GetHash() && a2.GetHash() != a3.GetHash());
+    CBlockHeader on_a2{a2};
+    on_a2.hashPrevBlock = a2.GetHash();
+    on_a2.nTime = a2.nTime + 1;
+    const auto index_size{[&] { return WITH_LOCK(::cs_main, return chainman.m_blockman.m_block_index.size()); }};
+    const size_t before{index_size()};
+
+    // The first: taken, for good.
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{a1}}, /*min_pow_checked=*/true, state, nullptr, /*source=*/5), state.ToString());
+    BOOST_CHECK(WITH_LOCK(::cs_main, return !Assert(chainman.m_blockman.LookupBlockIndex(a1.GetHash()))->m_unchecked));
+    BOOST_CHECK_EQUAL(hooks.kept[tip].size(), 1U);
+    // A second one alone, as a header or as a block: refused, not punished, not in the block index.
+    for (int i{0}; i < 3; ++i) {
+        BlockValidationState spare;
+        BOOST_CHECK(!chainman.ProcessNewBlockHeaders({{a2}}, /*min_pow_checked=*/true, spare, nullptr, /*source=*/5));
+        BOOST_CHECK(spare.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK);
+        BOOST_CHECK_EQUAL(spare.GetRejectReason(), "header-spare");
+    }
+    {
+        BlockValidationState spare;
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(a2), spare, nullptr, true, nullptr, nullptr, true, /*source=*/5)));
+        BOOST_CHECK_EQUAL(spare.GetRejectReason(), "header-spare");
+    }
+    BOOST_CHECK_EQUAL(index_size(), before + 1);
+    // With a header on top: taken unchecked, the peer's; gone with it.
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{a2, on_a2}}, /*min_pow_checked=*/true, state, nullptr, /*source=*/5), state.ToString());
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(a2.GetHash())};
+        BOOST_REQUIRE(index);
+        BOOST_CHECK(index->m_unchecked && chainman.HoldsUnchecked(*index, 5));
+        BOOST_CHECK_EQUAL(chainman.UncheckedHeld(5), 2U);
+        chainman.UncheckedSourceGone(5);
+        BOOST_CHECK(!chainman.m_blockman.LookupBlockIndex(a2.GetHash()));
+        BOOST_CHECK(!chainman.m_blockman.LookupBlockIndex(on_a2.GetHash()));
+        chainman.CheckUnchecked();
+    }
+    BOOST_CHECK_EQUAL(index_size(), before + 1);
+    BOOST_CHECK_EQUAL(hooks.kept[tip].size(), 1U);
+    // Again from peer 6, with its block: connected (the first has no block), it is kept for good.
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{a2, on_a2}}, /*min_pow_checked=*/true, state, nullptr, /*source=*/6), state.ToString());
+    {
+        BlockValidationState block_state;
+        bool new_block{false};
+        BOOST_REQUIRE_MESSAGE(WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(a2), block_state, nullptr, true, nullptr, &new_block, true, /*source=*/6)), block_state.ToString());
+        BOOST_CHECK(new_block);
+    }
+    BOOST_REQUIRE(chainman.ActiveChainstate().ActivateBestChain(state));
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(a2.GetHash())};
+        BOOST_REQUIRE(index);
+        BOOST_CHECK(chainman.ActiveChain().Tip() == index);
+        BOOST_CHECK(!index->m_unchecked);
+        BOOST_CHECK_EQUAL(hooks.kept[tip].size(), 2U);
+        chainman.UncheckedSourceGone(6);
+        BOOST_CHECK(chainman.m_blockman.LookupBlockIndex(a2.GetHash()) == index);
+        BOOST_CHECK(!chainman.m_blockman.LookupBlockIndex(on_a2.GetHash()));
+        chainman.CheckUnchecked();
+    }
+    // The node's own (its blocks, -reindex): never spare.
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{a3}}, /*min_pow_checked=*/true, state), state.ToString());
+    BOOST_CHECK(WITH_LOCK(::cs_main, return !Assert(chainman.m_blockman.LookupBlockIndex(a3.GetHash()))->m_unchecked));
+    BOOST_CHECK_EQUAL(hooks.kept[tip].size(), 3U);
 }
 
 BOOST_FIXTURE_TEST_CASE(extension_failure_not_the_peers_fault, SidechainSetup)

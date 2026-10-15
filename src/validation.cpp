@@ -4484,6 +4484,7 @@ void ChainstateManager::ReleaseUnchecked(CBlockIndex& index)
     m_unchecked.erase(&index);
     index.m_unchecked = false;
     m_blockman.m_dirty_blockindex.insert(&index);
+    sidechain::Hooks().HeaderKept(index);
 }
 
 bool ChainstateManager::PromoteUncheckedBlock(const CBlock& block, CBlockIndex& index)
@@ -5236,7 +5237,7 @@ static const char* PardonedFailure(const ChainstateManager& chainman, const CBlo
     return nullptr;
 }
 
-bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked, int64_t source)
+bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked, int64_t source, bool continued)
 {
     AssertLockHeld(cs_main);
 
@@ -5298,9 +5299,22 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
         }
         unchecked = pindexPrev->m_unchecked || !sidechain::Hooks().HeaderCheckable(block, *pindexPrev);
+        // One of a kind the block index has as many of as the chain can need (a signature that costs
+        // nothing, made again and again): from a peer, not kept for good (ChainHooks::HeaderSpare).
+        const bool spare{!unchecked && source != -1 && sidechain::Hooks().HeaderSpare(block, *pindexPrev)};
         if (!ContextualCheckBlockHeader(block, state, *this, pindexPrev)) {
             LogDebug(BCLog::VALIDATION, "%s: Consensus::ContextualCheckBlockHeader: %s, %s\n", __func__, hash.ToString(), state.ToString());
             return false;
+        }
+        if (spare) {
+            // Alone, nothing builds on it: refused (not the peer's fault). With a header on top of it
+            // (the branch a block builds on, which the node may need), taken as an unchecked one: the
+            // peer's, within its budget, and kept for good only once its block is connected.
+            if (!continued) {
+                LogDebug(BCLog::VALIDATION, "%s: spare header %s from peer=%d, alone (header-spare)\n", __func__, hash.ToString(), source);
+                return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "header-spare", "the node keeps no more headers like this one, but on the branch of a header on top of it");
+            }
+            unchecked = true;
         }
         if (unchecked && min_pow_checked && !AdmitUnchecked(*pindexPrev, source)) {
             LogDebug(BCLog::VALIDATION, "%s: unchecked header %s from peer=%d over the budget (unchecked-budget)\n", __func__, hash.ToString(), source);
@@ -5313,7 +5327,11 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     }
     // (AdmitUnchecked may have made room: the parent is not among what went.)
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
-    if (unchecked) HoldUnchecked(*pindex, source);
+    if (unchecked) {
+        HoldUnchecked(*pindex, source);
+    } else {
+        sidechain::Hooks().HeaderKept(*pindex);
+    }
 
     if (ppindex)
         *ppindex = pindex;
@@ -5331,9 +5349,12 @@ bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> hea
     std::optional<std::pair<int, NodeClock::time_point>> last_accepted;
     {
         LOCK(cs_main);
-        for (const CBlockHeader& header : headers) {
+        for (size_t i{0}; i < headers.size(); ++i) {
+            const CBlockHeader& header{headers[i]};
             CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
-            bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked, source)};
+            // (A header with the next one on top of it: the branch that one builds on, HeaderSpare.)
+            const bool continued{i + 1 < headers.size() && headers[i + 1].hashPrevBlock == header.GetHash()};
+            bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked, source, continued)};
             CheckBlockIndex();
 
             if (!accepted) {
@@ -6718,6 +6739,7 @@ bool ChainstateManager::LoadBlockIndex()
 
         for (CBlockIndex* pindex : vSortedByHeight) {
             if (m_interrupt) return false;
+            sidechain::Hooks().HeaderKept(*pindex);
             if (pindex->nStatus & BLOCK_FAILED_VALID && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
@@ -6749,6 +6771,7 @@ bool ChainstateManager::LoadGenesisBlock()
             return false;
         }
         CBlockIndex* pindex{m_blockman.AddToBlockIndex(genesis_block, m_best_header)};
+        sidechain::Hooks().HeaderKept(*pindex);
         ReceivedBlockTransactions(genesis_block, pindex, blockPos);
     } catch (const std::runtime_error& e) {
         LogError("Failed to write genesis block: %s", e.what());

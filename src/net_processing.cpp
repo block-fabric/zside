@@ -3546,7 +3546,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 AssertLockHeld(::cs_main);
                 UpdateBlockAvailability(pfrom.GetId(), pindexLast->GetBlockHash());
             }
-            if (state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK && (sidechain::Hooks().CustomChainOrder() || state.GetRejectReason() == "unchecked-budget")) {
+            if (state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK && (sidechain::Hooks().CustomChainOrder() || state.GetRejectReason() == "unchecked-budget" || state.GetRejectReason() == "header-spare")) {
                 // The rest of the peer's headers, once the node took in more of the chain (a sidechain's
                 // unchecked headers, of which a peer holds so many: those whose blocks the node connected
                 // since make room). Without this, a node that had all a peer had room for would not ask

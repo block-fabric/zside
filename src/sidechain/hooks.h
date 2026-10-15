@@ -147,6 +147,23 @@ public:
      * cannot check yet").
      */
     virtual UncheckedBudget UncheckedLimits() const { return {}; }
+    /**
+     * Whether a header the node can check (HeaderCheckable) is one of a kind it keeps no more of for
+     * good: the block index has as many like it as the chain's rules can need (say, a slot whose signer
+     * signed twice already, when a signature costs nothing). Such a header from a peer is taken only
+     * with a header on top of it in the same message (a branch some block builds on), and then as an
+     * unchecked one (held by that peer, within its budget, gone with it unless its block is connected);
+     * alone, it is refused (`header-spare`, BLOCK_HEADER_LOW_WORK: not punished, asked again once the
+     * tip moved). The node's own (source -1) are always taken. See doc/sidechain.md, "Spare headers".
+     * By default none. Called with cs_main held, before CheckHeader.
+     */
+    virtual bool HeaderSpare(const CBlockHeader& header, const CBlockIndex& prev) const { return false; }
+    /**
+     * `index` is in the block index for good: taken checked, its block connected (an unchecked one), or
+     * loaded from the block index database. What HeaderSpare counts. May be told twice of an entry.
+     * Called with cs_main held.
+     */
+    virtual void HeaderKept(const CBlockIndex& index) const {}
     /** Context free checks of a whole block, after Bitcoin's (CheckBlock). */
     virtual bool CheckBlock(const CBlock& block, BlockValidationState& state) const;
     /** What an extended header's hashSections must be for these sections (not empty). */

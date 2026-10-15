@@ -1219,13 +1219,16 @@ private:
      * known to be part of a sufficiently high-work chain (anti-dos check).
      * `source`: the peer it comes from (-1: none), which holds it if it is unchecked
      * (sidechain::ChainHooks::HeaderCheckable, m_unchecked).
+     * `continued`: the next header of the same message builds on this one (a spare header from a peer
+     * is taken only so: sidechain::ChainHooks::HeaderSpare).
      */
     bool AcceptBlockHeader(
         const CBlockHeader& block,
         BlockValidationState& state,
         CBlockIndex** ppindex,
         bool min_pow_checked,
-        int64_t source = -1) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        int64_t source = -1,
+        bool continued = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     friend Chainstate;
 
     /** Most recent headers presync progress update, for rate-limiting. */
