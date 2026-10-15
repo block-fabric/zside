@@ -13,6 +13,7 @@
   import Sparkline from '../../components/Sparkline.svelte';
   import Card from './Card.svelte';
   import HomeTables from './HomeTables.svelte';
+  import LocalCards from '../../chain/LocalCards.svelte';
   import { HOME_QUICK_ACTIONS } from '../../lib/layout';
   import { openPalette, pageDisabled } from '../../lib/commands.svelte';
   import { formatCount, niceTimeOffset } from '../../lib/format';
@@ -302,6 +303,8 @@
       {/snippet}
     </Card>
   </div>
+
+  <LocalCards />
 
   <div class="middle">
     <section class="panel chart-card" aria-labelledby="chart-title">

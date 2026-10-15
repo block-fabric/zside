@@ -1,4 +1,5 @@
 <script lang="ts" module>
+  import { LOCAL_ICONS } from '../chain/icons';
   // Line icons drawn for chains-app, on a 24 grid with a 1.75 stroke.
   export const ICONS = {
     overview: 'M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-3H4zM14 7h6V4h-6z',
@@ -63,6 +64,7 @@
     moon: 'M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z',
     logout: 'M14 5V4H5v16h9v-1M10 12h11M17 8l4 4-4 4',
     sun: 'M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
+  ...LOCAL_ICONS,
   } as const;
 
   export type IconName = keyof typeof ICONS;
