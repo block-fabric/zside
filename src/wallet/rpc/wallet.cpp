@@ -1085,6 +1085,8 @@ RPCMethod unshieldcoins();
 RPCMethod castcoins();
 RPCMethod listmeltcast();
 RPCMethod cancelmeltcast();
+RPCMethod exportshieldedviewingkey();
+RPCMethod importshieldedviewingkey();
 RPCMethod getaddressinfo();
 RPCMethod getnewaddress();
 RPCMethod getrawchangeaddress();
@@ -1164,6 +1166,8 @@ std::span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &castcoins},
         {"wallet", &listmeltcast},
         {"wallet", &cancelmeltcast},
+        {"wallet", &exportshieldedviewingkey},
+        {"wallet", &importshieldedviewingkey},
         {"wallet", &abandontransaction},
         {"wallet", &abortrescan},
         {"wallet", &addhdkey},

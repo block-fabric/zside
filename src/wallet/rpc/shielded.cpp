@@ -187,6 +187,7 @@ RPCMethod listshieldednotes()
             {RPCResult::Type::STR_HEX, "spent_by", /*optional=*/true, "The transaction that spends it"},
             {RPCResult::Type::BOOL, "retired", /*optional=*/true, "Of an account the wallet set up for another chain (true if so)"},
             {RPCResult::Type::BOOL, "watchonly", /*optional=*/true, "The wallet cannot make its key: it cannot be spent (true if so)"},
+            {RPCResult::Type::BOOL, "viewonly", /*optional=*/true, "Of a viewing key imported (importshieldedviewingkey) (true if so)"},
         }}}},
         RPCExamples{HelpExampleCli("listshieldednotes", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -206,7 +207,11 @@ RPCMethod listshieldednotes()
         obj.pushKV("change", s.note->internal);
         obj.pushKV("confirmations", s.confirmations);
         if (s.spent_by) obj.pushKV("spent_by", s.spent_by->GetHex());
-        if (s.note->retired >= 0) obj.pushKV("retired", true);
+        if (s.note->retired >= 0 && pwallet->m_shielded.retired.at(s.note->retired).version == KEY_VIEW_ONLY) {
+            obj.pushKV("viewonly", true);
+        } else if (s.note->retired >= 0) {
+            obj.pushKV("retired", true);
+        }
         if (!ShieldedNoteSpendable(pwallet->m_shielded, *s.note)) obj.pushKV("watchonly", true);
         result.push_back(std::move(obj));
     }
@@ -603,6 +608,66 @@ RPCMethod cancelmeltcast()
     for (const uint64_t id : ids) dropped += CancelMeltCast(*pwallet, id);
     if (ids.size() == 1 && which != "all" && dropped == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "No such step not gone yet");
     return dropped;
+},
+    };
+}
+
+RPCMethod exportshieldedviewingkey()
+{
+    return RPCMethod{
+        "exportshieldedviewingkey",
+        "The full viewing key of the wallet's shielded account. Whoever holds it sees every note the account receives\n"
+        "and every payment it makes, with the amounts and the memos, for good: it cannot be taken back. It cannot spend.\n"
+        "Give it only to someone who is to see all of that (an auditor, a watch-only wallet of your own).",
+        {},
+        RPCResult{RPCResult::Type::STR, "", "The viewing key (zview1…, tzview1… on the test networks)"},
+        RPCExamples{HelpExampleCli("exportshieldedviewingkey", "")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    const auto pwallet{ReadyWallet(request, /*unlocked=*/false, /*rescan=*/false)};
+    if (!pwallet) return UniValue::VNULL;
+    LOCK(pwallet->cs_wallet);
+    if (!ShieldedAccountOfThisChain(pwallet->m_shielded)) {
+        throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "The shielded account is to be checked against this chain first: unlock the wallet once (walletpassphrase)");
+    }
+    return EncodeShieldedViewingKey(*pwallet->m_shielded.fvk);
+},
+    };
+}
+
+RPCMethod importshieldedviewingkey()
+{
+    return RPCMethod{
+        "importshieldedviewingkey",
+        "Watch a full viewing key (exportshieldedviewingkey): what its account receives and pays shows in this wallet,\n"
+        "watch-only (getshieldedbalance, listshieldednotes, listshieldedtransactions). Only into a wallet without private\n"
+        "keys, so that it is not mixed with an account the wallet spends from. The blocks from the height given are\n"
+        "scanned again for it, which may take a while.",
+        {
+            {"viewingkey", RPCArg::Type::STR, RPCArg::Optional::NO, "The viewing key"},
+            {"height", RPCArg::Type::NUM, RPCArg::Default{0}, "Scan the blocks again from this height (the account's first payment is not before)"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::NUM, "scanned_from", "The height the blocks were scanned again from"},
+        }},
+        RPCExamples{HelpExampleCli("importshieldedviewingkey", "\"zview1...\"") + HelpExampleCli("importshieldedviewingkey", "\"zview1...\" 1200")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    const std::shared_ptr<CWallet> pwallet{GetWalletForJSONRPCRequest(request)};
+    if (!pwallet) return UniValue::VNULL;
+    const auto fvk{DecodeShieldedViewingKey(request.params[0].get_str())};
+    if (!fvk) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Not a viewing key of this network");
+    const int height{request.params[1].isNull() ? 0 : request.params[1].getInt<int>()};
+    if (height < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "The height is negative");
+    pwallet->BlockUntilSyncedToCurrentChain();
+    {
+        LOCK(pwallet->cs_wallet);
+        if (const auto error{ImportShieldedViewingKey(*pwallet, *fvk, height)}) throw JSONRPCError(RPC_WALLET_ERROR, *error);
+    }
+    ShieldedRescan(*pwallet);
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("scanned_from", height);
+    return result;
 },
     };
 }

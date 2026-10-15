@@ -1215,7 +1215,7 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
                 err = "Error reading wallet database: a retired shielded key of the wrong size";
                 return DBErrors::CORRUPT;
             }
-            if (version != KEY_ANY_CHAIN && version != KEY_THIS_CHAIN) {
+            if (version != KEY_ANY_CHAIN && version != KEY_THIS_CHAIN && version != KEY_VIEW_ONLY) {
                 pwallet->WalletLogPrintf("Error: a retired shielded account has keys of an unknown version (%d)\n", version);
                 return DBErrors::TOO_NEW;
             }

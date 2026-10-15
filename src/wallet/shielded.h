@@ -91,6 +91,8 @@ struct ShieldedPayment {
 /** The derivations of the account's keys: of the descriptor's extended key alone, or of the chain too. */
 inline constexpr int KEY_ANY_CHAIN{1};
 inline constexpr int KEY_THIS_CHAIN{2};
+/** A viewing key imported into a wallet without private keys (importshieldedviewingkey): watched, never spent. */
+inline constexpr int KEY_VIEW_ONLY{0};
 
 /** The chain keys of version 2 are made for: its genesis block and slot. */
 struct KeyChain {
@@ -152,6 +154,20 @@ std::optional<OrchardAddress> DecodeShieldedAddress(const std::string& text);
 std::string MemoText(const OrchardMemo& memo);
 /** A memo from text (at most 512 bytes); the "no memo" memo (0xF6) for empty text. */
 std::optional<OrchardMemo> MemoFromText(const std::string& text);
+
+/**
+ * Full viewing keys: Bech32m, "zview" on the main network ("tzview" on the test networks, "rzview" on
+ * regtest). One shows every note the account receives and every payment it makes, with their memos.
+ */
+std::string EncodeShieldedViewingKey(const OrchardFvk& fvk);
+std::optional<OrchardFvk> DecodeShieldedViewingKey(const std::string& text);
+/**
+ * Watch a viewing key, in a wallet without private keys: it is kept with the keys of retired accounts
+ * (KEY_VIEW_ONLY), and the blocks from `from_height` are to be scanned again for it (ShieldedRescan, by
+ * the caller, without the wallet's lock). Nothing it sees can be spent.
+ * @return the error, if any (an import of a key already watched is none)
+ */
+std::optional<std::string> ImportShieldedViewingKey(CWallet& wallet, const OrchardFvk& fvk, int from_height);
 
 /** The chain of the node, that keys of version 2 are made for (on regtest, -zsidekeyslot may say another slot, for tests). */
 KeyChain ThisKeyChain();

@@ -35,6 +35,18 @@
 namespace wallet {
 
 namespace {
+std::string ShieldedViewingKeyHrp()
+{
+    switch (Params().GetChainType()) {
+    case ChainType::MAIN: return "zview";
+    case ChainType::REGTEST: return "rzview";
+    default: return "tzview";
+    }
+}
+
+/** Long enough for a viewing key: 96 bytes in 154 characters, with the separator, the checksum and the prefix. */
+constexpr auto VIEWING_KEY_CHARS{static_cast<bech32::CharLimit>(180)};
+
 std::string ShieldedHrp()
 {
     switch (Params().GetChainType()) {
@@ -81,6 +93,28 @@ std::optional<OrchardAddress> DecodeShieldedAddress(const std::string& text)
     std::copy(bytes.begin(), bytes.end(), address.begin());
     if (!zo_address_valid(address.data())) return std::nullopt;
     return address;
+}
+
+std::string EncodeShieldedViewingKey(const OrchardFvk& fvk)
+{
+    std::vector<uint8_t> data;
+    ConvertBits<8, 5, true>([&](uint8_t c) { data.push_back(c); }, fvk.begin(), fvk.end());
+    return bech32::Encode(bech32::Encoding::BECH32M, ShieldedViewingKeyHrp(), data);
+}
+
+std::optional<OrchardFvk> DecodeShieldedViewingKey(const std::string& text)
+{
+    const auto decoded{bech32::Decode(text, VIEWING_KEY_CHARS)};
+    if (decoded.encoding != bech32::Encoding::BECH32M || decoded.hrp != ShieldedViewingKeyHrp()) return std::nullopt;
+    std::vector<uint8_t> bytes;
+    if (!ConvertBits<5, 8, false>([&](uint8_t c) { bytes.push_back(c); }, decoded.data.begin(), decoded.data.end())) return std::nullopt;
+    if (bytes.size() != zside::FVK_SIZE) return std::nullopt;
+    OrchardFvk fvk;
+    std::copy(bytes.begin(), bytes.end(), fvk.begin());
+    // A key that makes no address is not a key.
+    OrchardAddress address;
+    if (zo_address(fvk.data(), 0, false, address.data()) != ZO_OK) return std::nullopt;
+    return fvk;
 }
 
 std::string MemoText(const OrchardMemo& memo)
@@ -463,6 +497,33 @@ bool SetupShieldedAccount(CWallet& wallet)
         }
     }
     return true;
+}
+
+std::optional<std::string> ImportShieldedViewingKey(CWallet& wallet, const OrchardFvk& fvk, int from_height)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    if (!wallet.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+        return std::string{"A viewing key is imported into a wallet without private keys (createwallet with disable_private_keys): "
+                           "its notes and payments are then not mixed with those of an account the wallet spends from"};
+    }
+    ShieldedAccount& account{wallet.m_shielded};
+    for (const WatchedKey& key : ShieldedViewingKeys(account)) {
+        if (*key.fvk == fvk) return std::nullopt;
+    }
+    if (!WalletBatch{wallet.GetDatabase()}.WriteOrchardRetired(std::vector<unsigned char>(fvk.begin(), fvk.end()), KEY_VIEW_ONLY, std::nullopt)) {
+        return std::string{"The key could not be written to the wallet"};
+    }
+    account.retired.push_back(RetiredKey{fvk, KEY_VIEW_ONLY, std::nullopt});
+    ShieldedRetag(wallet);
+    const int from{std::max(0, from_height)};
+    if (wallet.HaveChain() && wallet.GetLastBlockHeight() >= from) {
+        if (!account.rescan_from || from < *account.rescan_from) {
+            account.rescan_from = from;
+            WalletBatch{wallet.GetDatabase()}.WriteOrchardRescan(from);
+        }
+    }
+    wallet.WalletLogPrintf("zSide: a viewing key is imported, watched only; the blocks from %d are scanned again for it\n", from);
+    return std::nullopt;
 }
 
 void ShieldedRescan(CWallet& wallet)
