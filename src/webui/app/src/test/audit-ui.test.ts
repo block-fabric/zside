@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import Shell from '../views/Shell.svelte';
 import { setTransport, type BridgeRequest } from '../lib/bridge';
+import { buildCommands, menuSections } from '../lib/commands.svelte';
 import { dialogs } from '../lib/dialogs.svelte';
 import { go, nav } from '../lib/nav.svelte';
 import { app, node, prefs, wallets } from '../lib/state.svelte';
@@ -27,6 +28,7 @@ function info(walletEnabled: boolean) {
 
 beforeEach(() => {
   app.info = info(true);
+  prefs.layout = 'dashboard';
   prefs.unit = 'CHN';
   prefs.mask = false;
   nav.page = 'overview';
@@ -54,13 +56,11 @@ function host(handlers: Record<string, (r: BridgeRequest) => unknown> = {}): Bri
   return calls;
 }
 
-/** The menus of chains-qt: the sections of the Menus button of the layout (doc/webui-layouts.md). */
+/** The menus of chains-qt: the sections that have items (the workspace's Menus button and the palette show them). */
 async function menuLabels(): Promise<string[]> {
-  const button = screen.getAllByRole('button', { name: /^Menus of chains-qt/ })[0];
-  await fireEvent.click(button);
-  const labels = [...document.querySelectorAll('[role="menu"] > [role="group"]')].map((g) => g.getAttribute('aria-label') ?? '');
-  await fireEvent.click(button);
-  return labels;
+  return menuSections(buildCommands())
+    .filter((s) => s.items.length > 0)
+    .map((s) => s.title);
 }
 
 describe('a node without wallets (-disablewallet, C1)', () => {
@@ -349,8 +349,9 @@ describe('the smaller findings (L2 to L10)', () => {
 describe('the parity items finished with the audit', () => {
   it('shows the status tip of a menu item in the status bar (C14)', async () => {
     host({ 'tray.state': () => ({ available: false, visible: false, windowVisible: true }) });
+    // The menus of chains-qt are in the workspace's Menus button (the dashboard's sidebar has none: user decision).
+    prefs.layout = 'workspace';
     render(Shell);
-    // The menus of chains-qt are in the Menus button of the layout; Your wallet is its first section.
     await fireEvent.click(screen.getAllByRole('button', { name: /^Menus of chains-qt/ })[0]);
     const item = await waitFor(() => screen.getByRole('menuitem', { name: /Backup wallet/ }));
     await fireEvent.mouseEnter(item);

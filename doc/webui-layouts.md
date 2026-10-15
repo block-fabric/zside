@@ -27,8 +27,8 @@ Whatever the layout:
 - **Keyboard shortcuts** of chains-qt: Alt+1…5 pages, Ctrl+Shift+D node window,
   Ctrl+Shift+C console, Ctrl+I / Ctrl+T / Ctrl+N / Ctrl+P the node window tabs,
   Ctrl+Shift+M mask values, Ctrl+M minimize, Ctrl+Q quit, Ctrl+ / Ctrl− text size.
-- All the looks (Midnight, Light, Dark, Ocean Teal, Matrix Green, classic Drivechain, and the
-  desktop's) — the layouts use only the colour variables of styles/themes.css (see "The looks").
+- All the looks (Midnight, Light, Dark, Ocean Teal, Matrix Green, classic Drivechain, Catppuccin
+  Mocha, Dracula, the desktop's, and the themes of the user) — the layouts use only the colour variables of styles/themes.css (see "The looks").
 - **Top bar buttons**: the notifications (a bell with a dot while some are new: the transactions
   that came since the app started; one of the wallet shown opens in the detail panel) and the
   light/dark switch (sun, moon: a dark look goes Light, Light goes back to the dark look last
@@ -100,6 +100,28 @@ base (not black), soft depth, an ambient glow of the accent behind the page, a l
 the look of a first start (`prefs.theme` absent); a look chosen before is kept. The five looks of
 chains-qt (Light, Dark, Ocean Teal, Matrix Green, classic Drivechain) and the desktop's stay, with
 the same effects in their own colours.
+
+**User request (2026-10-15):** two more built-in looks, **Catppuccin Mocha** and **Dracula**, from the
+palettes of those projects (MIT), held to the same contrast rules (test/contrast.test.ts); and
+**Settings → Advanced theme**, where the user makes themes of their own:
+
+- A theme of the user is a built-in look (its fonts, corners and shadows) with some of its colour
+  tokens changed (lib/customthemes.ts `TOKEN_GROUPS`: backgrounds, text, accent, states, light and
+  shade). The editor starts from any theme, built-in or the user's; each colour has a colour picker
+  and a text field. The theme is drawn on the whole app while it is edited, and the look comes back
+  on Cancel. A contrast under 4.5:1 of text on its backgrounds is a warning, never a refusal.
+- Saved, renamed, duplicated and deleted (after the confirmation of the app) at once: they are kept
+  in the preferences (`prefs.customThemes`, at most 50). Choosing one waits for Apply, as the other
+  looks. They are listed with the built-in looks in Appearance, the sidebar and the palette.
+- Theme files (JSON: `format` "chains-app-theme", `version` 1, `name`, `base`, `colors`) are
+  exported and imported through the file chooser of the desktop (`file.choose`, `file.read`,
+  `file.write`: the page never names a path), or copied and pasted as text.
+- A theme file is untrusted: at most 64 KB; only those five fields; a name of at most 48
+  characters without control or direction marks (shown with SafeText, never translated); only known
+  tokens; only colours (#rgb, #rrggbb, #rrggbbaa, rgb()/rgba()/hsl()/hsla() of numbers) — no url(),
+  var(), expression, semicolon or brace. Anything else refuses the whole file. The colours are set
+  one by one with `style.setProperty` on the known tokens; the chevron of the dropdowns is drawn
+  from the parsed muted colour. Stored themes are checked again when the preferences are read.
 
 - **Depth**: the page has a still glow of the accent (two soft radial lights, `--glow`,
   `--glow-2`); cards and panels are big soft surfaces (`--radius-xl`, 20–24 px; small in Matrix and

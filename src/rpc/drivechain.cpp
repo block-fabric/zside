@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <addresstype.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <consensus/amount.h>
@@ -10,6 +11,7 @@
 #include <drivechain/miner.h>
 #include <drivechain/scdb.h>
 #include <drivechain/sidechain.h>
+#include <key_io.h>
 #include <node/blockstorage.h>
 #include <node/context.h>
 #include <node/transaction.h>
@@ -534,6 +536,8 @@ static void PushBundlePayouts(UniValue& obj, const std::optional<CMutableTransac
         UniValue payout(UniValue::VOBJ);
         payout.pushKV("amount", ValueFromAmount(blind->vout[i].nValue));
         payout.pushKV("script", HexStr(blind->vout[i].scriptPubKey));
+        // Who is paid, when the script has an address (bare and odd scripts have none).
+        if (CTxDestination dest; ExtractDestination(blind->vout[i].scriptPubKey, dest)) payout.pushKV("address", EncodeDestination(dest));
         payouts.push_back(std::move(payout));
     }
     obj.pushKV("payouts", std::move(payouts));
@@ -547,6 +551,7 @@ static std::vector<RPCResult> BundlePayoutResults()
             {RPCResult::Type::OBJ, "", "", {
                 {RPCResult::Type::STR_AMOUNT, "amount", "The amount paid"},
                 {RPCResult::Type::STR_HEX, "script", "The output script paid"},
+                {RPCResult::Type::STR, "address", /*optional=*/true, "The address paid, if the script has one"},
             }},
         }},
         {RPCResult::Type::STR_AMOUNT, "fee", /*optional=*/true, "The fee the bundle pays the miner who pays it out, if this node has its transaction"},

@@ -8,9 +8,10 @@
   import Amount from './Amount.svelte';
   import SafeText from './SafeText.svelte';
   import { css } from '../lib/actions';
-  import { feeTint, fillPercent, intervalTone, shortInterval, type RibbonBlock } from '../lib/blocks';
+  import { BLOCK_WEIGHT, feeTint, fillPercent, intervalTone, shortInterval, type RibbonBlock } from '../lib/blocks';
   import { formatCount, niceTimeOffset } from '../lib/format';
   import { CHAIN } from '../chain/config';
+  import { app } from '../lib/state.svelte';
 
   let {
     block,
@@ -35,7 +36,8 @@
 
   const mainName = CHAIN.mainchain?.name ?? '';
 
-  const fill = $derived(fillPercent(block.weight, block.nTx));
+  // Against the weight a block of this chain and network may have, as the node says (app.info.blockWeight).
+  const fill = $derived(fillPercent(block.weight ?? 0, block.nTx, app.info?.blockWeight ?? BLOCK_WEIGHT));
   const tint = $derived(feeTint(block.feeRate));
   const tone = $derived(intervalTone(secs, median));
   const reward = $derived(block.subsidy === null ? null : block.subsidy + (block.fees ?? 0));
@@ -57,7 +59,7 @@
     </span>
     <span class="who">
       <span class="tag" class:untagged={!block.tag}>{#if block.tag}<SafeText text={block.tag} title={block.tag} />{:else}{block.tag === null ? '…' : t('no tag')}{/if}</span>
-      <span class="txs faint">{formatCount(block.nTx)} tx · {formatCount(Math.round(block.weight / 1000))} kWU</span>
+      <span class="txs faint">{formatCount(block.nTx)} tx{#if block.weight !== null} · {formatCount(Math.round(block.weight / 1000))} kWU{/if}</span>
     </span>
     {#if block.main}
       <!-- A sidechain: the block of the mainchain that merged mined it (every block of a sidechain is). -->

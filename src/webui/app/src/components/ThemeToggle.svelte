@@ -1,7 +1,7 @@
 <script lang="ts" module>
-  import type { ThemeId } from '../lib/themes';
+  import type { ThemeChoice } from '../lib/customthemes';
   /** The dark look last chosen, to come back to it from the light one. */
-  let lastDark: ThemeId | null = null;
+  let lastDark: ThemeChoice | null = null;
 </script>
 
 <script lang="ts">
@@ -9,7 +9,7 @@
   // other looks are in Settings → Appearance, the sidebars and the palette.
   import Icon from './Icon.svelte';
   import { prefs, savePrefs } from '../lib/state.svelte';
-  import { isDark, toggledTheme } from '../lib/themes';
+  import { choiceIsDark, toggledChoice } from '../lib/customthemes';
 
   let prefersDark = $state(false);
   $effect(() => {
@@ -21,12 +21,12 @@
     return () => media.removeEventListener('change', onChange);
   });
 
-  const dark = $derived(isDark(prefs.theme, prefersDark));
+  const dark = $derived(choiceIsDark(prefs.theme, prefersDark, prefs.customThemes));
   const label = $derived(dark ? 'Switch to the light look' : 'Switch to the dark look');
 
   function toggle() {
     if (dark && prefs.theme !== 'system') lastDark = prefs.theme;
-    savePrefs({ theme: toggledTheme(prefs.theme, prefersDark, lastDark) });
+    savePrefs({ theme: toggledChoice(prefs.theme, prefersDark, lastDark, prefs.customThemes) });
   }
 </script>
 

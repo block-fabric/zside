@@ -113,14 +113,12 @@
     await waitFor('the more menu', () => $('[role="menu"]'));
     await shot('workspace-more-menu-light');
     document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    // The dashboard's sidebar has no Menus button (user decision): the palette reaches every item.
     T().savePrefs({ layout: 'dashboard', theme: 'dark' });
     await sleep(300);
-    $('.sidebar button[aria-label^="Menus of chains-qt"]').click();
-    await waitFor('the menus', () => $('[role="menu"]'));
-    await shot('sidebar-menus-dark');
-    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    if ($('.sidebar button[aria-label^="Menus of chains-qt"]')) throw new Error('the dashboard sidebar still has a Menus button');
     // Every other theme, on the dashboard.
-    for (const theme of ['midnight', 'ocean', 'matrix', 'qdarkstyle']) {
+    for (const theme of ['midnight', 'ocean', 'matrix', 'qdarkstyle', 'mocha', 'dracula']) {
       T().savePrefs({ theme, layout: 'dashboard' });
       T().go('home');
       await sleep(300);

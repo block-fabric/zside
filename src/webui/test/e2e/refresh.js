@@ -113,7 +113,7 @@
     $('#content').scrollTop = 0;
 
     // Every other look, on the dashboard; and the light one's Send panel.
-    for (const theme of ['light', 'dark', 'ocean', 'matrix', 'qdarkstyle']) {
+    for (const theme of ['light', 'dark', 'ocean', 'matrix', 'qdarkstyle', 'mocha', 'dracula']) {
       T().savePrefs({ theme, layout: 'dashboard' });
       await home();
       await shot(`dashboard-home-${theme}`);

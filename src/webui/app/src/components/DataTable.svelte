@@ -248,11 +248,10 @@
   .dt-row:hover {
     background: var(--raised);
   }
+  /* The row chosen: its background, and a thin outline; no bar at its left (user decision). */
   .dt-row.selected {
     background: var(--accent-soft);
-    box-shadow:
-      inset 3px 0 0 var(--accent),
-      inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
   }
   .cell {
     display: flex;

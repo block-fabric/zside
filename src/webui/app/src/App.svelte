@@ -14,7 +14,8 @@
   import { go, nav, PAGES, type PageId } from './lib/nav.svelte';
   import { host } from './lib/rpc';
   import { app, applySnapshot, loadPrefs, phaseEvents, prefs, subscribe, toast } from './lib/state.svelte';
-  import { applyTheme } from './lib/themes';
+  import { applyLook } from './lib/customthemes';
+  import { look } from './lib/themestore.svelte';
   import { parsePaymentUri } from './lib/uri';
   import { watchWindow } from './lib/windowframe.svelte';
   import Fatal from './views/Fatal.svelte';
@@ -26,7 +27,7 @@
   let connectError = $state('');
 
   $effect(() => {
-    applyTheme(document, prefs.theme, prefs.fontAdjust, prefersDark, prefs.fontFamily, prefs.moneyFont);
+    applyLook(document, prefs.theme, prefs.customThemes, look.preview, prefs.fontAdjust, prefersDark, prefs.fontFamily, prefs.moneyFont);
   });
 
   async function refreshNode() {

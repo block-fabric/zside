@@ -8,6 +8,7 @@
   import CopyButton from './CopyButton.svelte';
   import { answer, dialogs, type PassphraseAsk, type Pending } from '../lib/dialogs.svelte';
   import { walletDisplayName } from '../lib/wallet';
+  import { revealBidi } from '../lib/format';
 
   const current: Pending | null = $derived(dialogs.queue[0] ?? null);
 
@@ -96,7 +97,7 @@
         {#if q.informative}<p class="informative break"><SafeText text={q.informative} /></p>{/if}
         {#if q.code}
           <div class="code">
-            <pre class="mono break">{q.code}</pre>
+            <pre class="mono break" dir="auto" translate="no">{revealBidi(q.code)}</pre>
             <CopyButton text={q.code} label="Copy" iconOnly={false} />
           </div>
         {/if}

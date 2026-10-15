@@ -6,6 +6,7 @@ import { setTransport } from '../lib/bridge';
 import { CHAIN } from '../chain/config';
 import { formatCount } from '../lib/format';
 import {
+  BLOCK_WEIGHT,
   CHAINS_MAX_BLOCK_WEIGHT,
   coinbaseTag,
   expectedSeconds,
@@ -92,9 +93,11 @@ describe('what a box shows', () => {
 describe('the box', () => {
   it('draws the fill, its tint, the interval colour, the tag as text of the chain, the BMM badges', async () => {
     const onselect = vi.fn();
-    const { container } = render(BlockBox, { block: block({ bmm: [2, 5], tag: '<b>Confirmed</b>' }), secs: 10, median: 60, now: 1_700_000_120, onselect });
+    const b = block({ bmm: [2, 5], tag: '<b>Confirmed</b>' });
+    const { container } = render(BlockBox, { block: b, secs: 10, median: 60, now: 1_700_000_120, onselect });
     const face = container.querySelector('.blk-face') as HTMLElement;
-    expect(face.style.getPropertyValue('--fill')).toBe('50%');
+    // Against the weight a block of this chain may have (chain.json blockWeight): half of a block of Chains.
+    expect(face.style.getPropertyValue('--fill')).toBe(BLOCK_WEIGHT === CHAINS_MAX_BLOCK_WEIGHT ? '50%' : `${fillPercent(b.weight ?? 0, b.nTx, BLOCK_WEIGHT)}%`);
     expect(face.dataset.tint).toBe('mid');
     expect(container.querySelector('.interval')!.classList.contains('fast')).toBe(true);
     expect(container.querySelector('.interval')!.textContent).toBe('10s');

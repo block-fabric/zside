@@ -1,7 +1,7 @@
 // The looks of the app: Midnight (the default, the look of chains-app), the themes of chains-qt
 // (theme.cpp), as sets of CSS variables (styles/themes.css), plus the look of the desktop.
 
-export type ThemeId = 'system' | 'midnight' | 'light' | 'dark' | 'ocean' | 'matrix' | 'qdarkstyle';
+export type ThemeId = 'system' | 'midnight' | 'light' | 'dark' | 'ocean' | 'matrix' | 'qdarkstyle' | 'mocha' | 'dracula';
 
 export interface Theme {
   id: ThemeId;
@@ -18,6 +18,8 @@ export const THEMES: readonly Theme[] = [
   { id: 'ocean', name: 'Ocean Teal', dark: true },
   { id: 'matrix', name: 'Matrix Green', dark: true },
   { id: 'qdarkstyle', name: 'Dark (classic Drivechain)', dark: true },
+  { id: 'mocha', name: 'Catppuccin Mocha', dark: true },
+  { id: 'dracula', name: 'Dracula', dark: true },
 ];
 
 /** The look of a first start. */

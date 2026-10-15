@@ -61,3 +61,15 @@ export function formatCount(n: number): string {
 export function shortHash(hash: string, keep = 8): string {
   return hash.length <= keep * 2 + 1 ? hash : `${hash.slice(0, keep)}…${hash.slice(-keep)}`;
 }
+
+/** The marks that set the direction of what follows (LRE, RLE, PDF, LRO, RLO, LRI, RLI, FSI, PDI, LRM, RLM, ALM). */
+const BIDI_CONTROLS = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
+/**
+ * Text of the chain shown as it is in a block of code (a message to copy, to sign): the marks that would turn
+ * it around (U+202E...) are written out, "[U+202E]", so that what is read is the order of the characters
+ * (audit port-2 #16). The copy keeps the text as it is.
+ */
+export function revealBidi(text: string): string {
+  return text.replace(BIDI_CONTROLS, (c) => `[U+${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}]`);
+}

@@ -22,7 +22,7 @@
   import { app, node, noWalletText, prefs, toast, wallets, walletsEnabled } from '../../lib/state.svelte';
   import { syncStatus } from '../../lib/sync';
   import { every } from '../../lib/poll';
-  import { coinsToSats, formatAmount } from '../../lib/units';
+  import { coinsToSats, formatAmount, unitInfo } from '../../lib/units';
   import { openQuick } from '../../lib/quick.svelte';
   import { balanceHistory } from '../../lib/wallet';
   import { current, refreshRecords } from '../../lib/walletdata.svelte';
@@ -199,6 +199,8 @@
 
   /** A long total takes a smaller figure in its card. */
   const longTotal = $derived(total !== null && formatAmount(total, prefs.unit).length > 12);
+  // The characters of the balance with its unit: its size fits them in the card, the unit never cut (audit port-2 #14).
+  const totalChars = $derived(total === null ? 1 : formatAmount(total, prefs.unit).length + 1 + unitInfo(prefs.unit).short.length);
 
 </script>
 
@@ -237,7 +239,7 @@
       {:else if wallets.current === null}
         <p class="muted">No wallet is loaded. Create one, or open one of the wallets of this node.</p>
       {:else}
-        <span class="value big-amount" class:long={longTotal}><Amount sats={total} /></span>
+        <span class="value big-amount fit" class:long={longTotal} style:--chars={totalChars}><Amount sats={total} /></span>
         <dl class="pairs">
           <dt>Available</dt><dd><Amount sats={balances?.trusted} showUnit={false} /></dd>
           <dt>Pending</dt><dd><Amount sats={balances?.untrustedPending} showUnit={false} /></dd>
@@ -442,6 +444,14 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  /* The balance: as large as the card lets its characters be (a digit is about 0.62em wide), never cut. */
+  .value.fit {
+    container-type: inline-size;
+    text-overflow: clip;
+  }
+  .value.fit :global(.amount) {
+    font-size: min(1em, calc(100cqi / (var(--chars, 12) * 0.62)));
   }
   .value.long {
     font-size: 1.22rem;

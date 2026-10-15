@@ -183,6 +183,8 @@ UniValue App::Info()
     }
     info.pushKV("datadir", datadir);
     if (configured) info.pushKV("blockSpacing", Params().GetConsensus().nPowTargetSpacing);
+    // The weight a block of this chain and network may have (the explorer draws how full blocks are against it).
+    if (configured) info.pushKV("blockWeight", Params().GetConsensus().max_block_weight);
 #ifdef ENABLE_WALLET
     info.pushKV("walletEnabled", !m_args.GetBoolArg("-disablewallet", false));
 #else

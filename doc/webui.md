@@ -389,6 +389,19 @@ template keeps empty, and nowhere else, so that a merge of the template never co
    allowlist; those that need the keys in `KeyedRpcMethods`) and the host methods they need
    (`RegisterHost`, after the kit's).
 
+The template keeps more hooks empty for what a chain adds beside its pages (audit port-2 #7), so that
+these too never conflict:
+
+| File | What a chain puts there |
+|---|---|
+| `src/chain/icons.ts` | `LOCAL_ICONS`: the icons of its pages, added to the kit's (components/Icon.svelte) |
+| `src/chain/LocalCards.svelte` | Its cards on the home of the dashboard, under the kit's (views/home/SideHome.svelte) |
+| `src/chain/LocalSend.svelte` | What it sends beside its coin (an asset, a name), at the top of Send; `active` set while its own form takes the place of the kit's |
+| `chain/local.ts` `shortcut: 'Alt+6'` | Alt+6 and on open its pages (lib/keyboard.ts), never over the kit's Alt+1 to Alt+5 |
+| `chain.json` `blockWeight` | Not needed: the explorer draws blocks against the weight the node says (`app.info.blockWeight`, `consensus.max_block_weight` of the network); `blockWeight` is only the fallback before it has |
+| `src/webui/test/local_tests.cpp` | The unit tests of local.cpp, built into `test_<stem>-app` when the file is there |
+| `src/webui/test/e2e/local.cmake` | `webui_local_e2e(<name> <port> [options])` for each page script `e2e/<name>.js` of its pages: run by run_sidechain.py (`--script`, `--app-arg`, `--js-var NAME=VALUE`; `window.__E2E_DIR` is the folder of the run) against a live mainchain, as `webui_e2e_<name>` |
+
 ```ts
 // chain/local.ts
 export const LOCAL_PAGES = [

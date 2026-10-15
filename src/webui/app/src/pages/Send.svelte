@@ -2,6 +2,8 @@
   import { t } from '../lib/i18n.svelte';
   import { CHAIN } from '../chain/config';
   import SafeText from '../components/SafeText.svelte';
+  // What a chain sends beside its coin (an asset, a name...): a choice at the top, and its own form (chain/LocalSend.svelte).
+  import LocalSend from '../chain/LocalSend.svelte';
   // Send coins (SendCoinsDialog, SendCoinsEntry): several recipients, the fee, coin control ("Choose
   // coins": the coins of the wallet in the page), a confirmation with a delay, unsigned transactions
   // (PSBT) and hardware wallets. No sending address book (user decision, 2026-10-15).
@@ -55,6 +57,8 @@
   let uriText = $state('');
   let uriError = $state('');
   let busy = $state(false);
+  /** The chain's own form is shown (something else than the coin is sent): the kit's form steps aside. */
+  let sendingOwn = $state(false);
   let smart = $state<{ feePerK: number; fallback: boolean; target?: number; requiredFeePerK: number } | null>(null);
   let customFee: bigint | null = $state(BigInt(prefs.customFee || 0));
 
@@ -409,6 +413,9 @@
     </button>
   {/if}
 
+  <LocalSend bind:active={sendingOwn} />
+
+  {#if !sendingOwn}
   <div class="entries">
     {#each entries as e, i (e.id)}
       <section class="panel entry" aria-label="Recipient {i + 1}">
@@ -527,6 +534,7 @@
     <span class="grow"></span>
     <span class="balance">{info?.externalSigner ? 'External balance:' : 'Balance:'} <strong><Amount sats={balance} /></strong></span>
   </footer>
+  {/if}
 </div>
 
 

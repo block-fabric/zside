@@ -39,10 +39,11 @@
     const amount = document.querySelector('[role="grid"] [role="row"]:nth-child(1) .amt') || document.querySelector('[role="grid"] .amt');
     const r = amount ? amount.getBoundingClientRect() : null;
     await check(`M4 ${W} px: the amounts of the history are in view`, !!r && r.right <= window.innerWidth && r.left >= 0, r ? `${Math.round(r.left)}..${Math.round(r.right)}` : 'no amount');
-    // The menus of chains-qt: in the drawer, its Menus button; the menu opens inside the window.
-    document.querySelector('button.drawer[aria-label="Pages"]').click();
-    await sleep(300);
-    const menus = document.querySelector('.sidebar button[aria-label^="Menus of chains-qt"]');
+    // The menus of chains-qt: the workspace's Menus button (the dashboard's sidebar has none, user
+    // decision); the menu opens inside the window.
+    T().savePrefs({ layout: 'workspace' });
+    await sleep(400);
+    const menus = document.querySelector('button[aria-label^="Menus of chains-qt"]');
     const br = menus ? menus.getBoundingClientRect() : null;
     await check(`M4 ${W} px: the Menus button is in the window`, !!br && br.right <= window.innerWidth + 1 && br.left >= -1 && br.bottom <= window.innerHeight + 1, br ? `${Math.round(br.left)}..${Math.round(br.right)}` : 'no Menus button');
     menus.click();

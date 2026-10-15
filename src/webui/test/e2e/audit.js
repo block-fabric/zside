@@ -182,7 +182,7 @@
       return out;
     };
     const contrast = {};
-    for (const theme of ['light', 'dark', 'ocean', 'matrix', 'qdarkstyle']) {
+    for (const theme of ['light', 'dark', 'ocean', 'matrix', 'qdarkstyle', 'mocha', 'dracula']) {
       T().savePrefs({ theme });
       await sleep(300);
       const failing = [];

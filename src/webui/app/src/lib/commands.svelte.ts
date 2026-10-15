@@ -32,6 +32,8 @@ export interface Command {
   checked?: boolean;
   /** More words to find it by. */
   keywords?: string;
+  /** Text of the user put in the label for its %1 (a name): shown as it is, never translated. */
+  arg?: string;
   /** In a menu: a line above it. */
   separator?: boolean;
   /** The status tip of chains-qt (QAction::statusTip): shown in the status bar under the pointer. */
@@ -158,7 +160,10 @@ export function buildCommands(): Command[] {
     { id: 'node.options', group: 'This node', label: 'Options…', run: to('settings', 'main'), keywords: 'settings preferences', tip: t('Modify configuration options for %1', CHAIN.name) },
     { id: 'node.sync', group: 'This node', label: 'Sync status…', run: () => (nav.dialog = 'sync'), keywords: 'synchronizing progress blocks left' },
     ...THEMES.map((t): Command => ({ id: `node.theme.${t.id}`, group: 'This node', label: `Theme: ${t.name}`, run: () => savePrefs({ theme: t.id }), checked: prefs.theme === t.id, keywords: 'look colours' })),
+    // The themes of the user: their names are theirs, put in the label as a value (never translated).
+    ...prefs.customThemes.map((x): Command => ({ id: `node.theme.${x.id}`, group: 'This node', label: 'Theme: %1', arg: x.name, run: () => savePrefs({ theme: x.id }), checked: prefs.theme === x.id, keywords: 'look colours custom' })),
     { id: 'node.themeCustom', group: 'This node', label: 'Theme: Custom…', run: to('settings', 'display'), keywords: 'look colours font' },
+    { id: 'node.themeEditor', group: 'This node', label: 'Advanced theme…', run: to('settings', 'theme'), keywords: 'look colours create import export custom editor' },
     { id: 'node.fontUp', group: 'This node', label: 'Increase font size', run: font(1), shortcut: 'Ctrl++', keywords: 'text larger zoom' },
     { id: 'node.fontDown', group: 'This node', label: 'Decrease font size', run: font(-1), shortcut: 'Ctrl+−', keywords: 'text smaller zoom' },
     { id: 'node.help', group: 'This node', label: 'Command-line options', run: () => (nav.dialog = 'help'), keywords: 'help arguments', tip: t('Show the %1 help message to get a list with possible %1 command-line options', CHAIN.name) },
@@ -241,7 +246,7 @@ export function searchCommands(all: readonly Command[], query: string): Command[
   if (words.length === 0) return [...all];
   const scored: { c: Command; score: number; i: number }[] = [];
   all.forEach((c, i) => {
-    const label = norm(c.label);
+    const label = norm(c.arg === undefined ? c.label : c.label.replace('%1', c.arg));
     const hay = `${label} ${norm(c.group)} ${norm(c.keywords ?? '')}`;
     if (!words.every((w) => hay.includes(w))) return;
     let score = 0;

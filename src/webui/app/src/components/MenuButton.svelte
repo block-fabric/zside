@@ -142,7 +142,7 @@
             onclick={() => run(c)}
           >
             <span class="mark" aria-hidden="true">{c.checked ? '✓' : ''}</span>
-            <span class="grow">{t(c.label)}</span>
+            <span class="grow">{c.arg === undefined ? t(c.label) : t(c.label, c.arg)}</span>
             {#if c.shortcut}<kbd>{c.shortcut}</kbd>{/if}
           </button>
         {/each}

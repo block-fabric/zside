@@ -62,7 +62,7 @@ export interface Bundle {
   payable: boolean;
   known: boolean;
   vote: string;
-  payouts?: { amount: number; script: string }[];
+  payouts?: { amount: number; script: string; address?: string }[];
   fee?: number;
 }
 

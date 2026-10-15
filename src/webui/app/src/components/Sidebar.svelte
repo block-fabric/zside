@@ -1,7 +1,7 @@
 <script lang="ts">
   // The dashboard's navigation on the left: every page, in sections, names and icons, with Home
   // first; on a narrow window a drawer (open). At its top a card of the wallet shown (its name, its
-  // lock, the unit); the pages in groups; at its foot the menus of chains-qt, the theme, the text
+  // lock, the unit); the pages in groups; at its foot the theme, the text
   // size, then Close wallet and Quit, apart. The current page is a filled pill.
   import { t } from '../lib/i18n.svelte';
   import { CHAIN } from '../chain/config';
@@ -9,12 +9,13 @@
   import Icon from './Icon.svelte';
   import MenuButton from './MenuButton.svelte';
   import WalletPicker from './WalletPicker.svelte';
-  import { buildCommands, menuSections, pageAvailable, pageDisabled } from '../lib/commands.svelte';
+  import { buildCommands, pageAvailable, pageDisabled } from '../lib/commands.svelte';
   import { NAV_SECTIONS, pageIcon } from '../lib/layout';
   import { go, nav, PAGES, type PageId } from '../lib/nav.svelte';
   import { prefs, savePrefs, statusTip, wallets } from '../lib/state.svelte';
   import { pendingNow } from '../lib/settingsdraft.svelte';
-  import { clampFontAdjust, THEMES, type ThemeId } from '../lib/themes';
+  import { clampFontAdjust, THEMES } from '../lib/themes';
+  import { isThemeChoice } from '../lib/customthemes';
   import { frame } from '../lib/windowframe.svelte';
 
   let { open = $bindable(false) }: { open?: boolean } = $props();
@@ -24,7 +25,6 @@
     ...NAV_SECTIONS.map((s) => ({ title: s.title, pages: s.pages.filter(pageAvailable) })),
   ]);
   const all = $derived(buildCommands());
-  const menus = $derived(menuSections(all));
 
   const shownWallet = $derived(wallets.list.find((w) => w.name === wallets.current) ?? null);
   const shownName = $derived(wallets.current ? wallets.current : t('default wallet'));
@@ -106,11 +106,17 @@
 
   <div class="foot">
     <div class="row">
-      <MenuButton label="Menus of chains-qt: wallet, banking, chains, tools, window, node" sections={menus} placement="above" text="Menus" icon="menu" align="start" />
-      <select class="look" aria-label="Theme" title="Theme" value={prefs.theme} onchange={(e) => savePrefs({ theme: (e.currentTarget as HTMLSelectElement).value as ThemeId })}>
+      <select class="look" aria-label="Theme" title="Theme" value={prefs.theme} onchange={(e) => { const v = (e.currentTarget as HTMLSelectElement).value; if (isThemeChoice(v, prefs.customThemes)) savePrefs({ theme: v }); }}>
         {#each THEMES as theme (theme.id)}
           <option value={theme.id}>{t(theme.name)}</option>
         {/each}
+        {#if prefs.customThemes.length > 0}
+          <optgroup label="Your themes">
+            {#each prefs.customThemes as theme (theme.id)}
+              <option value={theme.id} translate="no">{theme.name}</option>
+            {/each}
+          </optgroup>
+        {/if}
       </select>
     </div>
     <div class="row">

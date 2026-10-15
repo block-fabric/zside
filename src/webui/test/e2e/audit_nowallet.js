@@ -6,12 +6,17 @@
     await waitFor('the node to run', () => T() && T().app.phase === 'ready' && T().node.tip);
     await check('C1 the app knows there are no wallets', T().app.info.walletEnabled === false);
     await check('L11 a debug option set in chains.conf is ignored', T().app.info.devtools === false);
-    // The menus of chains-qt: the sections of the Menus button of the layout.
+    // The menus of chains-qt: the sections of the workspace's Menus button (the dashboard's sidebar has
+    // none, user decision); back to the dashboard after.
+    T().savePrefs({ layout: 'workspace' });
+    await sleep(400);
     const menusButton = document.querySelector('button[aria-label^="Menus of chains-qt"], button[title^="Menus of chains-qt"]');
     menusButton.click();
     await sleep(200);
     const menus = [...document.querySelectorAll('[role="menu"] > [role="group"]')].map((g) => g.getAttribute('aria-label'));
     menusButton.click();
+    T().savePrefs({ layout: 'dashboard' });
+    await sleep(400);
     await check('C1 the other menus are there', menus.includes('Chains') && menus.includes('Tools'), menus.join(', '));
     await check('C1 no wallet menus', !menus.includes('Your wallet') && !menus.includes('Banking'), menus.join(', '));
     // Every layout starts on Home: its balance card says why; then the overview.

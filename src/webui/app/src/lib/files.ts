@@ -14,6 +14,7 @@ export const FILTERS = {
   psbt: { name: 'Partially Signed Transaction (Binary)', patterns: ['*.psbt'] },
   csv: { name: 'Comma separated file', patterns: ['*.csv'] },
   png: { name: 'PNG Image', patterns: ['*.png'] },
+  theme: { name: 'Theme (JSON)', patterns: ['*.json'] },
 } satisfies Record<string, FileFilter>;
 
 export interface ChooseOptions {

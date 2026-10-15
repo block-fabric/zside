@@ -36,6 +36,8 @@ export interface ChainConfig {
   /** The chain a sidechain is pegged to. */
   mainchain?: MainchainInfo;
   links: { website?: string; source?: string; issues?: string; guide?: string };
+  /** The weight a block of this chain may have (consensus.max_block_weight), for how full its blocks are drawn; Chains' 800 000 when not set. */
+  blockWeight?: number;
   /** Pages of the kit this chain does not have (a sidechain: no sidechains of its own, no solo mining). */
   drop: PageId[];
 }

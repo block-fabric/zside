@@ -20,6 +20,10 @@ add_executable(test_chains-app
   windowframe_tests.cpp
   $<$<BOOL:${ENABLE_WALLET}>:walletapi_tests.cpp>
 )
+# The tests of the host side of the chain's own pages (local.cpp), when it has some: test/local_tests.cpp.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/local_tests.cpp)
+  target_sources(test_chains-app PRIVATE local_tests.cpp)
+endif()
 set_target_properties(test_chains-app PROPERTIES OUTPUT_NAME test_${CLIENT_BIN_NAME}-app)
 target_link_libraries(test_chains-app
   core_interface
@@ -65,19 +69,23 @@ if(WEBUI_SIDECHAIN)
         --shots ${CMAKE_CURRENT_BINARY_DIR}/e2e-shots
     )
     set_tests_properties(webui_e2e_sidechain PROPERTIES TIMEOUT 2400 RUN_SERIAL TRUE)
-    # A page script of the chain's own pages (zSide: zside.js, the shielded wallet).
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/e2e/zside.js)
-      add_test(NAME webui_e2e_zside
+    # The page scripts of the chain's own pages, the same way: e2e/local.cmake calls
+    # webui_local_e2e(<name> <port> [options of run_sidechain.py]) for each e2e/<name>.js, so that a merge of
+    # the template never conflicts with them. The template has none.
+    function(webui_local_e2e name port)
+      add_test(NAME webui_e2e_${name}
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_sidechain.py
           --app $<TARGET_FILE:chains-app>
           --mainchain-bin ${WEBUI_MAINCHAIN_BIN_DIR}
-          --tmp ${CMAKE_CURRENT_BINARY_DIR}/e2e-zside
+          --tmp ${CMAKE_CURRENT_BINARY_DIR}/e2e-${name}
           --shots ${CMAKE_CURRENT_BINARY_DIR}/e2e-shots
-          --port 29760
-          --script zside.js
+          --port ${port}
+          --script ${name}.js
+          ${ARGN}
       )
-      set_tests_properties(webui_e2e_zside PROPERTIES TIMEOUT 2400 RUN_SERIAL TRUE)
-    endif()
+      set_tests_properties(webui_e2e_${name} PROPERTIES TIMEOUT 2400 RUN_SERIAL TRUE)
+    endfunction()
+    include(${CMAKE_CURRENT_SOURCE_DIR}/e2e/local.cmake OPTIONAL)
   endif()
 elseif(WEBUI_TEST_HOOKS AND XVFB_RUN_EXECUTABLE AND Python3_Interpreter_FOUND)
   add_test(NAME webui_e2e_smoke

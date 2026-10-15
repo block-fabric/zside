@@ -234,8 +234,6 @@ export const HOME_QUICK_ACTIONS: readonly QuickAction[] = SIDECHAIN
         .filter((p) => p.quick && p.section !== 'tools')
         .map((p): QuickAction => ({ label: p.quick!.label, icon: p.quick!.icon ?? p.icon, page: p.id as PageId, tab: p.quick!.tab })),
       { label: 'Block explorer', icon: 'explorer', page: 'explorer' },
-      { label: 'Sign message', icon: 'edit', page: 'messages', tab: 'sign' },
-      { label: 'Load PSBT', icon: 'paste', page: 'psbt' },
       ...(LOCAL_PAGES as readonly LocalPage[])
         .filter((p) => p.quick && p.section === 'tools')
         .map((p): QuickAction => ({ label: p.quick!.label, icon: p.quick!.icon ?? p.icon, page: p.id as PageId, tab: p.quick!.tab })),
@@ -246,8 +244,7 @@ export const HOME_QUICK_ACTIONS: readonly QuickAction[] = SIDECHAIN
       { label: 'Deposit to a sidechain', icon: 'sidechains', page: 'sidechains' },
       { label: 'Block explorer', icon: 'explorer', page: 'explorer' },
       { label: 'Mine', icon: 'mine', page: 'mine' },
-      { label: 'Sign message', icon: 'edit', page: 'messages', tab: 'sign' },
-      { label: 'Load PSBT', icon: 'paste', page: 'psbt' },
+      // No Sign message nor Load PSBT here (user decision): "All actions" (the palette) reaches them.
     ];
 
 /** The dashboard's sidebar: every page (after Home), in the sections of the areas. */

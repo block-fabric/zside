@@ -13,3 +13,13 @@ describe('page tabs', () => {
     expect(rule![1]).toMatch(/background:\s*var\(--raised\)/);
   });
 });
+
+// Highlighted rows (tables) and options (the palette): no bar at their left (user decision).
+describe('highlighted rows and options', () => {
+  it('have no left accent bar', () => {
+    for (const file of ['../components/DataTable.svelte', '../components/CommandPalette.svelte']) {
+      const text = readFileSync(resolve(__dirname, file), 'utf8');
+      expect(text, file).not.toMatch(/inset\s+\d+(\.\d+)?(px|rem)\s+0\s+0\s+var\(--accent\)/);
+    }
+  });
+});

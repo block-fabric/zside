@@ -14,7 +14,9 @@ folder of the Windows user, and runs there, through the interop of WSL:
     the first one through the named pipe), and the pictures of the pages, copied back to --shots;
   - for the app of a sidechain (chain.json role "sidechain"), sidechain.js instead: the app on Windows
     following a regtest mainchain node run here in WSL (chainsd of --mainchain-bin, reached through the
-    localhost of Windows), a deposit, merged mining, a withdrawal and its bundle paid (run_sidechain.py).
+    localhost of Windows), a deposit, merged mining, a withdrawal and its bundle paid (run_sidechain.py);
+    and the scripts of the chain's own pages the same way (hivemind.js, bitnames.js...), with --app-arg and --js-var
+    as run_sidechain.py takes them.
 
 Nothing outside that folder is touched: the app settings file and the data of WebView2 are in it,
 the chains: URI scheme is not registered (-webuitestscript), and only the processes started from
@@ -39,6 +41,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_smoke import script  # noqa: E402
 
+# The scripts of a chain's own pages (hivemind.js, bitnames.js...) take 39590 and on.
 PORTS = {"smoke": 39470, "layouts": 39490, "titlebar": 39510, "walletcard": 39550, "sidechain": 39570}
 CHAIN = json.loads((HERE.parents[1] / "app/src/chain/chain.json").read_text())
 SIDECHAIN = CHAIN["role"] == "sidechain"
@@ -167,6 +170,8 @@ def main():
     parser.add_argument("--scripts", default="sidechain" if SIDECHAIN else "smoke,layouts,titlebar,walletcard")
     parser.add_argument("--mainchain-bin", type=Path, default=os.environ.get("MAINCHAIN_BIN_DIR"), help="folder of chainsd, for sidechain.js (default: $MAINCHAIN_BIN_DIR)")
     parser.add_argument("--keep", action="store_true", help="keep the folder on Windows")
+    parser.add_argument("--app-arg", action="append", default=[], help="an option given to the app (repeat for more)")
+    parser.add_argument("--js-var", action="append", default=[], help="NAME=VALUE: window.__E2E_<NAME> = VALUE (JSON) for the page scripts")
     args = parser.parse_args()
 
     temp_win = win("echo %TEMP%")
@@ -201,13 +206,13 @@ def main():
 
         for name in [s for s in args.scripts.split(",") if s]:
             print(f"== {name}", flush=True)
-            port = PORTS.get(name, 39530)
+            port = PORTS.get(name, 39590)
             base = folder / name
             datadir = base / "datadir"
             datadir.mkdir(parents=True)
             mainchain = None
             extra = []
-            if name == "sidechain":
+            if SIDECHAIN:
                 # The mainchain, here in WSL; the app on Windows reaches it through the localhost of Windows.
                 from run_sidechain import Miner, Rpc, SLOT, ACTIVATION_PERIOD, PASSWORD, USER, start_mainchain  # noqa: E402
                 main_proc, main = start_mainchain(args.mainchain_bin / "chainsd", base, port + 10)
@@ -223,7 +228,11 @@ def main():
                 (base / "mainchain.password").write_text(PASSWORD + "\n")
                 extra = [f"-sidechainslot={SLOT}", f"-mainchainrpcport={port + 10}", f"-mainchainrpcuser={USER}",
                          f"-mainchainrpcpasswordfile={to_win(base / 'mainchain.password')}", "-mainchainrpcwallet=miner"]
-                (base / f"{name}.js").write_text(script(f"{name}.js", f"window.__E2E_SLOT = {SLOT};\nwindow.__E2E_MAINCHAIN = {json.dumps(CHAIN['mainchain']['name'])};\n"))
+                prelude = f"window.__E2E_SLOT = {SLOT};\nwindow.__E2E_MAINCHAIN = {json.dumps(CHAIN['mainchain']['name'])};\n"
+                for var in args.js_var:
+                    key, value = var.split("=", 1)
+                    prelude += f"window.__E2E_{key} = {value};\n"
+                (base / f"{name}.js").write_text(script(f"{name}.js", prelude))
             else:
                 (base / f"{name}.js").write_text(script(f"{name}.js"))
             # The data of WebView2 in the folder too (read by the runtime from the environment).
@@ -231,7 +240,7 @@ def main():
             os.environ["WEBVIEW2_USER_DATA_FOLDER"] = env_dir
             os.environ["WSLENV"] = "WEBVIEW2_USER_DATA_FOLDER/w"
             common = ["-regtest", f"-port={port}", f"-rpcport={port + 1}", "-listen=0", "-dnsseed=0", "-fixedseeds=0", "-fallbackfee=0.0002", "-webuiregisteruri=0",
-                      f"-datadir={to_win(datadir)}", f"-webuiconfig={to_win(base / 'app.json')}"] + extra
+                      f"-datadir={to_win(datadir)}", f"-webuiconfig={to_win(base / 'app.json')}"] + extra + args.app_arg
             run = Run(exe, common + [f"-webuitestshots={to_win(base / 'shots')}", f"-webuitestscript={to_win(base / (name + '.js'))}"], base / "app.log", datadir)
             if name == "smoke":
                 ready = run.wait_event("READY_FOR_URI", 300)
@@ -251,7 +260,7 @@ def main():
                         failures.append(f"second start with a URI: exit {second.returncode}, {out[-300:]}")
                 else:
                     failures.append("the smoke script never got to the URI step")
-            code = run.wait(1800 if name == "sidechain" else 1200)
+            code = run.wait(1800 if SIDECHAIN else 1200)
             if code is None:
                 failures.append(f"{name}: did not stop")
                 stop_ours(folder_win)
@@ -274,7 +283,9 @@ def main():
             if mainchain:
                 main_proc, main, miner, wallet = mainchain
                 paid = run.events.get("WITHDRAWN")
-                if paid:
+                if name != "sidechain":
+                    pass
+                elif paid:
                     address, amount = paid.split(" ")[1:3]
                     for _ in range(120):
                         if float(wallet("getreceivedbyaddress", address, 1)) >= float(amount):

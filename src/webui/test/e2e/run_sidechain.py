@@ -17,7 +17,8 @@ on the way. The test then checks on the mainchain that the withdrawal was paid.
 
 A sidechain made from the template runs its own page script the same way: --script <its .js, in this
 folder>, with --app-arg for options of the app and --js-var NAME=VALUE for values the script reads
-(window.__E2E_<NAME>). Only sidechain.js makes a withdrawal, checked here on the mainchain.
+(window.__E2E_<NAME>); window.__E2E_DIR is the folder of the run (for files the script chooses). Only
+sidechain.js makes a withdrawal, checked here on the mainchain.
 
 Nothing outside --tmp is touched; the nodes use ports of their own (--port and the three after it).
 """
@@ -156,7 +157,7 @@ def main():
         datadir.mkdir()
         page_script = base / args.script
         chain = json.loads((Path(__file__).resolve().parents[2] / "app/src/chain/chain.json").read_text())
-        prelude = f"window.__E2E_SLOT = {SLOT};\nwindow.__E2E_MAINCHAIN = {json.dumps(chain['mainchain']['name'])};\n"
+        prelude = f"window.__E2E_SLOT = {SLOT};\nwindow.__E2E_MAINCHAIN = {json.dumps(chain['mainchain']['name'])};\n" + f"window.__E2E_DIR = {json.dumps(str(base))};\n"
         for var in args.js_var:
             name, value = var.split("=", 1)
             prelude += f"window.__E2E_{name} = {value};\n"

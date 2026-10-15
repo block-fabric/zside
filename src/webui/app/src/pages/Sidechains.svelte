@@ -4,6 +4,7 @@
   // with the votes of the miners. Richer than Qt: an overview of the slots, the progress of each
   // proposal and bundle, and the deposits of a sidechain.
   import { t } from '../lib/i18n.svelte';
+  import Pager from '../components/Pager.svelte';
   import SafeText from '../components/SafeText.svelte';
   import AmountInput from '../components/AmountInput.svelte';
   import Amount from '../components/Amount.svelte';
@@ -46,12 +47,18 @@
   let dc = $state<DrivechainState | null>(null);
   let loadError = $state('');
 
+  // Only the refresh started last is shown: one a new block started before a vote, answered after the
+  // vote's own, would show the old vote again (user report: the vote did not change at once).
+  let refreshes = 0;
   async function refresh() {
+    const mine = ++refreshes;
     try {
-      dc = await loadDrivechain();
+      const loaded = await loadDrivechain();
+      if (mine !== refreshes) return;
+      dc = loaded;
       loadError = '';
     } catch (e) {
-      loadError = errorText(e);
+      if (mine === refreshes) loadError = errorText(e);
     }
   }
   // Again with every block (SidechainPage: numBlocksChanged while it shows).
@@ -75,7 +82,24 @@
     if (detail.follow) showDetail({ kind: 'sidechain', slot });
   }
   const selected = $derived(dc?.sidechains.find((s) => s.slot === selectedSlot) ?? null);
-  let deposits = $state<Deposit[]>([]);
+  let deposits = $state.raw<Deposit[]>([]);
+  // Pages (user decisions): the active sidechains 10 at a time; of the latest deposits, how many
+  // (10 to 500, never more), shown 10, 25 or 50 a page.
+  const SIDECHAINS_PAGE = 10;
+  const DEPOSIT_POINTS = [10, 25, 50, 100, 250, 500] as const;
+  const DEPOSIT_SIZES = [10, 25, 50] as const;
+  let depositPoints = $state<number>(100);
+  let sidechainsPage = $state(0);
+  let depositsPage = $state(0);
+  let depositsSize = $state(10);
+  const sidechainsShown = $derived(dc ? dc.sidechains.slice(sidechainsPage * SIDECHAINS_PAGE, (sidechainsPage + 1) * SIDECHAINS_PAGE) : []);
+  const depositsKept = $derived(deposits.slice(0, depositPoints));
+  const depositsShown = $derived(depositsKept.slice(depositsPage * depositsSize, (depositsPage + 1) * depositsSize));
+  // Another sidechain: its deposits from the first page.
+  $effect(() => {
+    void selectedSlot;
+    depositsPage = 0;
+  });
   $effect(() => {
     const slot = selectedSlot;
     void node.tip?.height;
@@ -85,7 +109,7 @@
     }
     rpc
       .raw<Deposit[]>('listsidechaindeposits', [slot])
-      .then((d) => (deposits = d.slice(-50).reverse()))
+      .then((d) => (deposits = d.slice(-500).reverse()))
       .catch(() => (deposits = []));
   });
   $effect(() => {
@@ -225,6 +249,23 @@
 
   // --- Withdrawals ---
   let selectedBundle = $state<string | null>(null);
+  // The bundles opened to show who they pay (user decision), and the page of payees of each.
+  const PAYEES_PAGE = 25;
+  let expanded = $state(new Set<string>());
+  let payeePages = $state<Record<string, number>>({});
+  function toggle(hash: string) {
+    const next = new Set(expanded);
+    if (!next.delete(hash)) next.add(hash);
+    expanded = next;
+  }
+  const payeePage = (hash: string) => payeePages[hash] ?? 0;
+  function setPayeePage(hash: string, page: number) {
+    payeePages = { ...payeePages, [hash]: page };
+  }
+  function payeesShown(b: Bundle) {
+    const page = payeePage(b.hash);
+    return (b.payouts ?? []).slice(page * PAYEES_PAGE, (page + 1) * PAYEES_PAGE);
+  }
   // Opened for a sidechain: its first bundle chosen on the Withdrawals tab, the deposit form ready on the first.
   $effect(() => {
     if (focusSlot === null || !dc) return;
@@ -234,7 +275,20 @@
     else if (tab === 'sidechains') queueMicrotask(() => document.getElementById('deposit-destination')?.focus());
   });
   async function vote(b: Bundle, v: 'upvote' | 'downvote' | 'abstain' | 'default') {
-    await call('setwithdrawalvote', v === 'upvote' ? [b.slot, v, b.hash] : [b.slot, v]);
+    const params = v === 'upvote' ? [b.slot, v, b.hash] : [b.slot, v];
+    try {
+      await rpc.raw('setwithdrawalvote', params);
+    } catch (e) {
+      await inform(t('Sidechains'), errorText(e), 'warning');
+      return;
+    }
+    // The new vote at once, as the node counts it (listwithdrawalbundles): upvoting a bundle downvotes the
+    // others of its sidechain. The default depends on the node: the refresh says.
+    if (dc && v !== 'default') {
+      const bundles = dc.bundles.map((x) => (x.slot !== b.slot ? x : { ...x, vote: v === 'upvote' ? (x.hash === b.hash ? 'upvote' : 'downvote') : v }));
+      dc = { ...dc, bundles };
+    }
+    await refresh();
   }
   async function defaultVote(v: string) {
     await call('setdefaultwithdrawalvote', [v]);
@@ -308,10 +362,10 @@
           <table class="grid" aria-label="Active sidechains">
             <thead><tr><th>Slot</th><th>Title</th><th class="end">In escrow</th><th class="end">Pending withdrawals</th><th class="end">Active since block</th></tr></thead>
             <tbody>
-              {#each dc.sidechains as s (s.slot)}
+              {#each sidechainsShown as s (s.slot)}
                 <tr class:chosen={s.slot === selectedSlot} onclick={() => pick(s.slot)} use:selectable={() => pick(s.slot)}>
                   <td class="num">{s.slot}</td>
-                  <td><button type="button" class="link" onclick={() => pick(s.slot)} translate="no">{s.title}</button><span class="desc muted" translate="no">{s.description}</span></td>
+                  <td><button type="button" class="link" onclick={() => pick(s.slot)} translate="no">{s.title}</button><span class="desc muted" translate="no" title={s.description}>{s.description}</span></td>
                   <td class="end">{#if s.escrow}<Amount sats={escrowOf(s)} />{:else}<span class="muted">no deposits yet</span>{/if}</td>
                   <td class="end num">{s.pendingbundles}</td>
                   <td class="end num">{formatCount(s.activationheight)}</td>
@@ -319,15 +373,22 @@
               {/each}
             </tbody>
           </table>
+          <Pager total={dc.sidechains.length} bind:page={sidechainsPage} size={SIDECHAINS_PAGE} label="active sidechains" />
         {/if}
       </section>
 
       <section class="panel deposit">
         <div class="panel-head"><h2>Deposit to the selected sidechain</h2></div>
         <form class="panel-body form" onsubmit={(e) => { e.preventDefault(); deposit(); }}>
+          <!-- Every active sidechain, to choose the one to deposit to (user decision); the list selects it too. -->
           <div class="field">
-            <span class="label">Sidechain</span>
-            <span class="target">{#if selected}<SafeText text={selected.title} /> (slot {selected.slot}){:else}Select a sidechain in the list{/if}</span>
+            <label for="deposit-sidechain">Sidechain</label>
+            <select id="deposit-sidechain" value={selectedSlot ?? ''} onchange={(e) => pick(Number((e.currentTarget as HTMLSelectElement).value))}>
+              {#if selectedSlot === null}<option value="" disabled>Select a sidechain</option>{/if}
+              {#each dc.sidechains as s (s.slot)}
+                <option value={s.slot} translate="no">{s.slot} · {s.title}</option>
+              {/each}
+            </select>
           </div>
           <div class="field">
             <label for="deposit-destination">Destination</label>
@@ -360,16 +421,26 @@
             <dt>Build commit hash</dt><dd class="mono break">{selected.hashid2}</dd>
           </dl>
           <div>
-            <h3>Latest deposits</h3>
+            <div class="deposits-head">
+              <h3>Latest deposits</h3>
+              <label class="points">
+                <span class="faint">Latest</span>
+                <select aria-label="How many of the latest deposits" value={depositPoints} onchange={(e) => { depositPoints = Number((e.currentTarget as HTMLSelectElement).value); depositsPage = 0; }}>
+                  {#each DEPOSIT_POINTS as n (n)}<option value={n}>{n}</option>{/each}
+                </select>
+              </label>
+            </div>
             {#if deposits.length === 0}
               <p class="muted">No deposits yet.</p>
             {:else}
+              <div class="scroll-x">
               <table class="grid compact" aria-label="Deposits">
                 <thead><tr><th>Destination</th><th class="end">Amount</th><th class="end">Escrow after</th><th class="end">Confirmations</th></tr></thead>
                 <tbody>
-                  {#each deposits as d (d.txid + d.burnindex)}
+                  {#each depositsShown as d (d.txid + d.burnindex)}
                     <tr title={d.txid}>
-                      <td class="mono break">{d.destination}</td>
+                      <!-- Shortened in the middle (the slot and the checksum show); all of it on hover and copied. -->
+                      <td class="mono dest" title={d.destination}><span translate="no">{shortHash(d.destination, 10)}</span> <CopyButton text={d.destination} label="Copy the destination" /></td>
                       <td class="end"><Amount sats={coinsToSats(d.amount)} /></td>
                       <td class="end"><Amount sats={coinsToSats(d.total)} /></td>
                       <td class="end num">{d.confirmations}</td>
@@ -377,6 +448,8 @@
                   {/each}
                 </tbody>
               </table>
+              </div>
+              <Pager total={depositsKept.length} bind:page={depositsPage} bind:size={depositsSize} sizes={DEPOSIT_SIZES} label="deposits" />
             {/if}
           </div>
         </div>
@@ -486,10 +559,13 @@
         <p class="panel-body muted">No withdrawal is pending.</p>
       {:else}
         <table class="grid" aria-label="Withdrawal bundles">
-          <thead><tr><th>Slot</th><th>Score</th><th class="end">Blocks left</th><th>Payable</th><th>Transaction known</th><th>Vote of this node</th><th>Bundle hash</th></tr></thead>
+          <thead><tr><th><span class="sr-only">Payees</span></th><th>Slot</th><th>Score</th><th class="end">Blocks left</th><th>Payable</th><th>Transaction known</th><th>Vote of this node</th><th>Bundle hash</th></tr></thead>
           <tbody>
             {#each dc.bundles as b (b.hash)}
               <tr class:chosen={b.hash === selectedBundle} onclick={() => (selectedBundle = b.hash)} use:selectable={() => (selectedBundle = b.hash)}>
+                <td class="expand-cell">
+                  <button type="button" class="btn small ghost icon expand" class:open={expanded.has(b.hash)} aria-expanded={expanded.has(b.hash)} aria-label="Who bundle {shortHash(b.hash)} pays" onclick={(e) => { e.stopPropagation(); toggle(b.hash); }}><Icon name="chevron-right" size={15} /></button>
+                </td>
                 <td><span class="num">{b.slot}</span> <SafeText class="muted" text={sidechainTitle(b.slot)} /></td>
                 <td><Meter value={b.score} max={dc.info.withdrawalminscore} label="Score of bundle {shortHash(b.hash)}" text="{b.score} of {dc.info.withdrawalminscore}" tone={b.payable ? 'positive' : bundleCanPass(b, dc.info) ? 'accent' : 'negative'} /></td>
                 <td class="end num">{b.blocksleft}</td>
@@ -498,9 +574,30 @@
                 <td><span class="badge" class:accent={b.vote === 'upvote'} class:warning={b.vote === 'downvote'}>{voteText(b.vote)}</span></td>
                 <td class="mono">{shortHash(b.hash)}</td>
               </tr>
-              {#if b.hash === selectedBundle && b.payouts}
-                <tr class="payouts"><td colspan="7">
-                  Pays {b.payouts.length} output(s): {#each b.payouts as p, i (i)}<Amount sats={coinsToSats(p.amount)} />{i < b.payouts.length - 1 ? ', ' : ''}{/each}{#if b.fee !== undefined}; fee <Amount sats={coinsToSats(b.fee)} />{/if}
+              {#if expanded.has(b.hash)}
+                <tr class="payouts"><td colspan="8">
+                  {#if b.payouts}
+                    <!-- Who the bundle pays and how much (user decision), as this node has its transaction. -->
+                    <table class="grid compact payees" aria-label="Payees of bundle {shortHash(b.hash)}">
+                      <thead><tr><th class="end">#</th><th>Pays to</th><th class="end">Amount</th></tr></thead>
+                      <tbody>
+                        {#each payeesShown(b) as p, i (i)}
+                          <tr>
+                            <td class="end num faint">{payeePage(b.hash) * PAYEES_PAGE + i + 1}</td>
+                            <td class="mono">{#if p.address}<span translate="no">{p.address}</span> <CopyButton text={p.address} label="Copy the address" />{:else}<span class="faint">script</span> <span translate="no">{shortHash(p.script, 16)}</span>{/if}</td>
+                            <td class="end"><Amount sats={coinsToSats(p.amount)} /></td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                      <tfoot>
+                        <tr><td></td><td class="faint">{b.payouts.length === 1 ? '1 payee' : `${formatCount(b.payouts.length)} payees`}, in all</td><td class="end"><strong><Amount sats={b.payouts.reduce((sum, p) => sum + coinsToSats(p.amount), 0n)} /></strong></td></tr>
+                        {#if b.fee !== undefined}<tr><td></td><td class="faint">Fee to the miner who pays it out</td><td class="end"><Amount sats={coinsToSats(b.fee)} /></td></tr>{/if}
+                      </tfoot>
+                    </table>
+                    <Pager total={b.payouts.length} page={payeePage(b.hash)} size={PAYEES_PAGE} label="payees" onpage={(n) => setPayeePage(b.hash, n)} />
+                  {:else}
+                    <span class="muted">This node does not have the transaction of this bundle, so it cannot say who it pays. A node of the sidechain hands it over.</span>
+                  {/if}
                 </td></tr>
               {/if}
             {/each}
@@ -602,9 +699,12 @@
     gap: 1rem;
     margin-bottom: 1rem;
   }
+  /* Wide tables scroll sideways; the box grows with its rows (10 a page), never a scroll bar of its own
+     up and down (user decision). */
   .list {
     margin-bottom: 1rem;
     overflow-x: auto;
+    overflow-y: hidden;
   }
   .cols .list {
     margin-bottom: 0;
@@ -647,6 +747,55 @@
     display: block;
     font-size: 0.82rem;
   }
+  /* The description of an active sidechain: two lines at most (all of it on hover, and below the list). */
+  .list td .desc {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    min-width: 12rem;
+  }
+  .dest {
+    white-space: nowrap;
+  }
+  .deposits-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .points {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.86rem;
+  }
+  .points select {
+    width: auto;
+    min-height: 1.9rem;
+  }
+  .expand-cell {
+    width: 2.2rem;
+  }
+  .expand :global(svg) {
+    transition: transform 0.15s;
+  }
+  .expand.open :global(svg) {
+    transform: rotate(90deg);
+  }
+  .payees {
+    margin: 0.25rem 0;
+  }
+  .payees tfoot td {
+    border-top: 1px solid var(--line);
+    padding-top: 0.4rem;
+  }
+  /* A narrow window: the deposits scroll sideways in their column, not the page. */
+  .scroll-x {
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
   .link {
     padding: 0;
     border: 0;
@@ -671,9 +820,12 @@
     font-weight: 400;
     font-size: 0.95rem;
   }
+  /* The facts of the sidechain from the top down, whatever the height of the deposits beside them (no
+     spacing to fill the height: user decision). */
   .detail-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
     gap: 1.5rem;
   }
   .detail-grid h3 {

@@ -6,7 +6,8 @@ import { addSample } from './traffic.svelte';
 import { addProgressSample, type ProgressSample } from './syncoverlay';
 import { host, type AppInfo, type Dialog, type NodeSnapshot, type Phase, type WalletSummary } from './rpc';
 import { isUnit, type Unit } from './units';
-import { clampFontAdjust, DEFAULT_THEME, isTheme, type ThemeId } from './themes';
+import { clampFontAdjust, DEFAULT_THEME } from './themes';
+import { checkStoredThemes, isThemeChoice, type CustomTheme, type ThemeChoice } from './customthemes';
 import { DEFAULT_LAYOUT, isLayout, type LayoutId } from './layout';
 
 export interface Tip {
@@ -70,7 +71,9 @@ export const wallets = $state({
 });
 
 export const prefs = $state({
-  theme: DEFAULT_THEME as ThemeId,
+  theme: DEFAULT_THEME as ThemeChoice,
+  /** The themes of the user (Settings → Advanced theme), checked as strictly as a theme file. */
+  customThemes: [] as CustomTheme[],
   fontAdjust: 0,
   unit: 'CHN' as Unit,
   mask: false,
@@ -105,8 +108,10 @@ export const prefs = $state({
   /** Solo mining: the address of the rewards and the threads, as last started (MiningAddress, MiningThreads). */
   miningAddress: '',
   miningThreads: 1,
-  /** Block explorer: how many of the latest blocks are listed. */
+  /** Block explorer: how many of the latest blocks are listed (0: all). */
   explorerCount: 50,
+  /** Block explorer: the blocks shown a page (10, 25, 50 or 100). */
+  explorerPageSize: 25,
   /** Multisig lounge: keys and shared addresses (MultisigKeys, MultisigAddresses), name and value. */
   multisigKeys: [] as { name: string; value: string }[],
   multisigAddresses: [] as { name: string; value: string }[],
@@ -286,7 +291,8 @@ export function subscribe(): void {
 // --- Preferences (kept by the app, per network) ---
 
 export function applyPrefs(raw: Record<string, unknown>): void {
-  if (isTheme(raw.theme)) prefs.theme = raw.theme;
+  if (raw.customThemes !== undefined) prefs.customThemes = checkStoredThemes(raw.customThemes);
+  if (isThemeChoice(raw.theme, prefs.customThemes)) prefs.theme = raw.theme;
   if (typeof raw.fontAdjust === 'number') prefs.fontAdjust = clampFontAdjust(raw.fontAdjust);
   if (isUnit(raw.unit)) prefs.unit = raw.unit;
   if (typeof raw.mask === 'boolean') prefs.mask = raw.mask;
@@ -303,7 +309,9 @@ export function applyPrefs(raw: Record<string, unknown>): void {
   if (typeof raw.thirdPartyTxUrls === 'string') prefs.thirdPartyTxUrls = raw.thirdPartyTxUrls;
   if (typeof raw.miningAddress === 'string') prefs.miningAddress = raw.miningAddress;
   if (typeof raw.miningThreads === 'number' && raw.miningThreads >= 1) prefs.miningThreads = Math.floor(raw.miningThreads);
-  if (typeof raw.explorerCount === 'number' && raw.explorerCount >= 10 && raw.explorerCount <= 1000) prefs.explorerCount = Math.floor(raw.explorerCount);
+  // 10 to 50 000 of the latest blocks, or 0 for all of them.
+  if (typeof raw.explorerCount === 'number' && (raw.explorerCount === 0 || (raw.explorerCount >= 10 && raw.explorerCount <= 50000))) prefs.explorerCount = Math.floor(raw.explorerCount);
+  if (raw.explorerPageSize === 10 || raw.explorerPageSize === 25 || raw.explorerPageSize === 50 || raw.explorerPageSize === 100) prefs.explorerPageSize = raw.explorerPageSize;
   const entries = (v: unknown) => (Array.isArray(v) ? v.filter((e): e is { name: string; value: string } => !!e && typeof e.name === 'string' && typeof e.value === 'string') : []);
   if (Array.isArray(raw.multisigKeys)) prefs.multisigKeys = entries(raw.multisigKeys);
   if (Array.isArray(raw.multisigAddresses)) prefs.multisigAddresses = entries(raw.multisigAddresses);

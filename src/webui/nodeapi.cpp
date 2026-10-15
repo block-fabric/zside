@@ -5,6 +5,7 @@
 #include <webui/nodeapi.h>
 
 #include <base58.h>
+#include <chain.h>
 #include <bech32.h>
 #include <crypto/ripemd160.h>
 #include <crypto/sha1.h>
@@ -17,6 +18,9 @@
 #include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <net_processing.h>
+#include <node/context.h>
+#include <rpc/blockchain.h>
+#include <validation.h>
 #include <netbase.h>
 #include <tinyformat.h>
 #include <uint256.h>
@@ -28,6 +32,7 @@
 #include <algorithm>
 #include <fstream>
 #include <set>
+#include <utility>
 
 namespace webui {
 using util::SplitString;
@@ -62,7 +67,7 @@ std::string Digest(std::span<const unsigned char> data)
 
 const std::vector<std::string> METHODS{
     "console.check", "console.run", "peers.disconnect", "peers.ban", "bans.unban", "drivechain.depositAddress",
-    "tools.hashes", "tools.merkle", "tools.decode", "timestamp.hashFile", "timestamp.search",
+    "tools.hashes", "tools.merkle", "tools.decode", "timestamp.hashFile", "timestamp.search", "explorer.blocks",
 };
 } // namespace
 
@@ -270,6 +275,31 @@ UniValue NodeApi::Call(const std::string& method, const UniValue& params)
         out.pushKV("sha256", HexStr(hash));
         out.pushKV("size", size);
         return out;
+    }
+    if (method == "explorer.blocks") {
+        // The latest blocks of the active chain, newest first, from the block index alone (no block read
+        // from disk): the block explorer lists up to all of them at once (user decision: 10 000, 50 000,
+        // all). Each row: [height, hash, time, transactions, difficulty]; its size and weight are read
+        // (getblock) for the rows a page shows.
+        const node::NodeContext* context{m_node().context()};
+        if (!context || !context->chainman) throw HostError("The chain is not loaded yet");
+        const int64_t asked{ParamInt(params, "count")};
+        if (asked < 0) throw HostError(BRIDGE_INVALID_REQUEST, "count: 0 (all) or more is needed");
+        UniValue rows{UniValue::VARR};
+        LOCK(::cs_main);
+        const CBlockIndex* tip{context->chainman->ActiveChain().Tip()};
+        const int64_t count{asked == 0 || !tip ? (tip ? tip->nHeight + 1 : 0) : std::min<int64_t>(asked, tip->nHeight + 1)};
+        rows.reserve(count);
+        for (const CBlockIndex* index{tip}; index && std::cmp_less(rows.size(), count); index = index->pprev) {
+            UniValue row{UniValue::VARR};
+            row.push_back(index->nHeight);
+            row.push_back(index->GetBlockHash().GetHex());
+            row.push_back(index->GetBlockTime());
+            row.push_back(static_cast<int64_t>(index->nTx));
+            row.push_back(GetDifficulty(*index));
+            rows.push_back(std::move(row));
+        }
+        return rows;
     }
     if (method == "timestamp.search") {
         interfaces::Node& node{m_node()};

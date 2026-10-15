@@ -245,6 +245,83 @@
   --radius-xl: 9px;
 }
 
+/* Catppuccin Mocha (https://catppuccin.com, MIT): base, mantle and crust for depth, mauve for the
+   accent, its blue for links. Text sits on its own palette's text and subtext colours. */
+:root[data-theme='mocha'] {
+  --bg: #181825;
+  --surface: #1e1e2e;
+  --surface-2: #232334;
+  --raised: #2a2b3c;
+  --line: #313244;
+  --line-strong: #45475a;
+  --text: #cdd6f4;
+  --text-muted: #bac2de;
+  /* The chevron of the dropdowns (Icon "chevron"), in --text-muted: test/controls.test.ts keeps them equal. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23bac2de' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  color-scheme: dark;
+  --text-faint: #a6adc8;
+  --accent: #cba6f7;
+  --accent-strong: #dcc6fa;
+  --accent-soft: #352d4c;
+  --accent-fg: #cba6f7;
+  --on-accent: #11111b;
+  --link: #89b4fa;
+  --positive: #a6e3a1;
+  --negative: #f38ba8;
+  --warning: #f9e2af;
+  --warning-soft: #37322a;
+  --danger-soft: #3b2533;
+  --focus: #b4befe;
+  --shadow: 0 1px 2px rgb(10 10 18 / 50%), 0 12px 32px rgb(10 10 18 / 40%);
+  --shadow-card: 0 1px 0 rgb(205 214 244 / 3%) inset, 0 16px 36px -18px rgb(10 10 18 / 70%);
+  --overlay: rgb(17 17 27 / 70%);
+  --chain-link: #45475a;
+  --ambient: rgb(203 166 247 / 14%);
+  --ambient-2: rgb(137 180 250 / 9%);
+  --card-top: rgb(205 214 244 / 3%);
+  --chart-fill: rgb(203 166 247 / 30%);
+  --radius-xl: 20px;
+}
+
+/* Dracula (https://draculatheme.com, MIT): its background and current-line colours for depth, purple
+   for the accent, cyan for links, its green, red and yellow for amounts and warnings. The comment
+   colour is too dark for text; the muted texts are its foreground, dimmed. */
+:root[data-theme='dracula'] {
+  --bg: #21222c;
+  --surface: #282a36;
+  --surface-2: #2c2e3b;
+  --raised: #303241;
+  --line: #3a3c4e;
+  --line-strong: #44475a;
+  --text: #f8f8f2;
+  --text-muted: #c6c9db;
+  /* The chevron of the dropdowns (Icon "chevron"), in --text-muted: test/controls.test.ts keeps them equal. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23c6c9db' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  color-scheme: dark;
+  --text-faint: #a9afce;
+  --accent: #bd93f9;
+  --accent-strong: #d6bcfc;
+  --accent-soft: #3b3354;
+  --accent-fg: #bd93f9;
+  --on-accent: #191a21;
+  --link: #8be9fd;
+  --positive: #50fa7b;
+  --negative: #ff7b7b;
+  --warning: #f1fa8c;
+  --warning-soft: #36382a;
+  --danger-soft: #3d2630;
+  --focus: #ff79c6;
+  --shadow: 0 1px 2px rgb(12 12 18 / 50%), 0 12px 32px rgb(12 12 18 / 40%);
+  --shadow-card: 0 1px 0 rgb(248 248 242 / 3%) inset, 0 16px 36px -18px rgb(12 12 18 / 70%);
+  --overlay: rgb(25 26 33 / 70%);
+  --chain-link: #44475a;
+  --ambient: rgb(189 147 249 / 14%);
+  --ambient-2: rgb(255 121 198 / 8%);
+  --card-top: rgb(248 248 242 / 3%);
+  --chart-fill: rgb(189 147 249 / 30%);
+  --radius-xl: 20px;
+}
+
 /* A font chosen apart from the colours (Settings, Display: the custom look of chains-qt). */
 :root[data-theme][data-font='inter'] {
   --font-ui: 'Inter Variable', 'Segoe UI', 'Noto Sans', system-ui, sans-serif;

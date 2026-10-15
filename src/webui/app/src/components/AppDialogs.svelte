@@ -25,7 +25,7 @@
     <pre class="license">{about?.license}</pre>
     <p class="muted credits">
       The interface runs in a native web view (webview/webview, MIT), and is built with Svelte. Its themes follow the ones of chains-qt;
-      the classic dark theme takes its colours from QDarkStyleSheet. Fonts: Inter, Nunito, JetBrains Mono (SIL Open Font License).
+      the classic dark theme takes its colours from QDarkStyleSheet, and the Catppuccin Mocha and Dracula themes from the palettes of those projects (MIT). Fonts: Inter, Nunito, JetBrains Mono (SIL Open Font License).
     </p>
     {#snippet actions()}<button type="button" class="btn primary" onclick={close}>Close</button>{/snippet}
   </Dialog>

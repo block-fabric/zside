@@ -234,7 +234,7 @@ the label of a sent payment can be edited in the history).
 
 | ID | Function | Qt source | Status |
 |----|----------|-----------|--------|
-| T01 | Looks: system, Light, Dark, Ocean Teal, Matrix Green, Dark (classic Drivechain) | theme.cpp `THEMES` | [x] (plus Midnight, the default of chains-app: doc/webui-layouts.md, "The looks") |
+| T01 | Looks: system, Light, Dark, Ocean Teal, Matrix Green, Dark (classic Drivechain) | theme.cpp `THEMES` | [x] (plus Midnight, the default of chains-app, Catppuccin Mocha, Dracula, and the themes of the user: doc/webui-layouts.md, "The looks") |
 | T02 | Look selector in the sidebar and the menu; saved and applied at once | bitcoingui.cpp, theme.cpp | [x] |
 | T03 | Font family per look and a size adjustment (-6..+12) | theme.cpp `SaveFont` | [x] |
 | T04 | Custom combination of colours and font | optionsdialog.cpp | [x] Settings → Display: any colours with any font (Inter, Nunito, JetBrains Mono, the font of the desktop), lib/themes.ts `FONTS` |

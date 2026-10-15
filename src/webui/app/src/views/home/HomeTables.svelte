@@ -15,6 +15,7 @@
   import { host } from '../../lib/rpc';
   import { prefs, toast, wallets } from '../../lib/state.svelte';
   import { bumpFee } from '../../lib/txactions';
+  import { stacked } from '../../lib/actions';
   import { coinsToSats } from '../../lib/units';
   import { addressText, typeText, walletApi, type TxRecord } from '../../lib/wallet';
   import { current } from '../../lib/walletdata.svelte';
@@ -227,7 +228,7 @@
       {:else if recent.length === 0}
         <p class="muted empty">{current.recordsLoaded ? 'No transactions yet. Receive coins to see them here.' : 'Loading…'}</p>
       {:else}
-        <table aria-label="Recent transactions">
+        <table use:stacked aria-label="Recent transactions">
           <thead>
             <tr>
               <th scope="col">Transaction</th>
@@ -269,7 +270,7 @@
       {#if sidechains.length === 0}
         <p class="muted empty">No sidechain is active yet. Proposals and votes are on the Sidechains page.</p>
       {:else}
-        <table aria-label="Active sidechains">
+        <table use:stacked aria-label="Active sidechains">
           <thead>
             <tr>
               {@render head('sidechains', 'name', 'Sidechain')}
@@ -321,7 +322,7 @@
       {#if blocks.length === 0}
         <p class="muted empty">Waiting for the node…</p>
       {:else}
-        <table aria-label="Latest blocks">
+        <table use:stacked aria-label="Latest blocks">
           <thead>
             <tr>
               {@render head('blocks', 'height', 'Block')}
@@ -355,7 +356,7 @@
     {:else if peers.length === 0}
       <p class="muted empty">No peers connected.</p>
     {:else}
-      <table aria-label="Peers">
+      <table use:stacked aria-label="Peers">
         <thead>
           <tr>
             {@render head('peers', 'addr', 'Peer')}
@@ -442,6 +443,67 @@
   .scroll {
     overflow-x: auto;
     padding: 0 0.8rem 0.9rem;
+    container-type: inline-size;
+  }
+  /* A panel too narrow for the columns (a window of 700 or 480 px): each row is a card, every cell under the
+     words of its column (use:stacked), none hidden behind a sideways scroll (audit port-2 #14). */
+  @container (max-width: 52rem) {
+    table,
+    tbody,
+    tr {
+      display: block;
+    }
+    thead {
+      display: none;
+    }
+    tr {
+      margin: 0.4rem 0;
+      padding: 0.35rem 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-l);
+      background: var(--surface-2);
+    }
+    tr.selected {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    td,
+    td:first-child,
+    td:last-child {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      min-width: 0;
+      padding: 0.25rem 0.8rem;
+      border: 0;
+      border-radius: 0;
+      background: none;
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+    tr:hover td,
+    tr.selected td {
+      background: none;
+    }
+    td:global([data-label])::before {
+      content: attr(data-label);
+      flex: none;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      text-align: left;
+    }
+    td.trend-col {
+      display: none;
+    }
+    .row-name {
+      max-width: 100%;
+    }
+    .actions {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      white-space: normal;
+    }
   }
   table {
     width: 100%;
