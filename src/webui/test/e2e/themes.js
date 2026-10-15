@@ -27,12 +27,20 @@
     await waitFor('the balance', () => T().wallets.balances.demo && T().wallets.balances.demo.trusted > 0n);
 
     // The two new looks, everywhere a look can be chosen.
-    const look = $('select.look');
-    await check('the sidebar lists Catppuccin Mocha and Dracula', !!look && ['mocha', 'dracula'].every((id) => $$('option', look).some((o) => o.value === id)), look ? $$('option', look).map((o) => o.value).join(',') : 'no select');
+    // The theme list of the sidebar (components/ThemePicker.svelte): it opens upwards, inside the window.
+    const look = $('.foot button[aria-haspopup="listbox"]');
+    look.click();
+    const listbox = await waitFor('the theme list', () => $('[role="listbox"][aria-label="Theme"]'));
+    const names = $$('[role="option"]', listbox).map((o) => o.textContent.trim());
+    const box = listbox.getBoundingClientRect();
+    await check('the sidebar lists Catppuccin Mocha and Dracula', ['Catppuccin Mocha', 'Dracula'].every((n) => names.includes(n)), names.join(','));
+    await check('the theme list opens above its button, inside the window', box.top >= 0 && box.bottom <= look.getBoundingClientRect().top && box.bottom <= window.innerHeight, `${Math.round(box.top)}..${Math.round(box.bottom)} button ${Math.round(look.getBoundingClientRect().top)} window ${window.innerHeight}`);
+    await snapshot('theme-list-open');
+    look.click();
     const palette = T().buildCommands().map((c) => c.label);
     await check('the palette lists them', palette.includes('Theme: Catppuccin Mocha') && palette.includes('Theme: Dracula') && palette.includes('Advanced theme…'), palette.filter((l) => l.startsWith('Theme')).join(', '));
 
-    for (const [theme, base, accent] of [['mocha', '#181825', '#cba6f7'], ['dracula', '#21222c', '#bd93f9']]) {
+    for (const [theme, base, accent] of [['mocha', '#181825', '#cba6f7'], ['dracula', '#070708', '#d7263d']]) {
       T().savePrefs({ theme, layout: 'dashboard' });
       T().go('home');
       await waitFor(`${theme}: Home`, () => { const h = $('.home'); return h && h.textContent.includes('CHN') && h.querySelector('table tbody tr'); }, 30000);
@@ -136,7 +144,10 @@
     await check('one theme left, the chosen one', T().prefs.customThemes[0].id === id && T().prefs.theme === id);
 
     // The theme of the user in the sidebar, and in the Appearance tab.
-    await check('the sidebar lists the theme of the user', $$('select.look option').some((o) => o.value === id && o.textContent === 'Peach Mocha' && o.getAttribute('translate') === 'no'));
+    $('.foot button[aria-haspopup="listbox"]').click();
+    const ownList = await waitFor('the theme list', () => $('[role="listbox"][aria-label="Theme"]'));
+    await check('the sidebar lists the theme of the user', $$('[role="option"]', ownList).some((o) => o.textContent.trim() === 'Peach Mocha' && o.getAttribute('translate') === 'no'));
+    $('.foot button[aria-haspopup="listbox"]').click();
     T().go('settings', 'display');
     await sleep(600);
     await snapshot('advanced-theme-appearance');

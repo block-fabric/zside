@@ -15,6 +15,7 @@
   import { prefs, savePrefs, statusTip, wallets } from '../lib/state.svelte';
   import { pendingNow } from '../lib/settingsdraft.svelte';
   import { clampFontAdjust, THEMES } from '../lib/themes';
+  import ThemePicker from './ThemePicker.svelte';
   import { isThemeChoice } from '../lib/customthemes';
   import { frame } from '../lib/windowframe.svelte';
 
@@ -106,18 +107,15 @@
 
   <div class="foot">
     <div class="row">
-      <select class="look" aria-label="Theme" title="Theme" value={prefs.theme} onchange={(e) => { const v = (e.currentTarget as HTMLSelectElement).value; if (isThemeChoice(v, prefs.customThemes)) savePrefs({ theme: v }); }}>
-        {#each THEMES as theme (theme.id)}
-          <option value={theme.id}>{t(theme.name)}</option>
-        {/each}
-        {#if prefs.customThemes.length > 0}
-          <optgroup label="Your themes">
-            {#each prefs.customThemes as theme (theme.id)}
-              <option value={theme.id} translate="no">{theme.name}</option>
-            {/each}
-          </optgroup>
-        {/if}
-      </select>
+      <!-- The app's own list, opening upwards (user decision: the native one opened past the window). -->
+      <ThemePicker
+        value={prefs.theme}
+        groups={[
+          { title: '', options: THEMES.map((th) => ({ id: th.id, name: th.name })) },
+          { title: 'Your themes', options: prefs.customThemes.map((th) => ({ id: th.id, name: th.name, own: true })) },
+        ]}
+        onpick={(v) => { if (isThemeChoice(v, prefs.customThemes)) savePrefs({ theme: v }); }}
+      />
     </div>
     <div class="row">
       <button type="button" class="btn ghost small" title="Smaller text (Ctrl+-)" aria-label="Smaller text" onclick={() => savePrefs({ fontAdjust: clampFontAdjust(prefs.fontAdjust - 1) })}>A−</button>
@@ -298,17 +296,6 @@
     padding-top: 0.5rem;
     border-top: 1px solid var(--line);
     width: 100%;
-  }
-  .look {
-    /* As wide as its longest theme ("Matrix Green", "Classic Dark"), on the next line when the row has no room
-       for it beside the menus (audit port-1 #11: it was cut to "Matrix Gr"). */
-    flex: 1 0 auto;
-    min-width: 0;
-    max-width: 100%;
-    width: auto;
-    min-height: 1.9rem;
-    padding-block: 0.15rem;
-    font-size: 0.88rem;
   }
   .row {
     display: flex;

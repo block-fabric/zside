@@ -101,8 +101,9 @@ the look of a first start (`prefs.theme` absent); a look chosen before is kept. 
 chains-qt (Light, Dark, Ocean Teal, Matrix Green, classic Drivechain) and the desktop's stay, with
 the same effects in their own colours.
 
-**User request (2026-10-15):** two more built-in looks, **Catppuccin Mocha** and **Dracula**, from the
-palettes of those projects (MIT), held to the same contrast rules (test/contrast.test.ts); and
+**User request (2026-10-15):** two more built-in looks, **Catppuccin Mocha** (from its palette, MIT) and
+**Dracula**, red on black (user decision: crimson on near-black, not the purple draculatheme.com palette),
+held to the same contrast rules (test/contrast.test.ts); and
 **Settings → Advanced theme**, where the user makes themes of their own:
 
 - A theme of the user is a built-in look (its fonts, corners and shadows) with some of its colour

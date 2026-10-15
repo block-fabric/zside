@@ -652,9 +652,9 @@
   [data-swatch='mocha'] .swatch span:nth-child(1) { background: #181825; }
   [data-swatch='mocha'] .swatch span:nth-child(2) { background: #2a2b3c; }
   [data-swatch='mocha'] .swatch span:nth-child(3) { background: #cba6f7; }
-  [data-swatch='dracula'] .swatch span:nth-child(1) { background: #21222c; }
-  [data-swatch='dracula'] .swatch span:nth-child(2) { background: #303241; }
-  [data-swatch='dracula'] .swatch span:nth-child(3) { background: #bd93f9; }
+  [data-swatch='dracula'] .swatch span:nth-child(1) { background: #070708; }
+  [data-swatch='dracula'] .swatch span:nth-child(2) { background: #1b1b1e; }
+  [data-swatch='dracula'] .swatch span:nth-child(3) { background: #d7263d; }
   .hint.more {
     margin: 0.6rem 0 0;
   }

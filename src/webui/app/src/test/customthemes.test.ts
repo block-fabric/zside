@@ -354,7 +354,7 @@ describe('the Advanced theme tab of Settings', () => {
     // Drawn on the page while it is edited.
     await waitFor(() => expect(look.preview?.base).toBe('dracula'));
     const accent = within(editor).getByLabelText('Accent (buttons, the current page)', { selector: 'input[type="text"]' }) as HTMLInputElement;
-    expect(accent.value).toBe('#bd93f9');
+    expect(accent.value).toBe('#d7263d');
     await fireEvent.input(accent, { target: { value: '#ff5500' } });
     await waitFor(() => expect(look.preview?.colors.accent).toBe('#ff5500'));
     // Not a colour: shown as typed, not drawn.

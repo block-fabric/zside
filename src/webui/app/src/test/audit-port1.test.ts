@@ -84,8 +84,9 @@ describe('#11: words cut short', () => {
   const read = (path: string) => readFileSync(join(__dirname, '..', path), 'utf8');
 
   it('the theme picker of the sidebar is as wide as its longest theme', () => {
-    const css = read('components/Sidebar.svelte');
-    const look = css.slice(css.indexOf('  .look {'), css.indexOf('}', css.indexOf('  .look {')));
+    // The app's own theme list since the native one opened past the window (components/ThemePicker.svelte).
+    const css = read('components/ThemePicker.svelte');
+    const look = css.slice(css.indexOf('  .picker {'), css.indexOf('}', css.indexOf('  .picker {')));
     expect(look).toMatch(/flex: 1 0 auto;/);
     expect(look).not.toMatch(/min-width: 6\.5rem/);
   });

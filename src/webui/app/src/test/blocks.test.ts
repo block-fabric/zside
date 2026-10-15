@@ -119,6 +119,22 @@ describe('the box', () => {
     expect(screen.getByRole('button', { name: /Block 120/ }).getAttribute('aria-label')).toContain(`committed to by block ${formatCount(1234)} of ${main}`);
   });
 
+  it('draws the fill against the weight the node says for its network (app.info.blockWeight)', async () => {
+    const { app } = await import('../lib/state.svelte');
+    const before = app.info;
+    app.info = { ...(before ?? {}), blockWeight: 4_000_000 } as never;
+    try {
+      const { container } = render(BlockBox, { block: block({ weight: 1_000_000 }), secs: 60, median: 60, now: 1_700_000_060, onselect: () => undefined });
+      expect((container.querySelector('.blk-face') as HTMLElement).style.getPropertyValue('--fill')).toBe('25%');
+    } finally {
+      app.info = before;
+    }
+    // The host says it (app.cpp, consensus.max_block_weight of the network).
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    expect(readFileSync(join(__dirname, '../../../app.cpp'), 'utf8')).toMatch(/info\.pushKV\("blockWeight", Params\(\)\.GetConsensus\(\)\.max_block_weight\)/);
+  });
+
   it('an empty block, a slow one, a block without its stats yet', () => {
     const { container } = render(BlockBox, { block: block({ nTx: 1, weight: 900, feeRate: 0, subsidy: null, fees: null, tag: null }), secs: 200, median: 60, now: 1_700_000_000, selected: true, onselect: () => undefined });
     const face = container.querySelector('.blk-face') as HTMLElement;

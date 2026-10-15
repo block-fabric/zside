@@ -1,7 +1,7 @@
 // The fixes of the kit from audit port-2 (doc/webui-audit.md; apps/AUDIT-port-2.md): the code block of a
 // dialog that shows the marks turning text around (#16), the tables of Home as cards in a narrow panel and
-// the balance of a sidechain's Home that never cuts its unit (#14).
-import { readFileSync } from 'node:fs';
+// the balance of Home (Chains' and a sidechain's) that never cuts its unit (#14).
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -51,7 +51,6 @@ describe('audit port-2', () => {
       blocks: [{ height: 12, hash: 'ab'.repeat(32), time: 1_700_000_000, txs: 3 }],
       peers: [],
       now: 1_700_000_060,
-      hide: ['sidechains'],
     });
     await fireEvent.click(screen.getByRole('tab', { name: /Blocks/ }));
     const cells = [...document.querySelectorAll('table[aria-label="Latest blocks"] tbody td')] as HTMLElement[];
@@ -61,10 +60,15 @@ describe('audit port-2', () => {
     expect(css).toMatch(/@container \(max-width: 52rem\) \{[\s\S]*thead \{\s*display: none;/);
   });
 
-  it("#14: the balance of a sidechain's Home is sized to fit its characters, the unit never cut", () => {
-    const home = src('views/home/SideHome.svelte');
-    expect(home).toMatch(/class="value big-amount fit"[^>]*style:--chars=\{totalChars\}/);
-    expect(home).toMatch(/\.value\.fit :global\(\.amount\) \{\s*font-size: min\(1em, calc\(100cqi \/ \(var\(--chars, 12\) \* 0\.62\)\)\);/);
+  it('#14: the balance of Home is sized to fit its characters, the unit never cut', () => {
+    // Chains' Home and a sidechain's (views/home/SideHome.svelte), whichever this app has.
+    const homes = ['views/home/Home.svelte', 'views/home/SideHome.svelte'].filter((p) => existsSync(join(__dirname, '..', p)));
+    expect(homes.length).toBeGreaterThan(0);
+    for (const p of homes) {
+      const home = src(p);
+      expect(home).toMatch(/class="value big-amount fit"[^>]*style:--chars=\{totalChars\}/);
+      expect(home).toMatch(/\.value\.fit :global\(\.amount\) \{\s*font-size: min\(1em, calc\(100cqi \/ \(var\(--chars, 12\) \* 0\.62\)\)\);/);
+    }
   });
 
   it('#2: a cell aligned to the end that is too narrow cuts the end of its content, never its start', () => {
