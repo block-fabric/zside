@@ -2,13 +2,11 @@
 // LocalPages.svelte, which shows them, and chain.json) that a chain made from the template changes, so
 // that merges of the template stay clean. See doc/webui.md, "Pages of a chain of its own".
 //
-// The template has none. A sidechain adds an entry per page, for example
-//
-//   { id: 'names', title: 'Names', icon: 'book', section: 'chain', summary: 'Register and manage names', wallet: true,
-//     quick: { label: 'Register a name' }, keywords: 'bitnames register' }
-//
-// then its component in LocalPages.svelte, the RPC methods it calls in src/webui/local.cpp, and a
-// command or a dashboard card if it wants one (LOCAL_COMMANDS, LocalCards in LocalPages.svelte).
+// zSide: the shielded wallet (the two balances, paying privately with a memo, shielding and unshielding,
+// the shielded addresses, the viewing keys), the memos received, the history and the notes of the shielded
+// account, melt & cast, and the shielded pool of the chain; their components in LocalPages.svelte
+// (chain/pages, chain/zs), their RPC methods in src/webui/local.cpp, the cards of the home in
+// LocalCards.svelte, their icons in icons.ts.
 import type { IconName } from '../components/Icon.svelte';
 
 export interface LocalPage {
@@ -32,7 +30,13 @@ export interface LocalPage {
   quick?: { label: string; icon?: IconName; tab?: string };
 }
 
-export const LOCAL_PAGES = [] as const satisfies readonly LocalPage[];
+export const LOCAL_PAGES = [
+  { id: 'private', title: 'Private', icon: 'private', section: 'wallet', summary: 'The shielded balance: pay privately with a memo, shield and unshield, shielded addresses, viewing keys', wallet: true, shortcut: 'Alt+6', keywords: 'shielded zside orchard pay privately shield unshield memo address viewing key', quick: { label: 'Pay privately', icon: 'private', tab: 'pay' } },
+  { id: 'memos', title: 'Memos', icon: 'memo', section: 'wallet', summary: 'The memos the shielded account received, to read', wallet: true, keywords: 'inbox messages notes memo received' },
+  { id: 'zhistory', title: 'Private activity', icon: 'zhistory', section: 'wallet', summary: 'The transactions and the notes of the shielded account', wallet: true, keywords: 'shielded history transactions notes bump fee' },
+  { id: 'meltcast', title: 'Melt & cast', icon: 'meltcast', section: 'wallet', summary: 'Shield and unshield in steps that leave nothing to link', wallet: true, keywords: 'melt cast bills unlinkable plan schedule' },
+  { id: 'pool', title: 'Shielded pool', icon: 'pool', section: 'chain', summary: 'What the shielded pool of the chain holds, and its tree of notes', keywords: 'orchard pool notes nullifiers tree root index' },
+] as const satisfies readonly LocalPage[];
 
 export type LocalPageId = (typeof LOCAL_PAGES)[number]['id'];
 
@@ -46,4 +50,11 @@ export interface LocalCommand {
   keywords?: string;
 }
 
-export const LOCAL_COMMANDS = [] as const satisfies readonly LocalCommand[];
+export const LOCAL_COMMANDS = [
+  { id: 'zs.pay', label: 'Pay privately…', page: 'private', tab: 'pay', tip: 'Pay out of the shielded balance, with a memo only the recipient reads', keywords: 'send shielded memo' },
+  { id: 'zs.move', label: 'Shield or unshield…', page: 'private', tab: 'move', tip: 'Move coins between the transparent and the shielded balances', keywords: 'shield unshield' },
+  { id: 'zs.receive', label: 'Shielded address', page: 'private', tab: 'receive', tip: 'An address to be paid at privately', keywords: 'receive address zo' },
+  { id: 'zs.keys', label: 'Viewing keys…', page: 'private', tab: 'keys', tip: 'Export the viewing key of the account, or watch one', keywords: 'viewing key export import watch auditor' },
+  { id: 'zs.melt', label: 'Melt my transparent coins…', page: 'meltcast', tab: 'melt', tip: 'Shield every transparent coin alone, over the next blocks', keywords: 'melt' },
+  { id: 'zs.cast', label: 'Cast as bills…', page: 'meltcast', tab: 'cast', tip: 'Unshield as standard bills, at the blocks every wallet uses', keywords: 'cast bills' },
+] as const satisfies readonly LocalCommand[];

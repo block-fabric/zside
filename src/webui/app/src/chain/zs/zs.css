@@ -1,0 +1,289 @@
+/* The pages of zSide: shared pieces, in the colour tokens of themes.css only (text in the text tokens;
+   the colours of privacy are for edges, dots, icons and tints, never for text).
+   Private is the mark of the chain (--brand, chain.json); public is the warning colour. */
+
+.zs {
+  --zs-private: var(--brand, var(--accent));
+  --zs-public: var(--warning);
+}
+
+/* A privacy indicator: Private (a shield) or Public (an eye). */
+.zs-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: none;
+  padding: 0.08rem 0.5rem 0.08rem 0.38rem;
+  border: 1px solid color-mix(in srgb, var(--zs-tone) 55%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--zs-tone) 12%, transparent);
+  color: var(--text);
+  font-size: 0.74rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.zs-tag svg {
+  color: var(--zs-tone);
+}
+.zs-tag.private {
+  --zs-tone: var(--brand, var(--accent));
+}
+.zs-tag.public {
+  --zs-tone: var(--warning);
+}
+.zs-tag.mixed {
+  --zs-tone: var(--text-muted);
+}
+.zs-tag.bare {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+/* The two balances, side by side, with the moves between them. */
+.zs-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 0.9rem;
+  align-items: stretch;
+}
+.zs-vault {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 1.15rem 1.25rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-l, 14px);
+  background:
+    radial-gradient(120% 90% at 0% 0%, color-mix(in srgb, var(--zs-tone) 14%, transparent), transparent 62%),
+    var(--surface);
+  overflow: hidden;
+}
+.zs-vault::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--zs-tone);
+}
+.zs-vault.private {
+  --zs-tone: var(--brand, var(--accent));
+}
+.zs-vault.public {
+  --zs-tone: var(--warning);
+}
+.zs-vault .head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+.zs-vault .label {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.zs-vault .big {
+  font-size: clamp(1.45rem, 1.1rem + 1.2vw, 2rem);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.zs-vault .sub {
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+.zs-moves {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.5rem;
+}
+.zs-moves .btn {
+  justify-content: center;
+  min-width: 8.5rem;
+}
+@media (max-width: 760px) {
+  .zs-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .zs-moves {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}
+
+/* A ring that fills to a share (how much of the wallet is shielded). */
+.zs-ring {
+  display: block;
+}
+.zs-ring circle {
+  fill: none;
+  stroke-width: 7;
+}
+.zs-ring .track {
+  stroke: var(--raised);
+}
+.zs-ring .fill {
+  stroke: var(--brand, var(--accent));
+  stroke-linecap: round;
+  transition: stroke-dashoffset 400ms ease;
+}
+
+/* Facts in a row of small tiles. */
+.zs-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(10.5rem, 100%), 1fr));
+  gap: 0.7rem;
+}
+.zs-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  padding: 0.8rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m, 10px);
+  background: var(--surface);
+}
+.zs-tile .k {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+.zs-tile .v {
+  font-size: 1.12rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.zs-tile .n {
+  color: var(--text-faint);
+  font-size: 0.78rem;
+}
+
+/* A note under a form, with its colour on the edge. */
+.zs-note {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--zs-tone, var(--line-strong));
+  border-radius: var(--radius-s, 8px);
+  background: color-mix(in srgb, var(--zs-tone, var(--line)) 7%, var(--surface));
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+.zs-note svg {
+  flex: none;
+  margin-top: 0.1rem;
+  color: var(--zs-tone, var(--text-muted));
+}
+.zs-note.private {
+  --zs-tone: var(--brand, var(--accent));
+}
+.zs-note.public {
+  --zs-tone: var(--warning);
+}
+.zs-note.danger {
+  --zs-tone: var(--negative);
+}
+
+/* An address or a key, whole, that wraps. */
+.zs-code {
+  display: block;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s, 8px);
+  background: var(--raised);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  user-select: all;
+}
+.zs-code.hidden {
+  filter: blur(5px);
+  user-select: none;
+}
+
+/* A memo, as it was written. */
+.zs-memo {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+
+/* Lists of rows drawn as cards. */
+.zs-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.zs-list > li + li {
+  border-top: 1px solid var(--line);
+}
+
+.zs-amount-pos {
+  color: var(--text);
+}
+.zs-dot {
+  display: inline-block;
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--brand, var(--accent));
+}
+
+.zs-form {
+  display: grid;
+  gap: 0.9rem;
+}
+.zs-form textarea {
+  width: 100%;
+  min-height: 4.6rem;
+  resize: vertical;
+}
+.zs-counter {
+  color: var(--text-faint);
+  font-size: 0.78rem;
+  text-align: end;
+}
+.zs-counter.over {
+  color: var(--text);
+  font-weight: 650;
+}
+.zs-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+.zs-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(22rem, 100%), 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+.zs-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.zs-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.12rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--raised);
+  font-size: 0.82rem;
+}
