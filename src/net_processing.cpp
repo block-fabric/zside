@@ -401,8 +401,9 @@ struct Peer {
     NodeClock::time_point m_last_getheaders_timestamp GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /**
      * The tip when a header of this peer's failed through no fault of its own (a sidechain's header
-     * the node could not take yet: BLOCK_TIME_FUTURE that does not wait, BLOCK_HEADER_LOW_WORK):
-     * its headers are asked for again once the tip moved on from it, when they may be taken.
+     * the node could not take yet: BLOCK_TIME_FUTURE that does not wait, BLOCK_HEADER_LOW_WORK), or
+     * when headers waiting for their commitment were left out of the waiting set (more than it keeps
+     * of a message): its headers are asked for again once the tip moved on from it, when they may be taken.
      */
     std::optional<uint256> m_headers_retry_after GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
@@ -3528,9 +3529,11 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 // commits to a few blocks at a time; the rest come again with the next headers.
                 static constexpr size_t MAX_WAITING_PER_MESSAGE{16};
                 size_t kept{0};
+                size_t looked{0};
                 std::optional<uint256> prev;
                 for (const CBlockHeader& header : headers) {
                     if (prev && header.hashPrevBlock != *prev) break;
+                    ++looked;
                     const uint256 hash{header.GetHash()};
                     prev = hash;
                     if (m_chainman.m_blockman.LookupBlockIndex(hash)) continue;
@@ -3538,6 +3541,16 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                     if (++kept >= MAX_WAITING_PER_MESSAGE) break;
                 }
                 UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash());
+                // Headers left out (beyond those kept, or beyond a message of the largest size): asked
+                // for again once the tip moved, which it does when the kept ones are committed to and
+                // their blocks connected. Without this, a node catching up from a peer whose headers
+                // came before its record of the mainchain had their commitments (a node just started,
+                // following a mainchain node it has not caught up with yet) took the first ones and
+                // never asked that peer for the rest: with no other peer, or none announcing a new
+                // block, it stopped there for good (16 blocks: the headers kept of the first message).
+                if (looked < headers.size() || nCount == m_opts.max_headers_result) {
+                    peer.m_headers_retry_after = m_chainman.ActiveChain().Tip()->GetBlockHash();
+                }
             } else if (pindexLast && (state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE || state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK)) {
                 // The headers taken before the one that failed for a reason that is not the peer's
                 // fault (a header too far ahead of the node's clock, one a sidechain cannot check yet,

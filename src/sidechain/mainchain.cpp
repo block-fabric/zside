@@ -262,6 +262,33 @@ void Mainchain::ForgetFailure(const uint256& block_hash)
     if (m_failures.erase(block_hash) && m_db) m_db->Erase(std::make_pair(DB_FAILURE, block_hash));
 }
 
+std::vector<uint256> Mainchain::RecordFailures() const
+{
+    LOCK(m_mutex);
+    std::vector<uint256> hashes;
+    for (const auto& [hash, failure] : m_failures) {
+        if (failure == Failure::RECORD) hashes.push_back(hash);
+    }
+    return hashes;
+}
+
+size_t Mainchain::ForgetRecordFailures(const std::vector<uint256>& block_hashes)
+{
+    LOCK(m_mutex);
+    std::optional<CDBBatch> batch;
+    if (m_db) batch.emplace(*m_db);
+    size_t forgotten{0};
+    for (const uint256& hash : block_hashes) {
+        const auto it{m_failures.find(hash)};
+        if (it == m_failures.end() || it->second != Failure::RECORD) continue;
+        m_failures.erase(it);
+        if (batch) batch->Erase(std::make_pair(DB_FAILURE, hash));
+        ++forgotten;
+    }
+    if (batch && forgotten) m_db->WriteBatch(*batch, /*fSync=*/true);
+    return forgotten;
+}
+
 std::optional<SlotIdentity> Mainchain::GetSlotIdentity() const
 {
     LOCK(m_mutex);

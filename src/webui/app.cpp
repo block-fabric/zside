@@ -70,6 +70,8 @@ constexpr auto SHUTDOWN_POLL{200ms};
 
 int64_t PruneGBtoMiB(int64_t gb) { return gb * GB_BYTES / (1024 * 1024); }
 int PruneMiBtoGB(int64_t mib) { return (mib * 1024 * 1024 + GB_BYTES - 1) / GB_BYTES; }
+//! The least prune size in GB the chain takes (MinPruneTarget: 5000 MiB, so 6 GB, on a sidechain).
+int MinPruneGB() { return static_cast<int>((MinPruneTarget(Params().GetConsensus()) + GB_BYTES - 1) / GB_BYTES); }
 
 std::thread::id g_ui_thread;
 
@@ -390,8 +392,8 @@ bool App::IntroIfNeeded()
         data.pushKV("dir", dir);
         data.pushKV("blockchainGB", static_cast<int64_t>(Params().AssumedBlockchainSize()));
         data.pushKV("chainstateGB", static_cast<int64_t>(Params().AssumedChainStateSize()));
-        data.pushKV("pruneGB", prune_arg > 1 ? PruneMiBtoGB(prune_arg) : DEFAULT_PRUNE_TARGET_GB);
-        data.pushKV("minPruneGB", static_cast<int64_t>(std::ceil(MIN_DISK_SPACE_FOR_BLOCK_FILES / double(GB_BYTES))));
+        data.pushKV("pruneGB", prune_arg > 1 ? PruneMiBtoGB(prune_arg) : std::max(DEFAULT_PRUNE_TARGET_GB, MinPruneGB()));
+        data.pushKV("minPruneGB", static_cast<int64_t>(MinPruneGB()));
         // -prune on the command line decides, as in the Qt intro (the box is ticked or not, and disabled).
         if (m_args.IsArgSet("-prune")) data.pushKV("pruneForced", prune_arg >= 1);
         m_window->Post([this] { m_window->Show(false); });
@@ -914,7 +916,7 @@ void App::RegisterHostMethods()
         }
         {
             LOCK(m_mutex);
-            m_intro_choice = std::make_pair(dir, prune_gb > 0 ? PruneGBtoMiB(prune_gb) : int64_t{0});
+            m_intro_choice = std::make_pair(dir, prune_gb > 0 ? PruneGBtoMiB(std::max<int64_t>(prune_gb, MinPruneGB())) : int64_t{0});
         }
         m_cv.notify_all();
         return UniValue{true};

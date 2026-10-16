@@ -6055,11 +6055,32 @@ void Chainstate::EraseDrivechainUndo()
     if (flushed->nHeight >= m_drivechain_undo_swept_height + DRIVECHAIN_UNDO_SWEEP_INTERVAL) SweepDrivechainUndo(*flushed);
 }
 
+size_t Chainstate::ForgetUnreachableRecordFailures(int last)
+{
+    AssertLockHeld(::cs_main);
+    sidechain::Mainchain* const mainchain{m_chainman.m_mainchain.get()};
+    if (!mainchain || last < 0 || last > m_chain.Height()) return 0;
+    const CBlockIndex* const fixed{m_chain[last]};
+    std::vector<uint256> unreachable;
+    for (const uint256& hash : mainchain->RecordFailures()) {
+        const CBlockIndex* const index{m_blockman.LookupBlockIndex(hash)};
+        // A block the index does not have (noted just before a stop, say): kept, nothing to judge it by.
+        if (!index || m_chain.Contains(*index)) continue;
+        // It leaves the active chain at or below `last` (it is there, or does not descend from the block
+        // there): reaching it takes back blocks no reorg can.
+        if (index->nHeight <= last || index->GetAncestor(last) != fixed) unreachable.push_back(hash);
+    }
+    return mainchain->ForgetRecordFailures(unreachable);
+}
+
 void Chainstate::SweepDrivechainUndo(const CBlockIndex& flushed)
 {
     AssertLockHeld(::cs_main);
     m_drivechain_undo_swept_height = flushed.nHeight;
     const int last{flushed.nHeight - DRIVECHAIN_UNDO_DEPTH};
+    if (const size_t forgotten{ForgetUnreachableRecordFailures(last)}) {
+        LogDebug(BCLog::VALIDATION, "Forgot the failures against the record of %u blocks out of reach of any reorg", forgotten);
+    }
     drivechain::Database& db{*m_blockman.m_drivechain_db};
     std::vector<uint256> erase;
     std::vector<uint256> stale;
@@ -8247,8 +8268,9 @@ std::pair<int, int> Chainstate::GetPruneRange(int last_height_can_prune) const
         prune_start = Assert(SnapshotBase())->nHeight + 1;
     }
 
+    // (On a sidechain, the blocks any reorg can take back: MinBlocksToKeep.)
     int max_prune = std::max<int>(
-        0, m_chain.Height() - static_cast<int>(MIN_BLOCKS_TO_KEEP));
+        0, m_chain.Height() - MinBlocksToKeep(m_chainman.GetConsensus()));
 
     // last block to prune is the lesser of (caller-specified height, MIN_BLOCKS_TO_KEEP from the tip)
     //

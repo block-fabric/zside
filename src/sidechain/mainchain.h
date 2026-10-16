@@ -179,6 +179,10 @@ public:
     void NoteFailure(const uint256& block_hash, Failure failure) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     std::optional<Failure> GetFailure(const uint256& block_hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void ForgetFailure(const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** The blocks marked failed against the record (Failure::RECORD). */
+    std::vector<uint256> RecordFailures() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Forget the failures against the record (Failure::RECORD only) of these blocks, in one write. @return how many. */
+    size_t ForgetRecordFailures(const std::vector<uint256>& block_hashes) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** The sidechain this node found in its slot, once it found one. */
     std::optional<SlotIdentity> GetSlotIdentity() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);

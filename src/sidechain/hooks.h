@@ -262,6 +262,15 @@ public:
     //
 
     /**
+     * Checked first when a block is connected, before anything reads the record of the mainchain
+     * (GetPegStep and what follows): its extension (a signature), as the state before the block says.
+     * A block whose header was taken unchecked may come with a forged signature (the block hash does
+     * not cover it): it fails for that (ExtensionFailure, the copy's fault) rather than for the
+     * record, which would be noted for the block. Only to fail sooner: whatever fails here must fail
+     * later as well. By default nothing.
+     */
+    virtual bool CheckExtension(const State& state, const CBlock& block, std::string& reject_reason) const { return true; }
+    /**
      * Whether `block` takes the peg actions, and where. False, with the reason, if it cannot be
      * known or the block is invalid. By default every block does, as committed: up to the mainchain
      * block before the one that committed to it, with its parent as the bundle nonce ("bmm-unknown"

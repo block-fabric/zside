@@ -28,6 +28,10 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, BlockManager::Op
     if (nPruneArg == 1) { // manual pruning: -prune=1
         nPruneTarget = BlockManager::PRUNE_TARGET_MANUAL;
     } else if (nPruneTarget) {
+        if (opts.chainparams.GetConsensus().sidechain.enabled && nPruneTarget < MIN_SIDECHAIN_PRUNE_TARGET) {
+            // A sidechain node keeps a good history (MIN_SIDECHAIN_PRUNE_TARGET).
+            return util::Error{strprintf(_("-prune must be at least %d MiB on a sidechain (0 turns pruning off, 1 allows manual pruning, which keeps as much)."), MIN_SIDECHAIN_PRUNE_TARGET / 1_MiB)};
+        }
         if (nPruneTarget < MIN_DISK_SPACE_FOR_BLOCK_FILES) {
             return util::Error{strprintf(_("Prune configured below the minimum of %d MiB.  Please use a higher number."), MIN_DISK_SPACE_FOR_BLOCK_FILES / 1_MiB)};
         }

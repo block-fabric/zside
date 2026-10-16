@@ -106,6 +106,28 @@ inline constexpr int DEFAULT_CHECKLEVEL{3};
 // one 128MB block file + added 15% undo data = 147MB greater for a total of 545MB
 // Setting the target to >= 550 MiB will make it likely we can respect the target.
 inline constexpr uint64_t MIN_DISK_SPACE_FOR_BLOCK_FILES{550_MiB};
+/**
+ * A sidechain node keeps a good history: it prunes no further than 5000 MiB of block and undo files
+ * (-prune below it refuses to start; manual pruning, -prune=1, leaves that much too). Pruning goes by
+ * whole files and leaves a margin for the next ones (BLOCKFILE_CHUNK_SIZE, UNDOFILE_CHUNK_SIZE): what
+ * is left is never below 5000 MiB less a block file and that margin, still more than 5 GB.
+ * Whatever the size, a sidechain node also keeps the blocks of the last DRIVECHAIN_UNDO_DEPTH heights
+ * (MinBlocksToKeep): every block a reorg can take back, those that lose their commitment when the
+ * mainchain drops it included (the Follower, and hooks that read a block's commitment from its data,
+ * such as an acknowledgement of a block of stake, find it on disk rather than in the record, which
+ * no longer has it). A block deeper than that can be taken back by no reorg.
+ */
+inline constexpr uint64_t MIN_SIDECHAIN_PRUNE_TARGET{5000_MiB};
+/** The least -prune target of a chain, in bytes: MIN_SIDECHAIN_PRUNE_TARGET on a sidechain. */
+inline uint64_t MinPruneTarget(const Consensus::Params& params)
+{
+    return params.sidechain.enabled ? MIN_SIDECHAIN_PRUNE_TARGET : MIN_DISK_SPACE_FOR_BLOCK_FILES;
+}
+/** The blocks below the tip that pruning keeps: DRIVECHAIN_UNDO_DEPTH on a sidechain, MIN_BLOCKS_TO_KEEP otherwise. */
+inline int MinBlocksToKeep(const Consensus::Params& params)
+{
+    return params.sidechain.enabled ? DRIVECHAIN_UNDO_DEPTH : static_cast<int>(MIN_BLOCKS_TO_KEEP);
+}
 
 /** Maximum number of dedicated script-checking threads allowed */
 inline constexpr int MAX_SCRIPTCHECK_THREADS{15};
@@ -951,6 +973,18 @@ public:
      * those not in the active chain.
      */
     void SweepDrivechainUndo(const CBlockIndex& flushed) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Forget the failures against the record (sidechain::Mainchain::Failure::RECORD) of the blocks no
+     * reorg can bring to the active chain any more: those that leave it at or below `last`, the height
+     * below which no block of it can be taken back (DRIVECHAIN_UNDO_DEPTH below the flushed block; its
+     * drivechain undo data is gone). Such a failure is never taken back to any effect: the block stays
+     * marked failed, as it would have for good, and a commitment that comes back for it changes
+     * nothing either way. What is left is the failures of the blocks within reach of a reorg, which
+     * the rules of headers bound (a sidechain whose blocks cost nothing to make, FastBlocks, scans
+     * them for every commitment the mainchain makes or drops). Called by SweepDrivechainUndo.
+     * @return how many were forgotten.
+     */
+    size_t ForgetUnreachableRecordFailures(int last) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Height of the flushed block of the last SweepDrivechainUndo.
     int m_drivechain_undo_swept_height GUARDED_BY(::cs_main){-1};
 

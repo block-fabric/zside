@@ -142,6 +142,30 @@ Options: `-mainchainrpcconnect`, `-mainchainrpcport`, `-mainchainrpcuser`,
 `-mainchainrpcwallet`. Without user and password, the cookie file of the
 mainchain node is used, looked for in `~/.chains`.
 
+## Pruning
+
+A sidechain node keeps a good history. `-prune` below 5000 MiB
+(`MIN_SIDECHAIN_PRUNE_TARGET` in `src/validation.h`) refuses to start
+("-prune must be at least 5000 MiB on a sidechain"); `-prune=0` (off) and
+`-prune=1` (manual pruning) are taken, and `pruneblockchain` then removes the
+oldest block files only as long as 5000 MiB of them are left. Pruning goes by
+whole block files with a margin for the next ones, so what is kept is never less
+than 5000 MiB less a block file and that margin: more than 5 GB of the most
+recent blocks and their undo data.
+
+Whatever the size, a pruned sidechain node also keeps the blocks of the last
+`DRIVECHAIN_UNDO_DEPTH` (2880) heights, not only Bitcoin's 288
+(`MinBlocksToKeep`): every block a reorg can take back, as deep as the
+drivechain undo data goes. So a reorg a node that does not prune can make, a
+pruned one can make too, and code that reads a block that may lose its
+commitment (the Follower taking back blocks whose commitment the mainchain
+dropped; a sidechain whose hooks read a block's commitment from its data, as
+FastBlocks' `CommitmentOf` reads a block of stake's acknowledgement) finds it on
+disk rather than having to fall back on the record, which no longer has the
+commitment. A block deeper than that can be taken back by no reorg. Regtest
+without `-sidechainslot` is not a sidechain and keeps Bitcoin's rules (550 MiB,
+288 blocks) for the tests it inherits.
+
 ## Trying it on regtest
 
 On regtest the chain is an ordinary chain unless `-sidechainslot=<n>` is
@@ -254,6 +278,7 @@ checks.
 | `PardonRecordFailures` | `AcceptBlockHeader`: a header of a block that failed against the record of the mainchain (`Mainchain::Failure::RECORD`, the block or the failed block it descends from), or on one, is `BLOCK_TIME_FUTURE` (`record-failed`) rather than `BLOCK_CACHED_INVALID`/`BLOCK_INVALID_PREV`: the peer is not punished, its record may be ahead; and a block that fails against the record when connected is `BLOCK_TIME_FUTURE` rather than `BLOCK_CONSENSUS`. `RecordIndependent` names the reasons of the sidechain's own rules that fail a block whatever the record says (not failures against the record) | on (off: punished as in Bitcoin); no reasons of its own |
 | `IsWaitReason`, `WaitingReady` | headers that may become valid later wait in the bounded set of `ChainstateManager::AddBmmWaiting`, and are tried again in this order | `bmm-unknown`, by commitment height |
 | `CommitmentOf`, `BlocksCommittedBy` | the BMM order rule, the Follower (blocks that lost their commitment, catching up) | a block needs a commitment to its own hash |
+| `CheckExtension` | first in `State::ConnectBlock`, before anything reads the record: a block's extension (a signature) as the state before it says, so that a forged copy of a header taken unchecked fails for its extension (`ExtensionFailure`, the copy's fault) rather than against the record. Only to fail sooner: what fails here must fail later as well | nothing |
 | `GetPegStep`, `BeforePegStep`, `AfterBlock`, `RefundsOnlyInPegSteps` | `State::ConnectBlock`, split into `ApplyPegStep` (mainchain events, bundle), `ApplyTxs` and `TakePayouts`. A block without a peg step pays nothing (what it owes is queued), cannot start a bundle (`bad-sc-bundle-not-peg`) and, with the switch, takes no refund request (`bad-sc-refund-not-peg`). `PegStep::max_withdrawal_height` limits the withdrawals a bundle takes; `PegStep::peg_height`, if set, is the height the peg actions count as at in place of the block's (the bundle's lock time, the height of a failure the retry delay counts from), so that blocks that take them for the same block build the same bundle. `AfterBlock` is told what the coinbase paid out (`minted`), and writes the sidechain's own tables through `State::Writable` | every block takes the peg actions as committed, with its parent as the bundle nonce |
 | `MergeMinedOutputs` | block assembly of a merged mined block (`SidechainAssembly::Peg::BMM`): outputs of the sidechain's own in the coinbase, after the payouts and the bundle commitment (proofs its rules take, say), given the state with the block so far | none |
 | `ApplyTx` | `State::ApplyTx`, after the template's rules for a transaction, on its own overlay (all or nothing; what it owes is paid as refunds are), so in blocks and block assembly; and the mempool (`DrivechainChecks`), on an overlay that is dropped, with the next block's height | no rules |
