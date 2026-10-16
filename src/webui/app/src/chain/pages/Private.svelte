@@ -191,9 +191,9 @@
     if (shieldElsewhere && !shieldToValid) return;
     const amount = formatAmount(shieldAmount, prefs.unit);
     const yes = await confirm(
-      t('Shield'),
+      simple ? t('Make private') : t('Shield'),
       shieldElsewhere ? t('Move %1 of transparent coins into the shielded address below?', amount) : t('Move %1 of transparent coins into the shielded balance?', amount),
-      { yes: t('Shield'), informative: t('The move into the pool is public: the amount shows on the chain. What you do with the coins after is not.') },
+      { yes: simple ? t('Make private') : t('Shield'), informative: t('The move into the pool is public: the amount shows on the chain. What you do with the coins after is not.') },
     );
     if (!yes) return;
     try {
@@ -240,7 +240,7 @@
     if (unshieldTo.trim() && !unshieldToValid) return;
     const what = unshieldEverything ? t('the whole shielded balance in blocks (less the fee)') : formatAmount(unshieldAmount ?? 0n, prefs.unit);
     const r = await ask({
-      title: t('Unshield'),
+      title: simple ? t('Make public') : t('Unshield'),
       message: t('Move %1 out of the shielded balance?', what),
       code: unshieldTo.trim() || undefined,
       informative: unshieldTo.trim()
@@ -249,7 +249,7 @@
       level: 'warning',
       choices: [
         { id: 'no', label: 'Cancel' },
-        { id: 'yes', label: 'Unshield', kind: 'primary' },
+        { id: 'yes', label: simple ? 'Make public' : 'Unshield', kind: 'primary' },
       ],
     });
     if (r.choice !== 'yes') return;
@@ -352,6 +352,8 @@
   }
 
   function kindWord(kind: string): string {
+    if (simple && kind === 'shield') return t('Made private');
+    if (simple && kind === 'unshield') return t('Made public');
     return kind === 'shield' ? t('Shielded') : kind === 'unshield' ? t('Unshielded') : kind === 'pay' ? t('Paid privately') : t('Received privately');
   }
 </script>
@@ -418,11 +420,16 @@
           <div class="panel-body share">
             <Ring {share} label={t('%1% of the wallet is shielded', String(Math.round(share * 100)))} />
             <div>
-              <p>{t('%1% of what this wallet holds is in the shielded pool.', String(Math.round(share * 100)))}</p>
-              <p class="muted small">Transparent coins show on the chain with their addresses. Shielded ones show nothing: not the amount, not who paid whom.</p>
+              {#if simple}
+                <p>{t('%1% of what this wallet holds is private.', String(Math.round(share * 100)))}</p>
+                <p class="muted small">Public coins show on the chain with their addresses. Private ones show nothing: not the amount, not who paid whom.</p>
+              {:else}
+                <p>{t('%1% of what this wallet holds is in the shielded pool.', String(Math.round(share * 100)))}</p>
+                <p class="muted small">Transparent coins show on the chain with their addresses. Shielded ones show nothing: not the amount, not who paid whom.</p>
+              {/if}
               <div class="zs-actions">
                 <button type="button" class="btn primary" disabled={watchOnly || busy || available <= 0n} onclick={() => (simple ? go('send') : select('pay'))}><Icon name="private" size={16} /> {simple ? t('Send privately') : t('Pay privately')}</button>
-                <button type="button" class="btn" onclick={() => select('receive')}><Icon name="qr" size={16} /> Shielded address</button>
+                <button type="button" class="btn" onclick={() => select('receive')}><Icon name="qr" size={16} /> {simple ? t('Private address') : t('Shielded address')}</button>
               </div>
             </div>
           </div>
@@ -435,7 +442,7 @@
           </div>
           <div class="panel-body">
             {#if latest.length === 0}
-              <p class="muted">Nothing yet: shield some coins to start.</p>
+              <p class="muted">{simple ? t('Nothing yet: make some coins private to start.') : t('Nothing yet: shield some coins to start.')}</p>
             {:else}
               <ul class="zs-list latest">
                 {#each latest as tx (tx.txid)}
