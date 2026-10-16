@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The Chains developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""End-to-end test of Simple mode of chains-app (the default of a first start).
+"""End-to-end test of Simple mode of chains-app (chosen by the user; a first start is in Advanced).
 
 Starts chains-app on regtest with a temporary data directory, in a virtual
 display, and has it run simple.js in its page, in Simple mode (the other

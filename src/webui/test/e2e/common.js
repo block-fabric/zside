@@ -19,7 +19,7 @@ const E2E = (() => {
   const log = (message) => host('test.log', { message: String(message) });
   const T = () => window.__chainsTest;
 
-  // The mode of the interface (Simple, the default since 2026-10-16, or Advanced): the scripts were
+  // The mode of the interface (Advanced, the mode of a first start, or Simple): the scripts were
   // written for the full pages, Advanced; a script of Simple mode sets window.__E2E_SIMPLE in its prelude.
   // Set as soon as the page has its preferences, before the first wait of the script ends.
   const wantedMode = window.__E2E_SIMPLE ? 'simple' : 'advanced';
@@ -27,6 +27,8 @@ const E2E = (() => {
     for (let i = 0; i < 1200; i++) {
       const t = window.__chainsTest;
       if (t && t.prefs && t.prefs.loaded) {
+        // The mode the app started in, before the script set its own (the default of a first start).
+        window.__E2E_FIRST_MODE = t.prefs.uiMode;
         if (t.prefs.uiMode !== wantedMode) t.savePrefs({ uiMode: wantedMode });
         return;
       }

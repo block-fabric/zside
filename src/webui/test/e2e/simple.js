@@ -1,4 +1,4 @@
-// Simple mode (user decision 2026-10-16): the default of a first start. A wallet with coins, two
+// Simple mode (user decision 2026-10-16), chosen by the user (a first start is in Advanced). A wallet with coins, two
 // sidechains, then in the Midnight and Light themes: Home with its first steps, the sidebar without the
 // pages of Advanced, Send, the history in plain words, and Move coins (the Sidechains page) through its
 // four steps up to a real deposit; then the switch to Advanced and back, by the sidebar and the palette.
@@ -16,7 +16,7 @@
   };
   try {
     await waitFor('the node to run', () => T() && T().app.phase === 'ready' && T().node.tip);
-    await check('Simple mode is the default of a first start', T().prefs.uiMode === 'simple', T().prefs.uiMode);
+    await check('Advanced on a first start (user decision), Simple once chosen', window.__E2E_FIRST_MODE === 'advanced' && T().prefs.uiMode === 'simple', `${window.__E2E_FIRST_MODE} ${T().prefs.uiMode}`);
 
     await rpc('createwallet', ['demo']);
     await waitFor('the wallet', () => T().wallets.current === 'demo');

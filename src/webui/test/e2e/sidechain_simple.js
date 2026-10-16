@@ -1,5 +1,5 @@
 // Simple mode on a sidechain (run_sidechain.py --script sidechain_simple.js --js-var SIMPLE=true): the
-// default of a first start. A wallet, then in the Midnight and Light themes: Home with its first steps and
+// mode a user chooses (a first start is in Advanced). A wallet, then in the Midnight and Light themes: Home with its first steps and
 // merged mining in a line, the sidebar without the pages of Advanced, Drivechains in two tabs (a deposit
 // address to bring coins in, the form that sends them back), Send, the history, and every page of the
 // sidebar (the chain's own among them), with a picture of each; then the switch to Advanced and back.
@@ -22,7 +22,7 @@
   }
   try {
     await waitFor('the node to run', () => T() && T().app.phase === 'ready' && T().node.tip, 120000);
-    await check('Simple mode is the default of a first start', T().prefs.uiMode === 'simple', T().prefs.uiMode);
+    await check('Advanced on a first start (user decision), Simple once chosen', window.__E2E_FIRST_MODE === 'advanced' && T().prefs.uiMode === 'simple', `${window.__E2E_FIRST_MODE} ${T().prefs.uiMode}`);
     await waitFor('the node to reach the mainchain', async () => (await rpc('getmainchaininfo')).connected, 60000);
     await rpc('createwallet', ['side']);
     await waitFor('the wallet in the page', () => T().wallets.current === 'side');
