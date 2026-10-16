@@ -52,7 +52,7 @@
 
   try {
     await waitFor('the node to run', () => T() && T().app.phase === 'ready' && T().node.tip, 120000);
-    await check('Simple mode by default', T().prefs.uiMode === 'simple', T().prefs.uiMode);
+    await check('Advanced on a first start (user decision), Simple once chosen', window.__E2E_FIRST_MODE === 'advanced' \&\& T().prefs.uiMode === 'simple', `${window.__E2E_FIRST_MODE} ${T().prefs.uiMode}`);
     await waitFor('the node to reach the mainchain', async () => (await rpc('getmainchaininfo')).connected, 60000);
 
     await rpc('createwallet', ['zs2']);
