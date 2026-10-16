@@ -263,7 +263,7 @@
             <input id="opt-prune" type="checkbox" checked={options.prune} disabled={ignored('prune')} onchange={(e) => set('prune', (e.currentTarget as HTMLInputElement).checked)} />
             <span>Prune block storage to</span>
           </label>
-          <input id="opt-prune-size" class="small-num" type="number" min={options.limits.pruneMinGB} value={options.pruneSize} disabled={!options.prune || ignored('prune')} onchange={(e) => set('pruneSize', Number((e.currentTarget as HTMLInputElement).value))} aria-label="Prune size" />
+          <input id="opt-prune-size" class="small-num" type="number" min={options.limits.pruneMinGB} value={options.pruneSize} disabled={!options.prune || ignored('prune')} onchange={(e) => set('pruneSize', Math.max(options!.limits.pruneMinGB, Number((e.currentTarget as HTMLInputElement).value)))} aria-label="Prune size" />
           <span>GB</span>
         </div>
         {#if options.prune}<p class="hint warn">Reverting this setting requires re-downloading the entire blockchain.</p>{/if}

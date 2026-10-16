@@ -26,6 +26,9 @@
   import { openQuick } from '../../lib/quick.svelte';
   import { balanceHistory, newest } from '../../lib/wallet';
   import { current, refreshRecords } from '../../lib/walletdata.svelte';
+  import FirstRunTips from '../../components/FirstRunTips.svelte';
+  import Term from '../../components/Term.svelte';
+  import { pageShown, simpleMode } from '../../lib/uimode.svelte';
 
   interface Peer {
     id: number;
@@ -208,7 +211,13 @@
   }
 
   // Send and Receive, then what concerns the chain, then the tools (lib/layout.ts).
-  const quickLinks = HOME_QUICK_ACTIONS;
+  // Simple mode leaves out the pages of Advanced (lib/uimode.svelte.ts).
+  const quickLinks = $derived(HOME_QUICK_ACTIONS.filter((q) => pageShown(q.page)));
+  const simple = $derived(simpleMode());
+  /** Simple mode: the meters of merged mining open on demand. */
+  let bmmDetails = $state(false);
+  /** The active sidechains that some of the recent blocks merged mined. */
+  const bmmActive = $derived(sidechains.filter((s) => (bmm[s.slot] ?? 0) > 0).length);
 
   // --- The balance over time, in a timeframe ---
   const FRAMES = [
@@ -256,11 +265,13 @@
     </div>
     <nav class="quick" aria-label="Quick actions">
       {#each quickLinks as q (q.label)}
-        <button type="button" class="pill action" disabled={pageDisabled(q.page)} onclick={() => (q.panel ? openQuick(q.panel) : go(q.page, q.tab ?? ''))}><Icon name={q.icon} size={15} /> {t(q.label)}</button>
+        <button type="button" class="pill action" disabled={pageDisabled(q.page)} onclick={() => (q.panel ? openQuick(q.panel) : go(q.page, q.tab ?? ''))}><Icon name={q.icon} size={15} /> {t(simple && q.page === 'sidechains' ? 'Move coins' : q.label)}</button>
       {/each}
       <button type="button" class="pill action ghost" onclick={openPalette}><Icon name="search" size={15} /> All actions <kbd>Ctrl K</kbd></button>
     </nav>
   </header>
+
+  <FirstRunTips />
 
   {#if node.tip?.ibd}
     <button type="button" class="out-of-sync" onclick={() => go('node', 'info')}>
@@ -309,7 +320,7 @@
       </dl>
       {#snippet actions()}
         <button type="button" class="btn grow" onclick={() => go('node', 'peers')}><Icon name="peers" size={15} /> Peers</button>
-        <button type="button" class="btn ghost" onclick={() => go('node', 'console')}>Console</button>
+        {#if !simple}<button type="button" class="btn ghost" onclick={() => go('node', 'console')}>Console</button>{/if}
         <button type="button" class="btn ghost icon" aria-label={node.networkActive ? 'Disable network' : 'Enable network'} title={node.networkActive ? 'Disable network activity' : 'Enable network activity'} onclick={toggleNetwork}><Icon name={node.networkActive ? 'offline' : 'refresh'} size={16} /></button>
       {/snippet}
     </Card>
@@ -322,11 +333,16 @@
         <dt>Proposals</dt><dd class="num">{drivechain?.proposals ?? '–'}</dd>
       </dl>
       {#snippet actions()}
-        <button type="button" class="btn grow" disabled={pageDisabled('sidechains')} onclick={() => go('sidechains')}><Icon name="down" size={15} /> Deposit</button>
-        <button type="button" class="btn ghost" disabled={pageDisabled('sidechains')} title="Proposals and votes" onclick={() => go('sidechains', 'proposals')}>Votes</button>
+        {#if simple}
+          <button type="button" class="btn grow" disabled={pageDisabled('sidechains')} onclick={() => go('sidechains')}><Icon name="sidechains" size={15} /> Move coins</button>
+        {:else}
+          <button type="button" class="btn grow" disabled={pageDisabled('sidechains')} onclick={() => go('sidechains')}><Icon name="down" size={15} /> Deposit</button>
+          <button type="button" class="btn ghost" disabled={pageDisabled('sidechains')} title="Proposals and votes" onclick={() => go('sidechains', 'proposals')}>Votes</button>
+        {/if}
       {/snippet}
     </Card>
 
+    {#if !simple}
     <Card title="Mining" icon="mine" open={() => go('mine')} openLabel="Open mining" stat>
       <!-- This node's mining (user decision: the network's estimate is not what this node mines). -->
       <span class="value num" data-testid="mining-rate">{generate?.generate ? hashRate(generate.hashespersec) : t('Off')}</span>
@@ -341,6 +357,7 @@
         <button type="button" class="btn ghost" title="Timestamp a file" onclick={() => go('timestamp')}>Timestamp</button>
       {/snippet}
     </Card>
+    {/if}
   </div>
 
   <div class="middle">
@@ -381,6 +398,13 @@
     </section>
 
     <Card title="Blind merged mining" icon="nodes" open={() => go('sidechains', 'nodes')} openLabel="Open the sidechain nodes">
+      {#if simple && !bmmDetails}
+        <!-- Simple mode: one line, the meters on demand (user decision). -->
+        <p class="bmm-line" data-testid="bmm-line">
+          {#if sidechains.length === 0}No sidechain is active yet.{:else}Sidechains are <Term id="bmm">merge-mined</Term>: {bmmActive} of {sidechains.length} active.{/if}
+        </p>
+        <p class="muted small">The miners of Chains also make the blocks of its sidechains, so the sidechains need no miners of their own.</p>
+      {:else}
       <p class="muted small">Blocks of the last {bmmWindow} that committed to a block of each sidechain.</p>
       {#if sidechains.length === 0}
         <p class="muted">No sidechain to merge mine yet.</p>
@@ -399,7 +423,11 @@
           {/each}
         </ul>
       {/if}
+      {/if}
       {#snippet actions()}
+        {#if simple}
+          <button type="button" class="btn" aria-expanded={bmmDetails} onclick={() => (bmmDetails = !bmmDetails)}>{bmmDetails ? 'Fewer details' : 'Details'}</button>
+        {/if}
         <button type="button" class="btn" onclick={() => go('sidechains', 'nodes')}>Sidechain nodes</button>
       {/snippet}
     </Card>
@@ -455,6 +483,11 @@
   }
   .action kbd {
     margin-left: 0.2rem;
+  }
+  .bmm-line {
+    margin: 0.2rem 0 0.4rem;
+    font-size: 1.05rem;
+    font-weight: 600;
   }
   .out-of-sync {
     display: flex;

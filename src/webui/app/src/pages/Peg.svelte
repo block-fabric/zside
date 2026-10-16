@@ -29,6 +29,7 @@
   import { refreshSide, side, startSide } from '../lib/sidestate.svelte';
   import Bmm from './Bmm.svelte';
   import Pager from '../components/Pager.svelte';
+  import { simpleMode } from '../lib/uimode.svelte';
 
   const mainName = CHAIN.mainchain?.name ?? '';
   const TABS = [
@@ -39,6 +40,11 @@
     { id: 'bmm', label: 'Merged mining' },
   ];
   const tab = $derived(TABS.some((x) => x.id === nav.tab) ? nav.tab : 'deposit');
+  // Simple mode (lib/uimode.svelte.ts): coins in and coins back, in plain words; the bundle and merged mining
+  // are Advanced's, shown only when asked for (a link, the palette). The tables leave out blocks and ids.
+  const simple = $derived(simpleMode());
+  const SIMPLE_LABELS: Record<string, string> = { deposit: 'Bring coins in', withdraw: 'Send coins back' };
+  const tabs = $derived(simple ? TABS.filter((tb) => tb.id === 'deposit' || tb.id === 'withdraw' || tb.id === tab).map((tb) => ({ ...tb, label: SIMPLE_LABELS[tb.id] ?? tb.label })) : TABS);
 
   $effect(() => {
     startSide();
@@ -297,6 +303,7 @@
     </p>
   {/if}
 
+  {#if !simple}
   <section class="side-stats">
     <div class="panel side-stat"><span class="muted">Deposits on their way</span><strong class="num">{pendingDeposits.length}</strong><span class="faint"><Amount sats={pendingDeposits.reduce((n, d) => n + d.sats, 0n)} /></span></div>
     <div class="panel side-stat"><span class="muted">Withdrawals waiting</span><strong class="num">{side.withdrawals.length}</strong><span class="faint"><Amount sats={waitingTotal} /></span></div>
@@ -307,9 +314,10 @@
     </div>
     <div class="panel side-stat"><span class="muted">Mainchain blocks on record</span><strong class="num">{info && info.height >= 0 ? formatCount(info.height) : '–'}</strong><span class="faint">{side.main.error ? 'not reachable' : 'followed by this node'}</span></div>
   </section>
+  {/if}
 
   <div class="tabs" role="tablist" aria-label="Drivechains">
-    {#each TABS as tb (tb.id)}
+    {#each tabs as tb (tb.id)}
       <button type="button" role="tab" aria-selected={tab === tb.id} onclick={() => (nav.tab = tb.id)}>
         {t(tb.label)}
         {#if tb.id === 'deposit' && pendingDeposits.length}<span class="badge accent">{pendingDeposits.length}</span>{/if}
@@ -373,12 +381,12 @@
         <h2>Deposits to this chain</h2>
         <span class="row deposits-ctl">
           <span class="muted small">in the last {formatCount(side.main.events.length)} blocks of {mainName}</span>
-          <label class="points">
+          {#if !simple}<label class="points">
             <span class="faint small">Latest</span>
             <select aria-label="How many of the latest deposits" value={depositPoints} onchange={(e) => { depositPoints = Number((e.currentTarget as HTMLSelectElement).value); depositPage = 0; }}>
               {#each DEPOSIT_POINTS as n (n)}<option value={n}>{n === 0 ? t('All') : formatCount(n)}</option>{/each}
             </select>
-          </label>
+          </label>{/if}
         </span>
       </div>
       {#if deposits.length === 0}
@@ -386,16 +394,18 @@
       {:else}
         <div class="side-table-wrap">
           <table class="side-table" use:stacked aria-label="Deposits to this chain">
-            <thead><tr><th>State</th><th>Mainchain block</th><th>Time</th><th class="end">Amount</th><th>Destination</th><th>Transaction</th></tr></thead>
+            <thead><tr><th>State</th>{#if !simple}<th>Mainchain block</th>{/if}<th>Time</th><th class="end">Amount</th>{#if !simple}<th>Destination</th><th>Transaction</th>{/if}</tr></thead>
             <tbody>
               {#each depositRows as d (`${d.txid}:${d.burnindex}`)}
                 <tr>
                   <td><span class="status {d.credited ? 'ok' : 'wait'}">{d.credited ? 'Credited' : 'On its way'}</span>{#if ownTargets.has(`${d.txid}:${d.burnindex}`)} <span class="badge accent">yours</span>{/if}</td>
-                  <td class="num">{formatCount(d.height)}</td>
+                  {#if !simple}<td class="num">{formatCount(d.height)}</td>{/if}
                   <td>{formatTime(d.time, true)}</td>
                   <td class="end"><Amount sats={d.sats} /></td>
-                  <td class="cut mono" title={d.destination}><SafeText text={d.destination} /></td>
-                  <td class="mono"><span translate="no">{shortHash(d.txid, 10)}</span></td>
+                  {#if !simple}
+                    <td class="cut mono" title={d.destination}><SafeText text={d.destination} /></td>
+                    <td class="mono"><span translate="no">{shortHash(d.txid, 10)}</span></td>
+                  {/if}
                 </tr>
               {/each}
             </tbody>
@@ -435,6 +445,13 @@
           <li><strong>Voted on</strong> The miners of {mainName} vote on the bundle, block after block{minScore ? `; it needs ${minScore} votes` : ''}{side.main.drivechain ? ` within ${side.main.drivechain.withdrawalperiod} blocks` : ''}.</li>
           <li><strong>Paid</strong> With the votes it needs, the bundle is paid out of the escrow of this sidechain. If it fails, its withdrawals go in a later one.</li>
         </ol>
+        {#if simple && bundle?.status === 'pending' && voted && minScore}
+          <!-- Simple mode: how far the withdrawals being voted on are, in a line. -->
+          <div class="panel-body simple-votes">
+            <Meter value={voted.score} max={minScore} label="Approval of the withdrawals" text="{Math.round(voteProgress(voted.score, minScore))}%" tone={voted.payable ? 'positive' : 'accent'} />
+            <p class="side-note">{voted.payable ? 'Approved: paid with the next block.' : `The withdrawals being voted on are ${Math.round(voteProgress(voted.score, minScore))}% approved, ${voted.blocksleft} blocks left.`}</p>
+          </div>
+        {/if}
       </section>
     </div>
 
@@ -448,16 +465,18 @@
       {:else}
         <div class="side-table-wrap">
           <table class="side-table" use:stacked aria-label="Withdrawals not paid yet">
-            <thead><tr><th>State</th><th class="end">Amount</th><th class="end">Mainchain fee</th><th>Block</th><th>Refund address</th><th>Transaction</th><th></th></tr></thead>
+            <thead><tr><th>State</th><th class="end">Amount</th>{#if !simple}<th class="end">Mainchain fee</th><th>Block</th><th>Refund address</th><th>Transaction</th>{/if}<th></th></tr></thead>
             <tbody>
               {#each shownWithdrawals as w (withdrawalKey(w))}
                 <tr>
                   <td><span class="status {w.status === 'bundled' ? 'wait' : ''}">{w.status === 'bundled' ? 'Being voted on' : 'Waiting'}</span>{#if mine.has(withdrawalKey(w))} <span class="badge accent">yours</span>{/if}</td>
                   <td class="end"><Amount sats={coinsToSats(w.amount)} /></td>
-                  <td class="end"><Amount sats={coinsToSats(w.mainchainfee)} /></td>
-                  <td class="num">{formatCount(w.height)}</td>
-                  <td class="cut mono"><span translate="no">{w.refundaddress}</span></td>
-                  <td class="mono"><span translate="no">{shortHash(w.txid, 10)}:{w.vout}</span></td>
+                  {#if !simple}
+                    <td class="end"><Amount sats={coinsToSats(w.mainchainfee)} /></td>
+                    <td class="num">{formatCount(w.height)}</td>
+                    <td class="cut mono"><span translate="no">{w.refundaddress}</span></td>
+                    <td class="mono"><span translate="no">{shortHash(w.txid, 10)}:{w.vout}</span></td>
+                  {/if}
                   <td class="end">
                     {#if mine.has(withdrawalKey(w)) && w.status === 'waiting'}
                       <button type="button" class="btn small" disabled={refunding !== null} onclick={() => refund(w)}>Take back</button>

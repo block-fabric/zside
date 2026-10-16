@@ -872,4 +872,55 @@ BOOST_AUTO_TEST_CASE(refunds_are_not_accepted_in_packages)
     BOOST_CHECK(InMempool(parent) && InMempool(pays_for_it));
 }
 
+BOOST_AUTO_TEST_CASE(unreachable_record_failures_forgotten)
+{
+    // A chain of 6 blocks, and headers of other branches, failed against the record or by the operator.
+    for (int i{0}; i < 6; ++i) Mine();
+    LOCK(::cs_main);
+    const CChain& active{Chain().m_chain};
+    BOOST_REQUIRE_EQUAL(active.Height(), 6);
+    const auto branch{[&](const CBlockIndex* parent, uint32_t nonce) {
+        CBlockHeader header;
+        header.nVersion = parent->nVersion;
+        header.hashPrevBlock = parent->GetBlockHash();
+        header.nTime = parent->nTime + 1;
+        header.nBits = parent->nBits;
+        header.nNonce = nonce;
+        CBlockIndex* best{Chainman().m_best_header};
+        CBlockIndex* index{Chainman().m_blockman.AddToBlockIndex(header, best)};
+        index->nStatus |= BLOCK_FAILED_VALID;
+        return index;
+    }};
+    // Off the active chain at 1 (out of reach once nothing at 2 can be taken back), and on it from 3.
+    const CBlockIndex* low{branch(active[1], 1)};
+    const CBlockIndex* low_above{branch(low, 2)};
+    const CBlockIndex* high{branch(active[3], 3)};
+    const CBlockIndex* manual{branch(active[1], 4)};
+    const uint256 unknown{uint256{0x77}};
+    for (const CBlockIndex* index : {low, low_above, high}) Record().NoteFailure(index->GetBlockHash(), sidechain::Mainchain::Failure::RECORD);
+    Record().NoteFailure(manual->GetBlockHash(), sidechain::Mainchain::Failure::MANUAL);
+    Record().NoteFailure(unknown, sidechain::Mainchain::Failure::RECORD);
+    BOOST_CHECK_EQUAL(Record().RecordFailures().size(), 4U);
+
+    // Nothing is out of reach yet: no height below which nothing can be taken back.
+    BOOST_CHECK_EQUAL(Chain().ForgetUnreachableRecordFailures(-1), 0U);
+    // From height 2 nothing can be taken back: the branch that leaves at 1 cannot be reached, and its
+    // failures against the record go. The rest stays: a branch within reach, the operator's, one the
+    // index does not have.
+    BOOST_CHECK_EQUAL(Chain().ForgetUnreachableRecordFailures(2), 2U);
+    BOOST_CHECK(!Record().GetFailure(low->GetBlockHash()));
+    BOOST_CHECK(!Record().GetFailure(low_above->GetBlockHash()));
+    BOOST_CHECK(Record().GetFailure(high->GetBlockHash()) == sidechain::Mainchain::Failure::RECORD);
+    BOOST_CHECK(Record().GetFailure(manual->GetBlockHash()) == sidechain::Mainchain::Failure::MANUAL);
+    BOOST_CHECK(Record().GetFailure(unknown) == sidechain::Mainchain::Failure::RECORD);
+    // The blocks stay failed, as they would have for good: none can be taken back to any effect.
+    BOOST_CHECK(low->nStatus & BLOCK_FAILED_VALID);
+    BOOST_CHECK(!Chain().ReconsiderRecordFailure(const_cast<CBlockIndex*>(low)));
+    // From 4, the other branch too.
+    BOOST_CHECK_EQUAL(Chain().ForgetUnreachableRecordFailures(4), 1U);
+    BOOST_CHECK(!Record().GetFailure(high->GetBlockHash()));
+    BOOST_CHECK_EQUAL(Record().RecordFailures().size(), 1U);
+    BOOST_CHECK(Chainman().m_best_header == active.Tip());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

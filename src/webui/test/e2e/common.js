@@ -19,7 +19,23 @@ const E2E = (() => {
   const log = (message) => host('test.log', { message: String(message) });
   const T = () => window.__chainsTest;
 
+  // The mode of the interface (Simple, the default since 2026-10-16, or Advanced): the scripts were
+  // written for the full pages, Advanced; a script of Simple mode sets window.__E2E_SIMPLE in its prelude.
+  // Set as soon as the page has its preferences, before the first wait of the script ends.
+  const wantedMode = window.__E2E_SIMPLE ? 'simple' : 'advanced';
+  const modeSet = (async () => {
+    for (let i = 0; i < 1200; i++) {
+      const t = window.__chainsTest;
+      if (t && t.prefs && t.prefs.loaded) {
+        if (t.prefs.uiMode !== wantedMode) t.savePrefs({ uiMode: wantedMode });
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  })();
+
   async function waitFor(what, fn, ms = 30000) {
+    await modeSet;
     const until = Date.now() + ms;
     let last;
     let noted = Date.now();
@@ -79,5 +95,5 @@ const E2E = (() => {
 
   // The runner hears from the page from the start: a page that says nothing for long is stuck.
   log('SCRIPT started');
-  return { host, rpc, asPage, sleep, log, T, waitFor, check, snapshot, text, buttonByText, report, finish };
+  return { host, rpc, asPage, sleep, log, T, waitFor, modeSet, check, snapshot, text, buttonByText, report, finish };
 })();

@@ -883,6 +883,26 @@ BOOST_AUTO_TEST_CASE(app_values)
     BOOST_CHECK(again.Value("window").isNull());
 }
 
+// A prune size saved below the least of the chain (an older version offered 2 GB) is raised before the node
+// starts, which would refuse it: on the main network of a sidechain, 10000 MiB, so 11 GB (10490 MiB).
+BOOST_AUTO_TEST_CASE(prune_raised_to_the_least_of_the_chain)
+{
+    ArgsManager main;
+    main.ForceSetArg("-chain", "main");
+    auto node{interfaces::MakeNode(m_node)};
+    node->updateRwSetting("prune", common::SettingsValue{"1907"});
+    BOOST_CHECK_EQUAL(webui::NodeOptions::RaiseLowPrune(*node, main).value_or(-1), 1907);
+    BOOST_CHECK_EQUAL(node->getPersistentSetting("prune").getInt<int64_t>(), 10490);
+    // At or above it, off, or manual: left alone.
+    BOOST_CHECK(!webui::NodeOptions::RaiseLowPrune(*node, main));
+    for (const char* value : {"12000", "0", "1"}) {
+        node->updateRwSetting("prune", common::SettingsValue{value});
+        BOOST_CHECK(!webui::NodeOptions::RaiseLowPrune(*node, main));
+        BOOST_CHECK_EQUAL(node->getPersistentSetting("prune").get_str(), value);
+    }
+    node->updateRwSetting("prune", {});
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // --- The changes of the Settings page wait for Apply (audit M7) ---

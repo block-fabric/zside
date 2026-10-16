@@ -1,5 +1,6 @@
 <script lang="ts">
   import { t } from '../lib/i18n.svelte';
+  import { simpleMode } from '../lib/uimode.svelte';
   import { thirdPartyLinks } from '../lib/tools';
   // The history of the wallet (TransactionView, TransactionTableModel, TransactionFilterProxy):
   // filters, a long sortable table, details, fee bumps, abandoning, copying, the CSV export.
@@ -133,6 +134,7 @@
     return () => o.disconnect();
   });
   const narrow = $derived(pageWidth < 760);
+  const simple = $derived(simpleMode());
   const columns: Column<TxRecord>[] = $derived(
     narrow
       ? [
@@ -142,7 +144,10 @@
           { key: 'amount', label: `Amount (${prefs.unit})`, value: (r) => r.amount, width: '9.5rem', align: 'end' },
         ]
       : [
-          { key: 'status', label: '', value: (r) => r.sortKey, width: '2.6rem', align: 'center', noFilter: true },
+          // Simple mode: the status in plain words beside its ring (waiting for the next block, confirmed, final).
+          simple
+            ? { key: 'status', label: 'Status', value: (r) => r.sortKey, width: '15.5rem', noFilter: true }
+            : { key: 'status', label: '', value: (r) => r.sortKey, width: '2.6rem', align: 'center', noFilter: true },
           { key: 'date', label: 'Date', value: (r) => r.time, width: '11.5rem' },
           { key: 'type', label: 'Type', value: (r) => typeText(r.type, r.role), width: '10rem' },
           { key: 'label', label: 'Label', value: (r) => addressText(r, true), width: 'minmax(14rem, 1fr)' },
@@ -283,7 +288,7 @@
         >
           {#snippet cell(row, column)}
             <span class="cellwrap {rowClass(row)}" title={column.key === 'label' ? `${statusText(row)}\n${typeText(row.type, row.role)} ${addressText(row, true)}` : undefined}>
-              {#if column.key === 'status'}<TxStatusIcon record={row} />
+              {#if column.key === 'status'}<TxStatusIcon record={row} />{#if simple && !narrow}<span class="status-word">{statusText(row)}</span>{/if}
               {:else if column.key === 'date'}{narrow ? formatTime(row.time, true) : formatTime(row.time)}
               {:else if column.key === 'type'}<span class="type {row.type}"><Icon name={row.type === 'mined' ? 'mine' : row.amount < 0n ? 'send' : 'receive'} size={14} /> {typeText(row.type, row.role) || 'Other'}</span>
               {:else if column.key === 'label'}{#if narrow}<span class="type {row.type}" title={typeText(row.type, row.role) || 'Other'}><Icon name={row.type === 'mined' ? 'mine' : row.amount < 0n ? 'send' : 'receive'} size={14} /></span> {/if}<span class:bare={!row.label} translate="no">{addressText(row)}</span>
@@ -307,6 +312,11 @@
 <ContextMenu items={menuItems} x={menu.x} y={menu.y} bind:open={menu.open} label="Transaction" />
 
 <style>
+  .status-word {
+    margin-left: 0.45rem;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
   .transactions {
     display: flex;
     flex-direction: column;

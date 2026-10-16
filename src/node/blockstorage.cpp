@@ -334,12 +334,19 @@ void BlockManager::FindFilesToPruneManual(
 
     const auto [min_block_to_prune, last_block_can_prune] = chain.GetPruneRange(nManualPruneHeight);
 
+    // A sidechain keeps a good history whatever height it is asked to prune to: the files it prunes,
+    // the oldest first, leave MIN_SIDECHAIN_PRUNE_TARGET of them.
+    const uint64_t keep{GetConsensus().sidechain.enabled ? MIN_SIDECHAIN_PRUNE_TARGET : 0};
+    uint64_t usage{CalculateCurrentUsage()};
     int count = 0;
     for (int fileNumber = 0; fileNumber < this->MaxBlockfileNum(); fileNumber++) {
         const auto& fileinfo = m_blockfile_info[fileNumber];
         if (fileinfo.nSize == 0 || fileinfo.nHeightLast > (unsigned)last_block_can_prune || fileinfo.nHeightFirst < (unsigned)min_block_to_prune) {
             continue;
         }
+        const uint64_t size{fileinfo.nSize + uint64_t{fileinfo.nUndoSize}};
+        if (usage < keep + size) break;
+        usage -= size;
 
         PruneOneBlockFile(fileNumber);
         setFilesToPrune.insert(fileNumber);
@@ -365,7 +372,7 @@ void BlockManager::FindFilesToPrune(
     // other half will be reserved for the most-work chainstate.
     const int num_chainstates{chainman.HistoricalChainstate() ? 2 : 1};
     const auto target = std::max(
-        MIN_DISK_SPACE_FOR_BLOCK_FILES, GetPruneTarget() / num_chainstates);
+        MinPruneTarget(GetConsensus()), GetPruneTarget() / num_chainstates);
     const uint64_t target_sync_height = chainman.m_best_header->nHeight;
 
     if (chain.m_chain.Height() < 0 || target == 0) {

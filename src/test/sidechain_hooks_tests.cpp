@@ -695,6 +695,47 @@ BOOST_AUTO_TEST_CASE(template_refunds_anywhere)
     BOOST_CHECK_EQUAL(reason, "bad-sc-refund-unknown");
 }
 
+BOOST_AUTO_TEST_CASE(check_extension_first)
+{
+    const Consensus::SidechainParams& params{Params().GetConsensus().sidechain};
+    sidechain::Mainchain mainchain;
+    AppendMain(mainchain, 100);
+    sidechain::EmptyStore empty;
+    CAmount minted{-1};
+    std::string reason;
+    // The template checks no extension: a block fails for what it failed for before the hook was there
+    // (here, its commitment not on record).
+    {
+        sidechain::StoreOverlay store{empty, /*journal=*/true};
+        sidechain::State state{store};
+        BOOST_CHECK(sidechain::Hooks().CheckExtension(state, CoinbaseBlock(false), reason));
+        BOOST_CHECK(!state.ConnectBlock(CoinbaseBlock(false), 1, params, mainchain, minted, reason));
+        BOOST_CHECK_EQUAL(reason, "bmm-unknown");
+    }
+    // A sidechain's own check comes first, before anything reads the record: its reason, not the record's.
+    struct ExtensionHooks : sidechain::ChainHooks {
+        mutable int peg_steps{0};
+        bool CheckExtension(const sidechain::State&, const CBlock&, std::string& reject_reason) const override
+        {
+            reject_reason = "bad-test-extension";
+            return false;
+        }
+        bool GetPegStep(const CBlock& block, const sidechain::Mainchain& mainchain, std::optional<sidechain::PegStep>& step, std::string& reject_reason) const override
+        {
+            ++peg_steps;
+            return ChainHooks::GetPegStep(block, mainchain, step, reject_reason);
+        }
+    };
+    auto owned{std::make_unique<ExtensionHooks>()};
+    const ExtensionHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    sidechain::StoreOverlay store{empty, /*journal=*/true};
+    sidechain::State state{store};
+    BOOST_CHECK(!state.ConnectBlock(CoinbaseBlock(false), 1, params, mainchain, minted, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-test-extension");
+    BOOST_CHECK_EQUAL(hooks.peg_steps, 0);
+}
+
 BOOST_AUTO_TEST_CASE(own_tx_rules)
 {
     // The rules of a sidechain's own for a transaction come after the template's, all or nothing: a

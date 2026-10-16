@@ -70,6 +70,19 @@ if(WEBUI_SIDECHAIN)
         --shots ${CMAKE_CURRENT_BINARY_DIR}/e2e-shots
     )
     set_tests_properties(webui_e2e_sidechain PROPERTIES TIMEOUT 2400 RUN_SERIAL TRUE)
+    # Simple mode, the default of a first start (sidechain_simple.js): Home, Drivechains in two tabs, every page
+    # of the sidebar in Midnight and Light, the switch to Advanced and back (the other scripts run in Advanced).
+    add_test(NAME webui_e2e_sidechain_simple
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_sidechain.py
+        --app $<TARGET_FILE:chains-app>
+        --mainchain-bin ${WEBUI_MAINCHAIN_BIN_DIR}
+        --tmp ${CMAKE_CURRENT_BINARY_DIR}/e2e-sidechain-simple
+        --shots ${CMAKE_CURRENT_BINARY_DIR}/e2e-shots
+        --port 41640
+        --script sidechain_simple.js
+        --js-var SIMPLE=true
+    )
+    set_tests_properties(webui_e2e_sidechain_simple PROPERTIES TIMEOUT 2400 RUN_SERIAL TRUE)
     # The page scripts of the chain's own pages, the same way: e2e/local.cmake calls
     # webui_local_e2e(<name> <port> [options of run_sidechain.py]) for each e2e/<name>.js, so that a merge of
     # the template never conflicts with them. The template has none.
@@ -114,6 +127,15 @@ elseif(WEBUI_TEST_HOOKS AND XVFB_RUN_EXECUTABLE AND Python3_Interpreter_FOUND)
         --shots ${CMAKE_CURRENT_BINARY_DIR}/e2e-shots
     )
     set_tests_properties(webui_e2e_wallet PROPERTIES TIMEOUT 1500 RUN_SERIAL TRUE)
+    # Simple mode, the default of a first start: Home, the sidebar, Move coins to a real deposit, the
+    # glossary, then the switch (the other e2e scripts run in Advanced; also saves pictures in e2e-shots).
+    add_test(NAME webui_e2e_simple
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_simple.py
+        --app $<TARGET_FILE:chains-app>
+        --tmp ${CMAKE_CURRENT_BINARY_DIR}/e2e-simple
+        --shots ${CMAKE_CURRENT_BINARY_DIR}/e2e-shots
+    )
+    set_tests_properties(webui_e2e_simple PROPERTIES TIMEOUT 1500 RUN_SERIAL TRUE)
     # The node and Chains pages, with a pretend desktop (tray, notifications) on a private session
     # bus and a second node as a peer (also saves pictures of these pages in e2e-shots).
     find_program(DBUS_DAEMON_EXECUTABLE dbus-daemon)

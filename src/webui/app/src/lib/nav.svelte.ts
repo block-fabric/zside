@@ -47,6 +47,8 @@ export interface PageInfo {
   tabOf?: { page: PageId; tab: string };
   /** Shortcut, as written in menus. */
   shortcut?: string;
+  /** Only in the navigation of Advanced mode (lib/uimode.svelte.ts): Simple mode reaches it by the palette and links. */
+  advanced?: boolean;
 }
 
 export const PAGES: Record<PageId, PageInfo> = {
@@ -56,9 +58,9 @@ export const PAGES: Record<PageId, PageInfo> = {
   transactions: { id: 'transactions', title: 'Transactions', icon: 'history', summary: 'Every transaction of the wallet, to search, sort and export', parity: ['I01', 'I02', 'I03', 'I04', 'I05', 'I06'], wallet: true, ready: true, shortcut: 'Alt+4' },
   sidechains: { id: 'sidechains', title: 'Sidechains', icon: 'sidechains', summary: 'Deposit to sidechains, ack proposals and vote on withdrawals', parity: ['L01', 'L02', 'L03'], shortcut: 'Alt+5', ready: true },
   'sidechain-nodes': { id: 'sidechain-nodes', title: 'Sidechain nodes', icon: 'nodes', summary: 'Install, start and stop the nodes of sidechains, and watch them', parity: ['L04'], ready: true, tabOf: { page: 'sidechains', tab: 'nodes' } },
-  mine: { id: 'mine', title: 'Mine', icon: 'mine', summary: 'Mine blocks with the processor of this computer', parity: ['L05'], ready: true },
+  mine: { id: 'mine', title: 'Mine', icon: 'mine', summary: 'Mine blocks with the processor of this computer', parity: ['L05'], ready: true, advanced: true },
   explorer: { id: 'explorer', title: 'Block explorer', icon: 'explorer', summary: 'Browse blocks and the transactions waiting to be mined', parity: ['L06'], ready: true },
-  node: { id: 'node', title: 'Node window', icon: 'terminal', summary: 'Information, console, network traffic and peers of this node', parity: ['M01', 'M02', 'M03', 'M04', 'M05'], ready: true, shortcut: 'Ctrl+Shift+D' },
+  node: { id: 'node', title: 'Node window', icon: 'terminal', summary: 'Information, console, network traffic and peers of this node', parity: ['M01', 'M02', 'M03', 'M04', 'M05'], ready: true, shortcut: 'Ctrl+Shift+D', advanced: true },
   settings: { id: 'settings', title: 'Settings', icon: 'settings', summary: 'Options of the node, the wallet, the network, the window and the look', parity: ['N01', 'N02', 'N03', 'N04', 'N05', 'N06', 'T01', 'T02', 'T03', 'T04'], ready: true },
   addresses: { id: 'addresses', title: 'Receiving addresses', icon: 'text', summary: 'The receiving addresses of the wallet: labels, what each received, new ones', parity: ['J02'], wallet: true, ready: true, tabOf: { page: 'receive', tab: 'addresses' } },
   messages: { id: 'messages', title: 'Sign and verify', icon: 'shield', summary: 'Sign a message with an address of the wallet, or check a signature', parity: ['K01', 'K02'], wallet: true, ready: true, tabOf: { page: 'advanced', tab: 'messages' } },
@@ -68,20 +70,20 @@ export const PAGES: Record<PageId, PageInfo> = {
   timestamp: { id: 'timestamp', title: 'Timestamp a file', icon: 'block', summary: 'Prove that a file existed, by publishing its fingerprint on the chain', parity: ['L07'], ready: true, tabOf: { page: 'tools', tab: 'timestamp' } },
   crypto: { id: 'crypto', title: 'Crypto tools', icon: 'qr', summary: 'Hash calculator, Merkle tree and address decoder', parity: ['L10'], ready: true, tabOf: { page: 'tools', tab: 'crypto' } },
   wallets: { id: 'wallets', title: 'Wallets', icon: 'wallet', summary: 'Create, open, close, back up, restore, migrate and encrypt wallets', parity: ['E01', 'E02', 'E03', 'E04', 'E05', 'E06', 'E07', 'E08', 'E09', 'E10'], ready: true },
-  kit: { id: 'kit', title: 'Interface kit', icon: 'overview', summary: 'The shared components of the interface, for testing them', parity: [], ready: true },
+  kit: { id: 'kit', title: 'Interface kit', icon: 'overview', summary: 'The shared components of the interface, for testing them', parity: [], ready: true, advanced: true },
   // One page for the tools, one for the advanced transactions (user decision, 2026-10-15): the pages that
   // were apart are their tabs (tabOf).
-  tools: { id: 'tools', title: 'Tools', icon: 'hash', summary: 'Timestamp a file, prove the funds of the wallet, and the crypto tools (hash, Merkle tree, address decoder)', parity: ['L07', 'L08', 'L10'], ready: true },
-  advanced: { id: 'advanced', title: 'Advanced transactions', icon: 'key', summary: 'Sign and verify messages, partially signed transactions (PSBT), and the multisig lounge', parity: ['K01', 'K02', 'K03', 'L09'], wallet: true, ready: true },
+  tools: { id: 'tools', title: 'Tools', icon: 'hash', summary: 'Timestamp a file, prove the funds of the wallet, and the crypto tools (hash, Merkle tree, address decoder)', parity: ['L07', 'L08', 'L10'], ready: true, advanced: true },
+  advanced: { id: 'advanced', title: 'Advanced transactions', icon: 'key', summary: 'Sign and verify messages, partially signed transactions (PSBT), and the multisig lounge', parity: ['K01', 'K02', 'K03', 'L09'], wallet: true, ready: true, advanced: true },
   home: { id: 'home', title: 'Home', icon: 'home', summary: 'Live cards of the wallet, the chain, the sidechains and the node', parity: [], ready: true },
   // The pages of a sidechain (doc/webui.md): the peg (deposits from the mainchain, withdrawals to it and
   // their bundles) and blind merged mining. Only in the app of a sidechain (pageAvailable).
   // Shown as Drivechains (user decision, 2026-10-15); its id stays peg.
   peg: { id: 'peg', title: 'Drivechains', icon: 'peg', summary: 'Deposit from the mainchain, withdraw to it, and follow the withdrawal bundles and their votes', parity: ['S01', 'S02', 'S03'], shortcut: 'Alt+5', ready: true },
   // A tab of Drivechains (user decision, 2026-10-15), next to Bundle; its id leads there.
-  bmm: { id: 'bmm', title: 'Merged mining', icon: 'merged', summary: 'Have the miners of the mainchain mine the blocks of this chain, for its fees (blind merged mining)', parity: ['S04'], ready: true, tabOf: { page: 'peg', tab: 'bmm' } },
+  bmm: { id: 'bmm', title: 'Merged mining', icon: 'merged', summary: 'Have the miners of the mainchain mine the blocks of this chain, for its fees (blind merged mining)', parity: ['S04'], ready: true, tabOf: { page: 'peg', tab: 'bmm' }, advanced: true },
   ...(Object.fromEntries(
-    (LOCAL_PAGES as readonly LocalPage[]).map((p) => [p.id, { id: p.id, title: p.title, icon: p.icon, summary: p.summary, wallet: p.wallet, shortcut: p.shortcut, parity: [], ready: true }]),
+    (LOCAL_PAGES as readonly LocalPage[]).map((p) => [p.id, { id: p.id, title: p.title, icon: p.icon, summary: p.summary, wallet: p.wallet, shortcut: p.shortcut, parity: [], ready: true, advanced: p.advanced }]),
   ) as unknown as Record<LocalPageId, PageInfo>),
 };
 

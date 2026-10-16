@@ -115,6 +115,14 @@ public:
     /** Whether text is the address of a proxy, without a port (ProxyAddressValidator), and without a user or password. */
     static bool ValidProxyAddress(const std::string& text);
 
+    /**
+     * A prune size of settings.json below the least of the chain (MinPruneTarget: 10000 MiB on a sidechain;
+     * an older version offered 2 GB), raised to it, rounded up to whole GB, before the node starts, which
+     * would refuse it. Not when -prune is given on the command line or in the configuration file (that
+     * decides). @return the size it was, in MiB, when raised
+     */
+    static std::optional<int64_t> RaiseLowPrune(interfaces::Node& node, const ArgsManager& args);
+
     /** Start the app when the user logs in (GUIUtil::SetStartOnSystemStartup), per network. */
     static bool StartAtLogin(ArgsManager& args);
     static bool SetStartAtLogin(ArgsManager& args, bool start);

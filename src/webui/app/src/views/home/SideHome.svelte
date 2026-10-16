@@ -29,6 +29,9 @@
   import { CHAIN } from '../../chain/config';
   import { bmmBlocks, bmmShare, depositsOf } from '../../lib/side';
   import { refreshSide, side, startSide } from '../../lib/sidestate.svelte';
+  import FirstRunTips from '../../components/FirstRunTips.svelte';
+  import Term from '../../components/Term.svelte';
+  import { pageShown, simpleMode } from '../../lib/uimode.svelte';
 
   interface Peer {
     id: number;
@@ -167,7 +170,11 @@
 
 
   // Send and Receive, then what concerns the chain, then the tools (lib/layout.ts).
-  const quickLinks = HOME_QUICK_ACTIONS;
+  // Simple mode leaves out the pages of Advanced (lib/uimode.svelte.ts), merged mining among them.
+  const quickLinks = $derived(HOME_QUICK_ACTIONS.filter((q) => pageShown(q.page)));
+  const simple = $derived(simpleMode());
+  /** Simple mode: the blocks of the mainchain open on demand. */
+  let bmmDetails = $state(false);
 
   // --- The balance over time, in a timeframe ---
   const FRAMES = [
@@ -219,6 +226,8 @@
       <button type="button" class="pill action ghost" onclick={openPalette}><Icon name="search" size={15} /> All actions <kbd>Ctrl K</kbd></button>
     </nav>
   </header>
+
+  <FirstRunTips />
 
   {#if node.tip?.ibd}
     <button type="button" class="out-of-sync" onclick={() => go('node', 'info')}>
@@ -273,25 +282,33 @@
       </dl>
       {#snippet actions()}
         <button type="button" class="btn grow" onclick={() => go('node', 'peers')}><Icon name="peers" size={15} /> Peers</button>
-        <button type="button" class="btn ghost" onclick={() => go('node', 'console')}>Console</button>
+        {#if !simple}<button type="button" class="btn ghost" onclick={() => go('node', 'console')}>Console</button>{/if}
         <button type="button" class="btn ghost icon" aria-label={node.networkActive ? 'Disable network' : 'Enable network'} title={node.networkActive ? 'Disable network activity' : 'Enable network activity'} onclick={toggleNetwork}><Icon name={node.networkActive ? 'offline' : 'refresh'} size={16} /></button>
       {/snippet}
     </Card>
 
     <Card title="Drivechains" icon="peg" open={() => go('peg')} openLabel="Open Drivechains" stat>
       <span class="value"><span class="state" class:ok={connected} class:bad={info !== null && !connected}><Icon name={connected ? 'check' : 'offline'} size={16} /> {#if info === null}Starting…{:else if connected}{mainName} connected{:else}Not reachable{/if}</span></span>
+      {#if simple}
+        <dl class="pairs">
+          <dt>Coming in</dt><dd class="num">{pendingDeposits.length}</dd>
+          <dt>Going back</dt><dd class="num">{side.withdrawals.length}</dd>
+        </dl>
+      {:else}
       <dl class="pairs">
         <dt>Deposits on their way</dt><dd class="num">{pendingDeposits.length}</dd>
         <dt>Withdrawals waiting</dt><dd class="num">{side.withdrawals.length}</dd>
         <dt>Bundle</dt><dd>{side.bundle?.status === 'pending' ? (voted && minScore ? `${voted.score} / ${minScore} votes` : 'being voted on') : side.bundle?.status === 'next' ? 'next block' : 'none'}</dd>
         <dt>Slot</dt><dd class="num">{info?.slot ?? '–'}</dd>
       </dl>
+      {/if}
       {#snippet actions()}
-        <button type="button" class="btn grow" onclick={() => go('peg', 'deposit')}><Icon name="down" size={15} /> Deposit</button>
-        <button type="button" class="btn ghost" onclick={() => go('peg', 'withdraw')}>Withdraw</button>
+        <button type="button" class="btn grow" onclick={() => go('peg', 'deposit')}><Icon name="down" size={15} /> {simple ? 'Bring coins in' : 'Deposit'}</button>
+        <button type="button" class="btn ghost" onclick={() => go('peg', 'withdraw')}>{simple ? 'Send back' : 'Withdraw'}</button>
       {/snippet}
     </Card>
 
+    {#if !simple}
     <Card title="Merged mining" icon="merged" open={() => go('bmm')} openLabel="Open merged mining" stat>
       <span class="value"><span class="state" class:ok={!!side.bmm?.mining}><Icon name={side.bmm?.mining ? 'check' : 'power'} size={16} /> {side.bmm ? (side.bmm.mining ? (side.bmm.idle ? 'Waiting for fees' : 'Mining') : 'Off') : '–'}</span></span>
       <dl class="pairs">
@@ -304,6 +321,7 @@
         <button type="button" class="btn grow" onclick={() => go('bmm')}><Icon name="merged" size={15} /> {side.bmm?.mining ? 'Mining settings' : 'Start mining'}</button>
       {/snippet}
     </Card>
+    {/if}
   </div>
 
   <LocalCards />
@@ -346,6 +364,13 @@
     </section>
 
     <Card title="Blocks of {mainName}" icon="merged" open={() => go('bmm')} openLabel="Open merged mining">
+      {#if simple && !bmmDetails}
+        <!-- Simple mode: one line, the blocks on demand. -->
+        <p class="bmm-line" data-testid="bmm-line">
+          {#if !connected}{mainName} is not reachable.{:else}This chain is <Term id="bmm">merge-mined</Term> by {mainName}: {share.committed} of its last {share.of || bmmWindowSize} blocks made one of ours.{/if}
+        </p>
+        <p class="muted small">The miners of {mainName} make the blocks of this chain too, so it needs no miners of its own.</p>
+      {:else}
       <p class="muted small">The last {share.of || bmmWindowSize} blocks of {mainName}: those that committed to a block of this chain are lit.</p>
       {#if marks.length === 0}
         <p class="muted">{side.main.error ? side.main.error : connected ? 'No block on record yet.' : `${mainName} is not reachable.`}</p>
@@ -358,9 +383,14 @@
           <Sparkline values={series} width={110} height={34} tone={share.committed ? 'up' : 'flat'} />
         </div>
       {/if}
+      {/if}
       {#snippet actions()}
-        <button type="button" class="btn" onclick={() => go('bmm')}>Merged mining</button>
-        <button type="button" class="btn ghost" onclick={() => go('peg', 'bundle')}>Bundle</button>
+        {#if simple}
+          <button type="button" class="btn" aria-expanded={bmmDetails} onclick={() => (bmmDetails = !bmmDetails)}>{bmmDetails ? 'Fewer details' : 'Details'}</button>
+        {:else}
+          <button type="button" class="btn" onclick={() => go('bmm')}>Merged mining</button>
+          <button type="button" class="btn ghost" onclick={() => go('peg', 'bundle')}>Bundle</button>
+        {/if}
       {/snippet}
     </Card>
   </div>
@@ -369,6 +399,11 @@
 </div>
 
 <style>
+  .bmm-line {
+    margin: 0.2rem 0 0.4rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
   .home {
     display: flex;
     flex-direction: column;

@@ -21,13 +21,17 @@
   import { frame, titleBarDoubleClick, titleBarMouseDown } from '../../lib/windowframe.svelte';
   import SyncOverlay from '../../components/SyncOverlay.svelte';
   import PageView from '../PageView.svelte';
+  import { pageShown } from '../../lib/uimode.svelte';
 
   // The top bar is the integrated title bar too: its empty part moves the window, the buttons of
   // the window at its right.
   let top: HTMLElement | undefined = $state();
 
   const area = $derived(areaOf(nav.page));
-  const tabs = $derived(area.tabs.filter((t) => pageAvailable(t.page)));
+  // Simple mode leaves the pages of Advanced out (lib/uimode.svelte.ts), the one shown kept; an area left empty goes.
+  const shown = (p: Place) => pageAvailable(p.page) && (pageShown(p.page) || isAt(p, nav.page, nav.tab));
+  const tabs = $derived(area.tabs.filter(shown));
+  const areas = $derived(AREAS.filter((a) => a.id === area.id || a.tabs.some(shown)));
   const sections = $derived(menuSections(buildCommands()));
 
   // One panel at the right, as in the dashboard: a row opened in the detail panel closes Home's
@@ -46,14 +50,14 @@
   });
 
   function enter(a: Area) {
-    const place = last[a.id] ?? a.tabs.find((t) => !pageDisabled(t.page)) ?? a.tabs[0];
+    const place = last[a.id] ?? a.tabs.find((t) => shown(t) && !pageDisabled(t.page)) ?? a.tabs[0];
     go(place.page, place.tab ?? '');
   }
 
   function areaKey(e: KeyboardEvent, index: number) {
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
     e.preventDefault();
-    const next = (index + (e.key === 'ArrowRight' ? 1 : -1) + AREAS.length) % AREAS.length;
+    const next = (index + (e.key === 'ArrowRight' ? 1 : -1) + areas.length) % areas.length;
     const buttons = (e.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLElement>('.area');
     buttons?.[next]?.focus();
   }
@@ -70,7 +74,7 @@
   >
     <Brand onclick={() => go('home')} />
     <nav class="areas" aria-label="Areas">
-      {#each AREAS as a, i (a.id)}
+      {#each areas as a, i (a.id)}
         <button type="button" class="area" aria-label={t(a.label)} title={t(a.label)} aria-current={area.id === a.id ? 'true' : undefined} onclick={() => enter(a)} onkeydown={(e) => areaKey(e, i)}>
           <Icon name={a.icon} size={18} />
           <span class="label">{t(a.label)}</span>

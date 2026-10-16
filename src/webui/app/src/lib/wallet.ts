@@ -1,9 +1,10 @@
 // The wallet functions of the host (src/webui/walletapi.h), typed, and what the wallet pages of
 // chains-qt compute from them: the texts of the transaction table, its filters, the CSV export.
 import { BridgeError, request } from './bridge';
-import { t } from './i18n.svelte';
+import { t, tn } from './i18n.svelte';
 import { formatAmount, type Unit } from './units';
 import { COINBASE_ROLES } from '../chain/roles';
+import { simpleMode } from './uimode.svelte';
 
 /** Error codes of the wallet functions (walletapi.h). */
 export const WalletError = {
@@ -501,6 +502,7 @@ export function typeText(type: RecordType, role = ''): string {
 
 /** TransactionTableModel::formatTxStatus. */
 export function statusText(r: Pick<TxRecord, 'status' | 'depth' | 'maturesIn'>): string {
+  if (simpleMode()) return plainStatusText(r);
   switch (r.status) {
     case 'unconfirmed':
       return t('Unconfirmed');
@@ -516,6 +518,29 @@ export function statusText(r: Pick<TxRecord, 'status' | 'depth' | 'maturesIn'>):
       return t('Immature (%1 confirmations, will be available after %2)', r.depth, r.depth + r.maturesIn);
     case 'notaccepted':
       return t('Generated but not accepted');
+  }
+}
+
+/**
+ * The status in plain words (Simple mode): waiting for the next block, confirmed, final; the same states
+ * as statusText, without the counts.
+ */
+export function plainStatusText(r: Pick<TxRecord, 'status' | 'depth' | 'maturesIn'>): string {
+  switch (r.status) {
+    case 'unconfirmed':
+      return t('Waiting for the next block');
+    case 'abandoned':
+      return t('Cancelled');
+    case 'confirming':
+      return t('Confirmed');
+    case 'confirmed':
+      return t('Final');
+    case 'conflicted':
+      return t('Will not happen');
+    case 'immature':
+      return tn('Usable in %n block(s)', r.maturesIn);
+    case 'notaccepted':
+      return t('Mined, but not accepted');
   }
 }
 

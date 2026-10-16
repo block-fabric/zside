@@ -112,6 +112,12 @@ private:
      */
     UniValue Ask(UniValue dialog, UniValue fallback) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
+    /**
+     * Show a message in the page without waiting for it (any thread): kept with the dialogs that wait, so
+     * that a page loaded later shows it too, until it is answered.
+     */
+    void Inform(UniValue dialog) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
     /** Take back the changes of the options never applied (OptionsJournal), with the restart flag they set. */
     void UndoOptions(interfaces::Node& node, const std::string& why) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Choose the language again (-lang, the option, the system), for the page and the node; an event if it changed. */
@@ -162,6 +168,8 @@ private:
     bool m_intro_cancelled GUARDED_BY(m_mutex){false};
     //! Dialogs waiting for an answer of the page, by id, and their answers.
     std::map<int64_t, UniValue> m_dialogs GUARDED_BY(m_mutex);
+    //! The dialogs of m_dialogs that nobody waits for (Inform): an answer removes them.
+    std::set<int64_t> m_informs GUARDED_BY(m_mutex);
     std::map<int64_t, UniValue> m_answers GUARDED_BY(m_mutex);
     int64_t m_next_dialog GUARDED_BY(m_mutex){1};
     bool m_node_started GUARDED_BY(m_mutex){false};

@@ -478,6 +478,8 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
 {
     // Where the block takes the peg actions: in the template, every block, as the mainchain was up to
     // the block before the one that committed to it.
+    // The block's extension first, against the state before it: a forged copy does not fail against the record.
+    if (!Hooks().CheckExtension(*this, block, reject_reason)) return false;
     std::optional<PegStep> step;
     if (!Hooks().GetPegStep(block, mainchain, step, reject_reason)) return false;
     std::vector<CTxOut> payouts, tx_payouts;

@@ -27,6 +27,8 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     include: ['src/**/*.test.ts'],
+    // Advanced mode before each test (src/test/setup.ts): the tests of Simple mode switch to it themselves.
+    setupFiles: ['src/test/setup.ts'],
     // The colours of the built-in themes, read from themes.css (?raw) by lib/customthemes.ts: the tests need its text.
     css: { include: [/themes\.css/] },
   },

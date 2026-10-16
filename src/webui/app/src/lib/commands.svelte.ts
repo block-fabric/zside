@@ -12,6 +12,7 @@ import { clampFontAdjust, THEMES } from './themes';
 import { UNITS } from './units';
 import { CHAIN, chainHasPage, SIDECHAIN } from '../chain/config';
 import { LOCAL_COMMANDS, type LocalCommand } from '../chain/local';
+import { simpleMode, switchModeLabel, toggleUiMode } from './uimode.svelte';
 
 /** The menus of chains-qt, in their order, then the groups of the app. */
 // The menus: what concerns the chain (sidechains, mining, the explorer) before the tools.
@@ -175,6 +176,9 @@ export function buildCommands(): Command[] {
 
   const extra: Command[] = [
     ...LAYOUTS.map((l): Command => ({ id: `layout.${l.id}`, group: 'Layout', label: `Layout: ${l.name}`, icon: l.icon, run: () => setLayout(l.id), checked: prefs.layout === l.id, keywords: l.summary })),
+    // Simple or Advanced (lib/uimode.svelte.ts): the switch of the sidebar's foot, here for every layout.
+    { id: 'display.uiMode', group: 'Display', label: switchModeLabel(), icon: simpleMode() ? 'tool' : 'home', run: toggleUiMode, keywords: 'simple advanced mode beginner expert interface easy full' },
+    { id: 'display.tips', group: 'Display', label: 'Show the first steps again', run: () => { savePrefs({ tipsDone: false, uiMode: 'simple' }); go('home'); }, keywords: 'tips intro help beginner tour', page: 'home' },
     ...UNITS.map((u): Command => ({ id: `display.unit.${u.id}`, group: 'Display', label: `Show amounts in ${u.short}`, run: () => savePrefs({ unit: u.id }), checked: prefs.unit === u.id, keywords: `unit ${u.long}` })),
     { id: 'network.peers', group: 'Network', label: 'Show peers', run: to('node', 'peers'), keywords: 'connections' },
     {

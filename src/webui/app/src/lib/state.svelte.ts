@@ -115,6 +115,10 @@ export const prefs = $state({
   /** Multisig lounge: keys and shared addresses (MultisigKeys, MultisigAddresses), name and value. */
   multisigKeys: [] as { name: string; value: string }[],
   multisigAddresses: [] as { name: string; value: string }[],
+  /** Simple (the pages a beginner needs, in plain words) or Advanced (every section of every page); lib/uimode.svelte.ts. */
+  uiMode: 'simple' as 'simple' | 'advanced',
+  /** The first-run tips of Home were dismissed (components/FirstRunTips.svelte). */
+  tipsDone: false,
   loaded: false,
 });
 
@@ -299,7 +303,8 @@ export function applyPrefs(raw: Record<string, unknown>): void {
   // A layout no longer known (the compact sidebar 'sidebar', gone) becomes the default, the dashboard.
   if (raw.layout !== undefined) prefs.layout = isLayout(raw.layout) ? raw.layout : DEFAULT_LAYOUT;
   if (typeof raw.lastWallet === 'string') prefs.lastWallet = raw.lastWallet;
-  for (const key of ['coinControl', 'psbtControls', 'subtractFeeDefault', 'feeMinimized', 'coinTree', 'showTray', 'minimizeToTray', 'minimizeOnClose'] as const) {
+  if (raw.uiMode === 'simple' || raw.uiMode === 'advanced') prefs.uiMode = raw.uiMode;
+  for (const key of ['coinControl', 'psbtControls', 'subtractFeeDefault', 'feeMinimized', 'coinTree', 'showTray', 'minimizeToTray', 'minimizeOnClose', 'tipsDone'] as const) {
     if (typeof raw[key] === 'boolean') prefs[key] = raw[key];
   }
   if (raw.feeMode === 'smart' || raw.feeMode === 'custom') prefs.feeMode = raw.feeMode;

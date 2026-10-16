@@ -44,8 +44,8 @@ const LOCAL = built(readFileSync(join(__dirname, '../../../local.cpp'), 'utf8'),
 function runsHere(where: string): boolean {
   const dropped: Record<string, string> = { sidechains: 'pages/Sidechains.svelte', 'sidechain-nodes': 'pages/SidechainNodes.svelte', mine: 'pages/Mine.svelte' };
   for (const id of CHAIN_JSON.drop ?? []) if (dropped[id] === where) return false;
-  // The Sidechains page's helpers (lib/chain.ts) come with it.
-  if (where === 'lib/chain.ts' && (CHAIN_JSON.drop ?? []).includes('sidechains')) return false;
+  // The Sidechains page's helpers (lib/chain.ts) and its Simple form (Move coins) come with it.
+  if ((where === 'lib/chain.ts' || where === 'pages/MoveCoins.svelte') && (CHAIN_JSON.drop ?? []).includes('sidechains')) return false;
   if (where === (SIDECHAIN ? 'views/home/Home.svelte' : 'views/home/SideHome.svelte')) return false;
   return true;
 }

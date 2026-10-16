@@ -31,6 +31,9 @@
   import { detail, showDetail } from '../lib/detail.svelte';
   import { nav, takeFocus } from '../lib/nav.svelte';
   import SidechainNodes from './SidechainNodes.svelte';
+  import MoveCoins from './MoveCoins.svelte';
+  import Term from '../components/Term.svelte';
+  import { simpleMode } from '../lib/uimode.svelte';
   import { host, rpc } from '../lib/rpc';
   import { node, noWalletText, prefs, toast, wallets } from '../lib/state.svelte';
   import { coinsToSats, formatAmount, satsToCoins, unitInfo } from '../lib/units';
@@ -43,6 +46,11 @@
     { id: 'nodes', label: 'Nodes' },
   ];
   const tab = $derived(TABS.some((t) => t.id === nav.tab) ? nav.tab : 'sidechains');
+  // Simple mode (lib/uimode.svelte.ts): the first tab moves coins (MoveCoins), the nodes are the apps of the
+  // sidechains; proposals and withdrawals are Advanced's, shown only when asked for (the palette, a link).
+  const simple = $derived(simpleMode());
+  const SIMPLE_LABELS: Record<string, string> = { sidechains: 'Move coins', nodes: 'Sidechain apps' };
+  const tabs = $derived(simple ? TABS.filter((tb) => tb.id === 'sidechains' || tb.id === 'nodes' || tb.id === tab).map((tb) => ({ ...tb, label: SIMPLE_LABELS[tb.id] ?? tb.label })) : TABS);
 
   let dc = $state<DrivechainState | null>(null);
   let loadError = $state('');
@@ -304,13 +312,15 @@
 
 <div class="page sidechains">
   <header class="page-head"><h1>Sidechains</h1></header>
-  {#if dc}
+  {#if simple}
+    <p class="summary muted">Move CHN to a <Term id="sidechain">sidechain</Term> to use what it adds (markets, names, private payments…), and bring it back when you are done.</p>
+  {:else if dc}
     <p class="summary muted">{summaryText(dc.info, formatAmount(escrowTotal, prefs.unit, { withUnit: true }))}</p>
   {:else}
     <p class="summary muted">{loadError || 'The drivechain state is not available yet.'}</p>
   {/if}
   <div class="tabs" role="tablist" aria-label="Sidechains">
-    {#each TABS as tb (tb.id)}
+    {#each tabs as tb (tb.id)}
       <button type="button" role="tab" aria-selected={tab === tb.id} onclick={() => (nav.tab = tb.id)}>
         {t(tb.label)}
         {#if tb.id === 'proposals' && dc && dc.proposals.pending.length + dc.proposals.queued.length}<span class="badge accent">{dc.proposals.pending.length + dc.proposals.queued.length}</span>{/if}
@@ -322,6 +332,8 @@
   {#if tab === 'nodes'}
     <!-- The nodes of sidechains run from here (chains-qt's Sidechain Nodes window), as a tab of this page. -->
     <SidechainNodes embedded />
+  {:else if simple && tab === 'sidechains'}
+    <MoveCoins {dc} {refresh} />
   {:else if dc && tab === 'sidechains'}
     <section class="stats">
       <div class="stat panel"><span class="muted">Active sidechains</span><strong class="num">{dc.info.activesidechains}</strong><span class="faint">of {dc.info.maxsidechains} slots</span></div>
