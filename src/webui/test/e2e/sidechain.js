@@ -79,11 +79,19 @@
     await shot('sc-peg-deposit-address');
     set($('#deposit-amount'), '5');
     await sleep(200);
-    // The wallet of the mainchain node pays: the host asks the desktop, the amount first (audit port-1 #4).
-    // Declined first: nothing is sent.
+    // The wallet of the mainchain node pays: the host asks in its dialog window, the amount first (audit port-1 #4).
+    // Declined first, there (Escape), as a user would: nothing is sent.
     let asked = (await confirmed()).length;
-    await host('test.confirmAnswer', { yes: false });
+    await host('test.confirmAnswer', { show: true });
     $('#deposit-helper').click();
+    await waitFor('the deposit asked in the dialog window', async () => (await host('test.dialog', { action: 'kind' })) === 'themed', 30000);
+    const shown = await waitFor('its page', async () => {
+      const s = await host('test.dialog', { action: 'eval', script: "(() => ({ title: document.getElementById('dialog-title') && document.getElementById('dialog-title').textContent, theme: document.documentElement.dataset.theme, focused: document.activeElement && document.activeElement.id, loading: document.body.classList.contains('loading') }))()" });
+      return s && !s.loading && s.title ? s : null;
+    }, 30000);
+    await check('the deposit is asked in the dialog window of the host, in the look of the app, Cancel first', shown.title === `Deposit from the wallet of ${MAIN}` && shown.theme === document.documentElement.dataset.theme && shown.focused === 'dialog-cancel', JSON.stringify(shown));
+    await host('test.dialog', { action: 'snapshot', name: 'sc-dialog-deposit' });
+    await host('test.dialog', { action: 'eval', script: "document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); true" });
     await waitFor('the deposit asked on the desktop', async () => (await confirmed()).length > asked, 30000);
     await sleep(1500);
     await check('a deposit declined on the desktop sends nothing, and no error shows', !text('.peg').includes('On its way') && !$$('dialog[open]').some((d) => /Deposit from/.test(d.textContent)));

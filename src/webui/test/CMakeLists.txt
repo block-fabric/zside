@@ -10,6 +10,7 @@ add_executable(test_chains-app
   assets_tests.cpp
   bridge_tests.cpp
   chainconfig_tests.cpp
+  dialog_tests.cpp
   sidechainapi_tests.cpp
   events_tests.cpp
   hardening_tests.cpp

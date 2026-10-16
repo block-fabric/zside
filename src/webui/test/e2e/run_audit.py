@@ -15,9 +15,12 @@ Runs chains-app on regtest in a virtual display, several times:
   3. audit_nowallet.js: -disablewallet;
   4. audit_narrow.js: windows 700 and 480 pixels wide;
   5. audit_signer.js: a hardware wallet (the mock signer of the functional tests);
-  6. audit_lang.js: -lang=fr.
+  6. audit_lang.js: -lang=fr;
+  7. audit_dialog.js: the confirmations of the host in its dialog window (audit
+     port-1 #4), in Midnight, Light, Dracula and a theme of the user, answered in
+     that window; the dialog of the system when it cannot be made; one at a time.
 
-    run_audit.py --app build/bin/chains-app --tmp <dir> --shots <dir>
+    run_audit.py --app build/bin/chains-app --tmp <dir> --shots <dir> [--only audit-dialog,...]
 """
 
 import argparse
@@ -71,7 +74,12 @@ def submit_bad_proposal(rpc):
     return rpc.submitblock(block.serialize().hex())
 
 
+ONLY = set()
+
+
 def run(app_path, base, name, script_name, args, env, shots, failures, timeout=1200, on_event=None, prelude=""):
+    if ONLY and name not in ONLY:
+        return None
     print(f"== {name}", flush=True)
     path = base / f"{name}.js"
     path.write_text(script(script_name, prelude))
@@ -93,7 +101,9 @@ def main():
     parser.add_argument("--tmp", required=True, type=Path)
     parser.add_argument("--shots", required=True, type=Path)
     parser.add_argument("--port", type=int, default=29530)
+    parser.add_argument("--only", default="", help="only these runs, by name (audit, audit-restart, audit-nowallet, audit-narrow700, audit-narrow480, audit-signer, audit-lang, audit-dialog)")
     args = parser.parse_args()
+    ONLY.update(n for n in args.only.split(",") if n)
     if shutil.which("xvfb-run") is None:
         print("xvfb-run is needed", file=sys.stderr)
         return 2
@@ -127,24 +137,24 @@ def main():
         if result is not None:
             failures.append(f"the block was refused: {result}")
 
-    run(args.app, base, "audit", "audit.js", main_args, env, args.shots, failures, on_event=submit_block)
-    check_shutdown(datadir, failures)
-    settings = json.loads((datadir / "regtest" / "settings.json").read_text())
-    print(f"  settings.json at the stop: prune={settings.get('prune')!r} par={settings.get('par')!r}", flush=True)
+    if run(args.app, base, "audit", "audit.js", main_args, env, args.shots, failures, on_event=submit_block) is not None or not ONLY:
+        check_shutdown(datadir, failures)
+        settings = json.loads((datadir / "regtest" / "settings.json").read_text())
+        print(f"  settings.json at the stop: prune={settings.get('prune')!r} par={settings.get('par')!r}", flush=True)
 
     # 2. Again: the change never applied is taken back, the applied one stays.
-    run(args.app, base, "audit-restart", "audit_restart.js", common + [f"-port={port}", f"-datadir={datadir}", f"-webuiconfig={config}"], env, args.shots, failures)
-    settings = json.loads((datadir / "regtest" / "settings.json").read_text())
-    if settings.get("prune") not in (None, "0", 0):
-        failures.append(f"settings.json kept the unapplied prune: {settings}")
+    if run(args.app, base, "audit-restart", "audit_restart.js", common + [f"-port={port}", f"-datadir={datadir}", f"-webuiconfig={config}"], env, args.shots, failures) is not None or not ONLY:
+        settings = json.loads((datadir / "regtest" / "settings.json").read_text())
+        if settings.get("prune") not in (None, "0", 0):
+            failures.append(f"settings.json kept the unapplied prune: {settings}")
 
     # 3. Without wallets.
     nowallet = base / "nowallet"
     nowallet.mkdir()
     # A chains.conf that turns on a debug option of the app: ignored, only the command line counts (audit L11).
     (nowallet / "chains.conf").write_text("webuidevtools=1\n")
-    run(args.app, base, "audit-nowallet", "audit_nowallet.js", common + [f"-port={port + 2}", f"-datadir={nowallet}", "-disablewallet", f"-webuiconfig={base / 'nowallet.json'}"], env, args.shots, failures)
-    check_shutdown(nowallet, failures)
+    if run(args.app, base, "audit-nowallet", "audit_nowallet.js", common + [f"-port={port + 2}", f"-datadir={nowallet}", "-disablewallet", f"-webuiconfig={base / 'nowallet.json'}"], env, args.shots, failures) is not None or not ONLY:
+        check_shutdown(nowallet, failures)
 
     # 4. Narrow windows.
     for width in (700, 480):
@@ -169,6 +179,12 @@ def main():
     french = base / "french"
     french.mkdir()
     run(args.app, base, "audit-lang", "audit_lang.js", common + [f"-port={port + 4}", f"-datadir={french}", "-lang=fr", f"-webuiconfig={base / 'french.json'}"], env, args.shots, failures)
+
+    # 7. The dialog window of the host (audit port-1 #4).
+    dialogs = base / "dialog"
+    dialogs.mkdir()
+    if run(args.app, base, "audit-dialog", "audit_dialog.js", common + [f"-port={port + 6}", f"-datadir={dialogs}", f"-webuiconfig={base / 'dialog.json'}"], env, args.shots, failures) is not None or not ONLY:
+        check_shutdown(dialogs, failures)
 
     if failures:
         print("FAILED:\n  " + "\n  ".join(failures), flush=True)

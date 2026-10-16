@@ -98,8 +98,13 @@ private:
      * answer it in place of the user. The page may use the file afterwards.
      */
     std::optional<std::string> Choose(const Window::FileDialog& dialog) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /** Ask the user in a dialog of the desktop (Window::Confirm), not of the page; false when cancelled or quitting. */
+    /**
+     * Ask the user in the dialog window of the host (Window::Ask: in the look of the app, never of the page), not on a
+     * thread of the UI; false when cancelled or quitting.
+     */
     bool Confirm(const Window::ConfirmDialog& dialog) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** A confirmation as the dialog window shows it: its text, and the look of the app now (the preferences of the network shown). */
+    dialog::Request DialogRequest(const Window::ConfirmDialog& confirm) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
      * Show a dialog in the page and wait for its answer (on a thread that is not the UI thread).
@@ -166,8 +171,10 @@ private:
     std::set<std::string> m_writable GUARDED_BY(m_mutex);
     //! Answers of the file choosers given by the tests (-webuitestscript), in place of the user.
     std::deque<UniValue> m_test_files GUARDED_BY(m_mutex);
-    //! Answers of the confirmations of the desktop given by the tests (-webuitestscript), and what they asked.
-    std::deque<bool> m_test_confirms GUARDED_BY(m_mutex);
+    //! Answers of the confirmations of the host given by the tests (-webuitestscript), and what they asked: an answer
+    //! given here, or the dialog shown (the dialog window, or the dialog of the system), for the test to answer there.
+    enum class TestConfirm { YES, NO, SHOW, FALLBACK };
+    std::deque<TestConfirm> m_test_confirms GUARDED_BY(m_mutex);
     std::vector<Window::ConfirmDialog> m_test_confirmed GUARDED_BY(m_mutex);
     //! The notifications sent to the desktop, for the tests.
     std::vector<UniValue> m_notifications GUARDED_BY(m_mutex);

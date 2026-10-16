@@ -83,6 +83,9 @@ else()
     DEPENDS
       ${webui_app_sources}
       ${webui_app_dir}/index.html
+      ${webui_app_dir}/dialog.html
+      ${webui_app_dir}/vite.dialog.config.ts
+      ${webui_app_dir}/scripts/build.mjs
       ${webui_app_dir}/package.json
       ${webui_app_dir}/package-lock.json
       ${webui_app_dir}/vite.config.ts
@@ -115,6 +118,7 @@ add_library(chains_webui_core STATIC EXCLUDE_FROM_ALL
   bridge.cpp
   rpcpolicy.cpp
   console.cpp
+  dialog.cpp
   guard.cpp
   events.cpp
   i18n.cpp

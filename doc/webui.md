@@ -226,8 +226,9 @@ Rules the code keeps:
 
 * **Programs run only on the user's word, given to the desktop.** Whatever
   makes the app run a program (a sidechain downloaded from Sidechain Nodes, the
-  external signer `-signer`) goes through `Window::Confirm`, a dialog of the
-  window system that the page can neither draw nor answer, and a program path
+  external signer `-signer`) goes through `App::Confirm`, a dialog of the
+  host that the page can neither draw nor answer (see "The dialogs of the
+  host" below), and a program path
   only comes from the file chooser of the desktop. Downloads are https only,
   with no user name before the host (`https://a@b/` is refused), with a
   SHA-256 checked before anything is unpacked; the releases built into the app
@@ -255,6 +256,37 @@ Rules the code keeps:
     and where its credentials go (doc/sidechain.md).
   A test that did not queue an answer (`test.confirmAnswer`) gets "no", never
   a dialog on the desktop.
+* **The dialogs of the host** (dialog.h, audit port-1 #4). These confirmations
+  are shown in a window of the host, in the look of the app, never in the page:
+  a small modal window over the main one (transient for it, centred on it; the
+  main window takes no input meanwhile), without the frame of the system, with
+  a web view of its own (WebKitGTK; WebView2 on Windows). It shows a page built
+  into the program (dialog.html, src/webui/app/src/dialog, built apart by
+  vite.dialog.config.ts) under an origin of its own (`chains-dialog://dialog`,
+  `https://dialog.chains-app.invalid` on Windows), which serves that page, its
+  script and style sheet and the fonts, nothing of the main page: no storage,
+  script or bridge of the main page reaches it, and the main page has no handle
+  on it. Its bridge, `__chainsDialog`, is that web view's only: `hello` gives
+  the text to show (put in with `textContent`, the marks that turn text around
+  written out as `[U+202E]` by the host and again by the page), `ready` its
+  size (the window shows then), `answer` the user's choice, once
+  (`dialog::Session`). It is drawn in the theme of the app as the host keeps it
+  (the preferences of the network: a built-in theme, or a theme of the user,
+  checked by the page as strictly as a theme file, and drawn as its base when
+  its text could not be read on the dialog), with the fonts built in and the
+  text size of the app. Escape cancels, Enter does what the focus is on (Cancel
+  at first: the safe default), Tab stays in the dialog, and the button that
+  accepts takes no click or key for 400 ms after the window shows. One dialog at
+  a time: the ones asked meanwhile wait their turn (`dialog::Pending`). Without
+  the window (its web view cannot be made, its page fails or says nothing in 10
+  s), the same question is asked in the dialog of the system: never an answer
+  the user did not give. File choosers stay the system's (the page reads files
+  only through them), dark or light as the app (GTK's prefer-dark setting while
+  one shows; on Windows the preferred mode of the app, uxtheme's
+  SetPreferredAppMode). The tests let a question show (`test.confirmAnswer`
+  `{show: true}`, or `{fallback: true}` for the dialog of the system) and answer
+  it in that window (`test.dialog`: keys and clicks in its page, its picture),
+  never through the page (run_audit.py, audit_dialog.js).
 * **Direction.** Text from outside is isolated as to direction: SafeText is
   `dir="auto"`, every `translate="no"` is `unicode-bidi: isolate`, and a value
   that can turn the text (a letter of a right-to-left script, a mark of

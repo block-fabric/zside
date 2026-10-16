@@ -16,8 +16,8 @@
 
 /**
  * What the host checks itself before it does what the page asks, when the page alone must not be
- * enough: the confirmations of the desktop (Window::Confirm, a dialog the page can neither draw nor
- * answer) and the text put in them.
+ * enough: the confirmations of the host (App::Confirm: the dialog window of the host, dialog.h, which the
+ * page can neither draw nor answer) and the text put in them.
  *
  * The page is trusted to draw the app, not to act for the user where it matters: a command of the
  * console that can spend, sign, show keys or change the node, and a web address that is not one of the
@@ -25,7 +25,8 @@
  */
 namespace webui::guard {
 
-//! Asks the user in a dialog of the desktop; true when accepted (App::Confirm).
+//! Asks the user in the dialog window of the host; true when accepted (App::Confirm). The generic confirmation
+//! of the kit: host methods (a chain's own, local.cpp) get it and need nothing else for the themed dialog.
 using ConfirmFn = std::function<bool(const Window::ConfirmDialog&)>;
 
 /** The next code point of UTF-8 text at `pos` (moved past it); nothing for an invalid sequence (pos moves one byte). */

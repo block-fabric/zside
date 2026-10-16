@@ -51,7 +51,7 @@ public:
     //! Ask the user for a folder (title, the folder to start in); nothing when cancelled.
     using ChooseFolderFn = std::function<std::optional<std::string>(const std::string& title, const std::string& start)>;
     /**
-     * Ask the user in a dialog of the desktop, which the page can neither draw nor answer (Window::Confirm):
+     * Ask the user in the dialog window of the host, which the page can neither draw nor answer (App::Confirm):
      * title, message, the text of the button that accepts. True when accepted.
      */
     using ConfirmFn = std::function<bool(const std::string& title, const std::string& message, const std::string& accept)>;

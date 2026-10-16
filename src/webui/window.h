@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include <webui/dialog.h>
 #include <webui/windowframe.h>
 
 namespace webui {
@@ -171,6 +172,9 @@ public:
         bool folder{false};
         //! The folder the chooser opens in.
         std::string start_dir;
+        //! Dark or light as the look of the app (the chooser is the system's: GTK's prefer-dark setting, the dark mode
+        //! of Windows), or as the desktop (the theme "system").
+        dialog::Scheme scheme{dialog::Scheme::DESKTOP};
     };
     /**
      * Show a file chooser; `done` gets the path chosen, or nothing when it was cancelled. When
@@ -180,17 +184,35 @@ public:
     virtual void ChooseFile(const FileDialog& options, std::function<void(std::optional<std::string>)> done) = 0;
 
     /**
-     * A question of the desktop, not of the page: a modal dialog of the window system with a title, a
-     * message and two buttons, `accept` and Cancel (Cancel is the default). `done` gets whether the user
-     * accepted. Used before the app does something the page asked for that runs a program (a download of
-     * a sidechain, the external signer): the page can neither draw nor answer it.
+     * A question of the host, not of the page, with two buttons, `accept` and Cancel (Cancel is the default). Used
+     * before the app does something the page asked for where the page's word is not enough (a command of the
+     * console, a web address, a program the node runs, a deposit...): the page can neither draw nor answer it.
+     * Shown with Ask; App::Confirm.
      */
     struct ConfirmDialog {
         std::string title;
         std::string message;
         std::string accept;
+        //! Data shown apart, in a monospaced block, or nothing.
+        std::string details{};
+        dialog::Level level{dialog::Level::WARNING};
     };
-    virtual void Confirm(const ConfirmDialog& dialog, std::function<void(bool)> done) = 0;
+
+    /**
+     * Ask the user in the dialog window of the host (dialog.h): a modal window of its own over this one, with a web
+     * view of its own showing the page of the dialogs in the look of the app; the dialog of the system instead when
+     * that window cannot be made or its page says nothing in time (never an answer the user did not give). One at a
+     * time: a dialog asked while one shows waits for it. `done` gets the answer (declined when the window goes).
+     */
+    virtual void Ask(const dialog::Request& request, std::function<void(dialog::Answer)> done) = 0;
+
+    /**
+     * For the tests (WEBUI_TEST_HOOKS) only, on the dialog shown now: "kind" (JSON "themed", "native" or "none"),
+     * "eval" (run `arg` in the page of the themed dialog: its result as JSON), "snapshot" (a picture of the themed
+     * dialog in the PNG file `arg`: true or false), "native" (the dialog of the system: `arg` "accept" or "cancel"
+     * answers it, "state" gives its title and text). `done` gets nothing when there is no such dialog.
+     */
+    virtual void TestDialog(const std::string& action, const std::string& arg, std::function<void(std::optional<std::string>)> done) = 0;
 
     /** Save a picture of what the page shows now as PNG. For the tests. */
     virtual void Snapshot(const std::string& png_path, std::function<void(bool ok)> done) = 0;

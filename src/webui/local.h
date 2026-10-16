@@ -38,8 +38,9 @@ using NodeFn = std::function<interfaces::Node&()>;
 
 /**
  * Host methods of the chain's pages ("<chain>.something"), registered after the kit's. `confirm` asks the
- * user on the desktop (Window::Confirm, outside the page): what a page must not do on its own word, such as
- * showing a key, asks there first and answers BRIDGE_CANCELLED on a no (audit port-2 #3).
+ * user in the dialog window of the host (App::Confirm, dialog.h: in the look of the app, outside the page): what a
+ * page must not do on its own word, such as showing a key, asks there first and answers BRIDGE_CANCELLED on a no
+ * (audit port-2 #3). A Window::ConfirmDialog is all it takes (its level may say DANGER).
  */
 void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm);
 

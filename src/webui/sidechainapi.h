@@ -37,7 +37,7 @@ class Bridge;
  *   bmm.request {address, amount}   one block mined by hand (requestbmmblock), `amount` offered for it
  *
  * What spends the wallet of the mainchain node (a deposit, merged mining turned on, a block asked for) waits for
- * the user's word, given to the desktop (Window::Confirm), with the amount the host parsed first; an offer for
+ * the user's word, given in the dialog window of the host (App::Confirm), with the amount the host parsed first; an offer for
  * merged mining is at most MAX_BMM_OFFER (audit port-1 #4). setbmm and requestbmmblock are not methods the
  * page calls itself (rpcpolicy.cpp).
  *

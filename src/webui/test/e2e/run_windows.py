@@ -42,7 +42,7 @@ sys.path.insert(0, str(HERE))
 from run_smoke import script  # noqa: E402
 
 # The scripts of a chain's own pages (hivemind.js, bitnames.js...) take 39590 and on.
-PORTS = {"smoke": 39470, "layouts": 39490, "titlebar": 39510, "walletcard": 39550, "sidechain": 39570}
+PORTS = {"smoke": 39470, "layouts": 39490, "titlebar": 39510, "walletcard": 39550, "sidechain": 39570, "audit_dialog": 39580}
 CHAIN = json.loads((HERE.parents[1] / "app/src/chain/chain.json").read_text())
 SIDECHAIN = CHAIN["role"] == "sidechain"
 

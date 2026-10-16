@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/i18n.mjs --if-present && vite build",
+    "build": "node scripts/i18n.mjs --if-present && node scripts/build.mjs",
     "i18n": "node scripts/i18n.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
     "test": "vitest run"

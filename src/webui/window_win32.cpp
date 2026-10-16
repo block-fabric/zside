@@ -13,6 +13,7 @@
 
 #include <webui/assets.h>
 #include <webui/chainconfig.h>
+#include <webui/dialog.h>
 #include <tinyformat.h>
 #include <webui/icontint.h>
 #include <webui/window.h>
@@ -328,6 +329,12 @@ public:
 
     ~Win32Window() override
     {
+        if (m_themed) {
+            HWND hwnd{m_themed->hwnd};
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            m_themed.reset();
+            DestroyWindow(hwnd);
+        }
         RemoveTray();
         m_webview.reset();
         if (m_caption_button) DestroyWindow(m_caption_button);
@@ -529,27 +536,83 @@ public:
         return out;
     }
 
-    void Confirm(const ConfirmDialog& dialog, std::function<void(bool)> done) override
+    void Ask(const dialog::Request& request, std::function<void(dialog::Answer)> done) override
     {
-        // A message box of the system, owned by the window (modal to it); Cancel is the default button.
-        Post([this, dialog, done = std::move(done)] {
-            const std::wstring text{widen_string(dialog.message + "\n\n" + dialog.accept + "?")};
-            const int answer{MessageBoxW(m_hwnd, text.c_str(), widen_string(dialog.title).c_str(), MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TASKMODAL)};
-            done(answer == IDOK);
+        // Shown after this call returns (the web view of the dialog window is made in a loop of its own, the
+        // dialog of the system runs one). One at a time: a dialog asked while one shows waits for it.
+        Post([this, request, done = std::move(done)] {
+            if (!m_pending.Push(request, done)) return;
+            ShowDialog(request, done);
         });
+    }
+
+    void TestDialog(const std::string& action, const std::string& arg, std::function<void(std::optional<std::string>)> done) override
+    {
+        if (action == "kind") {
+            done(m_themed ? (m_themed->session->Shown() ? "\"themed\"" : "\"loading\"") : m_native ? "\"native\"" : "\"none\"");
+            return;
+        }
+        if ((action == "eval" || action == "snapshot") && m_themed && m_themed->session->Shown()) {
+            ComPtr<ICoreWebView2> view;
+            if (!m_themed->controller || FAILED(m_themed->controller->get_CoreWebView2(&view))) return done(std::nullopt);
+            if (action == "snapshot") {
+                return SnapshotController(m_themed->controller, arg, [done = std::move(done)](bool ok) { done(ok ? "true" : "false"); });
+            }
+            auto* handler{MakeHandler<ICoreWebView2ExecuteScriptCompletedHandler, HRESULT, LPCWSTR>(
+                IID_ICoreWebView2ExecuteScriptCompletedHandler, [done](HRESULT result, LPCWSTR json) {
+                    done(SUCCEEDED(result) && json ? std::optional<std::string>{narrow_string(json)} : std::nullopt);
+                    return S_OK;
+                })};
+            if (FAILED(view->ExecuteScript(widen_string(arg).c_str(), handler))) done(std::nullopt);
+            handler->Release();
+            return;
+        }
+        if (action == "native" && m_native) {
+            // The message box of the system shown now (owned by this window, on this thread).
+            std::pair<HWND, HWND> found{m_hwnd, nullptr};
+            EnumThreadWindows(GetCurrentThreadId(), +[](HWND hwnd, LPARAM lp) -> BOOL {
+                auto* found{reinterpret_cast<std::pair<HWND, HWND>*>(lp)};
+                wchar_t name[16]{};
+                GetClassNameW(hwnd, name, 16);
+                if (GetWindow(hwnd, GW_OWNER) == found->first && wcscmp(name, L"#32770") == 0) {
+                    found->second = hwnd;
+                    return FALSE;
+                }
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&found));
+            const HWND box{found.second};
+            if (arg == "state") {
+                UniValue state{UniValue::VOBJ};
+                state.pushKV("title", m_native_title);
+                state.pushKV("message", m_native_message);
+                return done(state.write());
+            }
+            if (!box) return done(std::nullopt);
+            PostMessageW(box, WM_COMMAND, arg == "accept" ? IDOK : IDCANCEL, 0);
+            return done("true");
+        }
+        done(std::nullopt);
     }
 
     void ChooseFile(const FileDialog& options, std::function<void(std::optional<std::string>)> done) override
     {
-        // Shown after this call returns: the dialog runs a loop of its own.
-        Post([this, options, done = std::move(done)] { done(RunFileDialog(options)); });
+        // Shown after this call returns: the dialog runs a loop of its own. Dark or light as the app is.
+        Post([this, options, done = std::move(done)] {
+            SetScheme(options.scheme);
+            auto path{RunFileDialog(options)};
+            SetScheme(dialog::Scheme::DESKTOP);
+            done(std::move(path));
+        });
     }
 
-    void Snapshot(const std::string& png_path, std::function<void(bool ok)> done) override
+    void Snapshot(const std::string& png_path, std::function<void(bool ok)> done) override { SnapshotController(m_controller, png_path, std::move(done)); }
+
+private:
+    static void SnapshotController(ICoreWebView2Controller* controller, const std::string& png_path, std::function<void(bool ok)> done)
     {
         ComPtr<ICoreWebView2> view;
         IStream* stream{nullptr};
-        if (!m_controller || FAILED(m_controller->get_CoreWebView2(&view)) ||
+        if (!controller || FAILED(controller->get_CoreWebView2(&view)) ||
             FAILED(SHCreateStreamOnFileEx(widen_string(png_path).c_str(), STGM_CREATE | STGM_WRITE | STGM_SHARE_EXCLUSIVE, FILE_ATTRIBUTE_NORMAL, TRUE, nullptr, &stream))) {
             done(false);
             return;
@@ -568,7 +631,357 @@ public:
         handler->Release();
     }
 
-private:
+    using Done = std::function<void(dialog::Answer)>;
+
+    //! The dialog window of the host shown now (dialog.h): its window, its web view, where its page is.
+    struct Themed {
+        uint64_t id{0};
+        std::unique_ptr<dialog::Session> session;
+        HWND hwnd{nullptr};
+        std::unique_ptr<webview::webview> view;
+        HWND widget{nullptr};
+        ICoreWebView2Controller* controller{nullptr};
+        ComPtr<ICoreWebView2Environment> environment;
+        Done done;
+    };
+
+    /**
+     * Dark or light for the dialogs of the system (the file choosers, the fallback message box, the menu of the tray):
+     * the preferred mode of the app (uxtheme's SetPreferredAppMode, Windows 10 1903 and later: ForceDark or ForceLight
+     * as the app's look, AllowDark to follow the system for the theme "system").
+     */
+    static void SetScheme(dialog::Scheme scheme)
+    {
+        using SetPreferredAppMode = int(WINAPI*)(int);
+        using FlushMenuThemes = void(WINAPI*)();
+        static HMODULE uxtheme{LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+        if (!uxtheme) return;
+        static const auto set{reinterpret_cast<SetPreferredAppMode>(reinterpret_cast<void*>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(135))))};
+        static const auto flush{reinterpret_cast<FlushMenuThemes>(reinterpret_cast<void*>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(136))))};
+        if (!set) return;
+        set(scheme == dialog::Scheme::DARK ? 2 : scheme == dialog::Scheme::LIGHT ? 3 : 1);
+        if (flush) flush();
+    }
+
+    void ShowDialog(const dialog::Request& request, Done done)
+    {
+        if (!request.test_fallback && OpenThemed(request, done)) return;
+        OpenNative(request, std::move(done));
+    }
+
+    /** The dialog shown is answered: its answer, then the next dialog asked meanwhile, if any. */
+    void Finish(const Done& done, dialog::Answer answer)
+    {
+        done(std::move(answer));
+        if (auto next{m_pending.Next()}) {
+            Post([this, request = std::move(next->first), done = std::move(next->second)] { ShowDialog(request, done); });
+        }
+    }
+
+    /** The dialog window, with the page of the dialogs. False when it cannot be made (then the message box of the system). */
+    bool OpenThemed(const dialog::Request& request, const Done& done)
+    {
+        HINSTANCE instance{GetModuleHandleW(nullptr)};
+        static const bool registered{[instance] {
+            WNDCLASSEXW dc{};
+            dc.cbSize = sizeof(dc);
+            // A shadow under a window without a frame.
+            dc.style = CS_DROPSHADOW;
+            dc.hInstance = instance;
+            dc.lpszClassName = L"ChainsAppDialog";
+            dc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512) /* IDC_ARROW */);
+            dc.hbrBackground = nullptr;
+            dc.lpfnWndProc = +[](HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) -> LRESULT {
+                Win32Window* self{nullptr};
+                if (msg == WM_NCCREATE) {
+                    self = static_cast<Win32Window*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+                } else {
+                    self = reinterpret_cast<Win32Window*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+                }
+                if (!self) return DefWindowProcW(hwnd, msg, wp, lp);
+                return self->DialogProc(hwnd, msg, wp, lp);
+            };
+            return RegisterClassExW(&dc) != 0;
+        }()};
+        if (!registered) return false;
+        auto themed{std::make_unique<Themed>()};
+        themed->id = ++m_dialog_serial;
+        themed->session = std::make_unique<dialog::Session>(request);
+        themed->done = done;
+        const UINT dpi{GetDpiForWindow(m_hwnd)};
+        // Owned by the main window (over it, no button of its own in the taskbar), without the frame of the system.
+        themed->hwnd = CreateWindowExW(0, L"ChainsAppDialog", widen_string(request.title).c_str(), WS_POPUP | WS_CLIPCHILDREN, 0, 0,
+                                       MulDiv(460, dpi, 96), MulDiv(240, dpi, 96), m_hwnd, nullptr, instance, this);
+        if (!themed->hwnd) return false;
+        const DWORD corners{2 /* DWMWCP_ROUND */};
+        DwmSetWindowAttribute(themed->hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &corners, sizeof(corners));
+        try {
+            themed->view = std::make_unique<webview::webview>(false, themed->hwnd);
+            themed->widget = static_cast<HWND>(themed->view->widget().value());
+            themed->controller = static_cast<ICoreWebView2Controller*>(themed->view->browser_controller().value());
+            SetupDialogView(*themed);
+        } catch (const std::exception& e) {
+            LogWarning("webui: the dialog window cannot be made (%s): the dialog of the system instead", e.what());
+            themed->view.reset();
+            SetWindowLongPtrW(themed->hwnd, GWLP_USERDATA, 0);
+            DestroyWindow(themed->hwnd);
+            return false;
+        }
+        const uint64_t id{themed->id};
+        // Its bridge: this web view's only, never the main page's.
+        themed->view->bind(std::string{dialog::BRIDGE}, [this, id](std::string call_id, std::string args, void*) {
+            OnDialogCall(id, call_id, args);
+            // The answer may hold a passphrase: not left in freed memory.
+            memory_cleanse(args.data(), args.size());
+        }, nullptr);
+        m_themed = std::move(themed);
+        ResizeDialogWidget();
+        // The page says nothing in time: the dialog of the system instead.
+        PostDelayed(std::chrono::milliseconds{dialog::READY_TIMEOUT_MS}, [this, id] {
+            if (m_themed && m_themed->id == id && !m_themed->session->Shown()) {
+                LogWarning("webui: the dialog window did not show in time: the dialog of the system instead");
+                Fallback(id);
+            }
+        });
+        m_themed->view->navigate(std::string{dialog::WIN_ORIGIN} + std::string{dialog::PAGE});
+        return true;
+    }
+
+    /** The web view of the dialog window: its page only (dialog::Serves), no navigation, no menu, no keys of the browser. */
+    void SetupDialogView(Themed& themed)
+    {
+        ComPtr<ICoreWebView2> view;
+        if (!themed.controller || FAILED(themed.controller->get_CoreWebView2(&view))) throw std::runtime_error("No web view");
+        ComPtr<ICoreWebView2Settings> settings;
+        if (SUCCEEDED(view->get_Settings(&settings))) {
+            settings->put_AreDefaultContextMenusEnabled(FALSE);
+            settings->put_AreDefaultScriptDialogsEnabled(FALSE);
+            settings->put_AreDevToolsEnabled(FALSE);
+            settings->put_IsZoomControlEnabled(FALSE);
+            settings->put_AreHostObjectsAllowed(FALSE);
+            settings->put_IsStatusBarEnabled(FALSE);
+            ComPtr<ICoreWebView2Settings3> s3;
+            if (settings.As(IID_ICoreWebView2Settings3, s3)) s3->put_AreBrowserAcceleratorKeysEnabled(FALSE);
+            ComPtr<ICoreWebView2Settings4> s4;
+            if (settings.As(IID_ICoreWebView2Settings4, s4)) {
+                s4->put_IsGeneralAutofillEnabled(FALSE);
+                s4->put_IsPasswordAutosaveEnabled(FALSE);
+            }
+            ComPtr<ICoreWebView2Settings5> s5;
+            if (settings.As(IID_ICoreWebView2Settings5, s5)) s5->put_IsPinchZoomEnabled(FALSE);
+            ComPtr<ICoreWebView2Settings6> s6;
+            if (settings.As(IID_ICoreWebView2Settings6, s6)) s6->put_IsSwipeNavigationEnabled(FALSE);
+        }
+        ComPtr<ICoreWebView2_2> view2;
+        if (!view.As(IID_ICoreWebView2_2, view2) || FAILED(view2->get_Environment(&themed.environment))) throw std::runtime_error("This WebView2 is too old");
+        const std::wstring filter{widen_string(std::string{dialog::WIN_ORIGIN} + "/*")};
+        view->AddWebResourceRequestedFilter(filter.c_str(), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
+        EventRegistrationToken token;
+        ICoreWebView2Environment* environment{themed.environment.get()};
+        auto* resources{MakeHandler<ICoreWebView2WebResourceRequestedEventHandler, ICoreWebView2*, ICoreWebView2WebResourceRequestedEventArgs*>(
+            IID_ICoreWebView2WebResourceRequestedEventHandler, [environment](ICoreWebView2*, ICoreWebView2WebResourceRequestedEventArgs* args) {
+                ComPtr<ICoreWebView2WebResourceRequest> request;
+                if (FAILED(args->get_Request(&request))) return S_OK;
+                LPWSTR raw{nullptr};
+                request->get_Uri(&raw);
+                const std::string uri{TakeString(raw)};
+                const std::string_view origin{dialog::WIN_ORIGIN};
+                const bool own{uri.size() > origin.size() && uri.starts_with(origin) && uri[origin.size()] == '/'};
+                const std::string_view path{own ? std::string_view{uri}.substr(origin.size()) : std::string_view{}};
+                const Asset* asset{own && dialog::Serves(path) ? FindAsset(BuiltinAssets(), path) : nullptr};
+                ComPtr<ICoreWebView2WebResourceResponse> response;
+                if (!asset) {
+                    environment->CreateWebResourceResponse(nullptr, 404, L"Not Found", L"Content-Type: text/plain", &response);
+                } else {
+                    IStream* stream{SHCreateMemStream(asset->data.data(), static_cast<UINT>(asset->data.size()))};
+                    const std::string headers{"Content-Type: " + std::string{MimeType(asset->path)} + "\r\n" +
+                                              "Content-Security-Policy: " + dialog::ContentSecurityPolicy() + "\r\n" +
+                                              "X-Content-Type-Options: nosniff\r\n" +
+                                              "Cache-Control: no-store"};
+                    environment->CreateWebResourceResponse(stream, 200, L"OK", widen_string(headers).c_str(), &response);
+                    if (stream) stream->Release();
+                }
+                if (response) args->put_Response(response.get());
+                return S_OK;
+            })};
+        view->add_WebResourceRequested(resources, &token);
+        resources->Release();
+        auto* navigation{MakeHandler<ICoreWebView2NavigationStartingEventHandler, ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs*>(
+            IID_ICoreWebView2NavigationStartingEventHandler, [](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) {
+                LPWSTR uri{nullptr};
+                args->get_Uri(&uri);
+                if (TakeString(uri) != std::string{dialog::WIN_ORIGIN} + std::string{dialog::PAGE}) args->put_Cancel(TRUE);
+                return S_OK;
+            })};
+        view->add_NavigationStarting(navigation, &token);
+        navigation->Release();
+        auto* frames{MakeHandler<ICoreWebView2NavigationStartingEventHandler, ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs*>(
+            IID_ICoreWebView2NavigationStartingEventHandler, [](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) {
+                args->put_Cancel(TRUE);
+                return S_OK;
+            })};
+        view->add_FrameNavigationStarting(frames, &token);
+        frames->Release();
+        auto* windows{MakeHandler<ICoreWebView2NewWindowRequestedEventHandler, ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs*>(
+            IID_ICoreWebView2NewWindowRequestedEventHandler, [](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* args) {
+                args->put_Handled(TRUE);
+                return S_OK;
+            })};
+        view->add_NewWindowRequested(windows, &token);
+        windows->Release();
+        auto* permissions{MakeHandler<ICoreWebView2PermissionRequestedEventHandler, ICoreWebView2*, ICoreWebView2PermissionRequestedEventArgs*>(
+            IID_ICoreWebView2PermissionRequestedEventHandler, [](ICoreWebView2*, ICoreWebView2PermissionRequestedEventArgs* args) {
+                args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);
+                return S_OK;
+            })};
+        view->add_PermissionRequested(permissions, &token);
+        permissions->Release();
+        // The page gone (its process failed): the dialog of the system instead.
+        const uint64_t id{themed.id};
+        auto* failed{MakeHandler<ICoreWebView2ProcessFailedEventHandler, ICoreWebView2*, ICoreWebView2ProcessFailedEventArgs*>(
+            IID_ICoreWebView2ProcessFailedEventHandler, [this, id](ICoreWebView2*, ICoreWebView2ProcessFailedEventArgs* args) {
+                COREWEBVIEW2_PROCESS_FAILED_KIND kind;
+                args->get_ProcessFailedKind(&kind);
+                LogWarning("webui: a process of the dialog window failed (kind %d)", int(kind));
+                Post([this, id] { Fallback(id); });
+                return S_OK;
+            })};
+        view->add_ProcessFailed(failed, &token);
+        failed->Release();
+    }
+
+    LRESULT DialogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+    {
+        const bool current{m_themed && m_themed->hwnd == hwnd};
+        switch (msg) {
+        case WM_SIZE:
+            if (current) ResizeDialogWidget();
+            return 0;
+        case WM_ACTIVATE:
+            if (current && LOWORD(wp) != WA_INACTIVE && m_themed->controller) m_themed->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+            break;
+        case WM_MOVE:
+        case WM_MOVING:
+            if (current && m_themed->controller) m_themed->controller->NotifyParentWindowPositionChanged();
+            break;
+        case WM_CLOSE:
+            // Closed by the system (Alt+F4): Cancel.
+            if (current) CancelThemed(m_themed->id);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    void ResizeDialogWidget()
+    {
+        if (!m_themed || !m_themed->widget) return;
+        RECT r{};
+        GetClientRect(m_themed->hwnd, &r);
+        MoveWindow(m_themed->widget, r.left, r.top, r.right - r.left, r.bottom - r.top, TRUE);
+    }
+
+    void OnDialogCall(uint64_t id, const std::string& call_id, const std::string& args)
+    {
+        if (!m_themed || m_themed->id != id) return;
+        dialog::Session::Reply reply{m_themed->session->Call(args)};
+        if (reply.step == dialog::Session::Step::ANSWER) {
+            // Not answered: the page goes with its window.
+            dialog::Answer answer{m_themed->session->TakeAnswer()};
+            Done done{m_themed->done};
+            CloseThemed();
+            Finish(done, std::move(answer));
+            return;
+        }
+        m_themed->view->resolve(call_id, reply.status, reply.json);
+        if (reply.step == dialog::Session::Step::SHOW) ShowThemed();
+    }
+
+    void ShowThemed()
+    {
+        // As large as the page asks, within the work area of the monitor of the main window, centred on it.
+        const UINT dpi{GetDpiForWindow(m_hwnd)};
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        GetMonitorInfoW(MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+        const RECT work{mi.rcWork};
+        const int work_w{work.right - work.left}, work_h{work.bottom - work.top};
+        const dialog::Size size{m_themed->session->WindowSize(MulDiv(work_w - 32, 96, dpi), MulDiv(work_h * 85 / 100, 96, dpi))};
+        const int w{MulDiv(size.width, dpi, 96)}, h{MulDiv(size.height, dpi, 96)};
+        RECT owner{work};
+        if (IsWindowVisible(m_hwnd) && !IsIconic(m_hwnd)) GetWindowRect(m_hwnd, &owner);
+        const int x{std::clamp<int>(owner.left + (owner.right - owner.left - w) / 2, work.left, std::max<int>(work.left, work.right - w))};
+        const int y{std::clamp<int>(owner.top + (owner.bottom - owner.top - h) / 2, work.top, std::max<int>(work.top, work.bottom - h))};
+        SetWindowPos(m_themed->hwnd, HWND_TOP, x, y, w, h, SWP_NOACTIVATE);
+        ResizeDialogWidget();
+        // Modal: the main window takes no input while the dialog shows.
+        EnableWindow(m_hwnd, FALSE);
+        ShowWindow(m_themed->hwnd, SW_SHOW);
+        SetForegroundWindow(m_themed->hwnd);
+        if (m_themed->controller) m_themed->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+    }
+
+    /** The dialog window goes (hidden now, destroyed once what its web view has queued ran). */
+    void CloseThemed()
+    {
+        if (!m_themed) return;
+        std::unique_ptr<Themed> themed{std::move(m_themed)};
+        // The main window first takes input again, so that it is the one activated.
+        EnableWindow(m_hwnd, TRUE);
+        ShowWindow(themed->hwnd, SW_HIDE);
+        SetWindowLongPtrW(themed->hwnd, GWLP_USERDATA, 0);
+        Themed* raw{themed.release()};
+        Post([raw] {
+            std::unique_ptr<Themed> gone{raw};
+            HWND hwnd{gone->hwnd};
+            gone->environment.Reset();
+            gone->view.reset();
+            DestroyWindow(hwnd);
+        });
+    }
+
+    void CancelThemed(uint64_t id)
+    {
+        if (!m_themed || m_themed->id != id || m_themed->session->Answered()) return;
+        Done done{m_themed->done};
+        CloseThemed();
+        Finish(done, {});
+    }
+
+    /** The dialog window failed before an answer: the same question in the message box of the system. */
+    void Fallback(uint64_t id)
+    {
+        if (!m_themed || m_themed->id != id || m_themed->session->Answered()) return;
+        const dialog::Request request{m_themed->session->request()};
+        Done done{m_themed->done};
+        CloseThemed();
+        Post([this, request, done] { OpenNative(request, done); });
+    }
+
+    /** A message box of the system, owned by the window (modal to it); Cancel is the default button. */
+    void OpenNative(const dialog::Request& request, Done done)
+    {
+        const UniValue page{dialog::PageData(request)};
+        if (request.passphrase) {
+            // A message box has no field: a question with a passphrase is declined (never answered for the user).
+            LogWarning("webui: no dialog window for a passphrase: declined");
+            return Finish(done, {});
+        }
+        std::string message{page.find_value("message").get_str()};
+        if (!page.find_value("details").get_str().empty()) message += "\n\n" + page.find_value("details").get_str();
+        m_native = true;
+        m_native_title = page.find_value("title").get_str();
+        m_native_message = message;
+        SetScheme(dialog::SchemeOf(request.look));
+        const std::wstring text{widen_string(message + "\n\n" + page.find_value("accept").get_str() + "?")};
+        const int answer{MessageBoxW(m_hwnd, text.c_str(), widen_string(m_native_title).c_str(), MB_OKCANCEL | (request.level == dialog::Level::INFO ? MB_ICONINFORMATION : MB_ICONWARNING) | MB_DEFBUTTON2 | MB_TASKMODAL)};
+        m_native = false;
+        SetScheme(dialog::Scheme::DESKTOP);
+        dialog::Answer out;
+        out.accepted = answer == IDOK;
+        Finish(done, std::move(out));
+    }
+
     //! Sends the place of the maximize button of the page to the host, whenever it may have moved.
     static constexpr const char* CAPTION_SCRIPT{R"js((() => {
   let last = '';
@@ -1074,6 +1487,13 @@ private:
     HICON m_window_icon{nullptr};
     HICON m_window_icon_small{nullptr};
     uint64_t m_notify_icon_until{0};
+    //! The dialogs of the host: the window shown now (or the message box of the system instead), the ones waiting their turn.
+    dialog::Pending m_pending;
+    std::unique_ptr<Themed> m_themed;
+    uint64_t m_dialog_serial{0};
+    bool m_native{false};
+    std::string m_native_title;
+    std::string m_native_message;
 };
 
 } // namespace

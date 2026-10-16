@@ -8,11 +8,13 @@
 
 #include <webui/assets.h>
 #include <webui/chainconfig.h>
+#include <webui/dialog.h>
 #include <webui/tray_gtk.h>
 #include <support/cleanse.h>
 #include <webui/window.h>
 
 #include <logging.h>
+#include <univalue.h>
 
 #include <webview.h>
 
@@ -29,13 +31,14 @@
 namespace webui {
 namespace {
 
-void ServeAsset(WebKitURISchemeRequest* request, gpointer)
+/** Answer a request of a web view with a file built into the program, if `served` takes its path under `origin`. */
+void Serve(WebKitURISchemeRequest* request, std::string_view origin, bool (*served)(std::string_view), const std::string& policy)
 {
     const char* path{webkit_uri_scheme_request_get_path(request)};
     const char* uri{webkit_uri_scheme_request_get_uri(request)};
-    // Only the files of the app itself, from its own origin.
+    // Only the files of the app itself, from their own origin.
     const Asset* asset{nullptr};
-    if (uri && std::string_view{uri}.starts_with(std::string{ORIGIN} + "/")) {
+    if (uri && std::string_view{uri}.starts_with(std::string{origin} + "/") && served(path ? path : "/")) {
         asset = FindAsset(BuiltinAssets(), path ? path : "/");
     }
     if (!asset) {
@@ -53,13 +56,24 @@ void ServeAsset(WebKitURISchemeRequest* request, gpointer)
     SoupMessageHeaders* headers{soup_message_headers_new(SOUP_MESSAGE_HEADERS_RESPONSE)};
     // The headers replace the ones of the response: the type goes in them too.
     soup_message_headers_append(headers, "Content-Type", std::string{mime}.c_str());
-    soup_message_headers_append(headers, "Content-Security-Policy", ContentSecurityPolicy().c_str());
+    soup_message_headers_append(headers, "Content-Security-Policy", policy.c_str());
     soup_message_headers_append(headers, "X-Content-Type-Options", "nosniff");
     soup_message_headers_append(headers, "Cache-Control", "no-store");
     webkit_uri_scheme_response_set_http_headers(response, headers);
     webkit_uri_scheme_request_finish_with_response(request, response);
     g_object_unref(response);
     g_object_unref(stream);
+}
+
+void ServeAsset(WebKitURISchemeRequest* request, gpointer)
+{
+    Serve(request, ORIGIN, [](std::string_view) { return true; }, ContentSecurityPolicy());
+}
+
+//! The page of the dialogs of the host, under its own origin: its files only (dialog::Serves).
+void ServeDialogAsset(WebKitURISchemeRequest* request, gpointer)
+{
+    Serve(request, dialog::ORIGIN, dialog::Serves, dialog::ContentSecurityPolicy());
 }
 
 class GtkWindowImpl final : public Window
@@ -77,6 +91,11 @@ public:
             WebKitSecurityManager* security{webkit_web_context_get_security_manager(context)};
             webkit_security_manager_register_uri_scheme_as_secure(security, scheme.c_str());
             webkit_security_manager_register_uri_scheme_as_cors_enabled(security, scheme.c_str());
+            // The page of the dialogs of the host (dialog.h): an origin of its own, nothing of the main page's.
+            const std::string dialog_scheme{dialog::SCHEME};
+            webkit_web_context_register_uri_scheme(context, dialog_scheme.c_str(), ServeDialogAsset, nullptr, nullptr);
+            webkit_security_manager_register_uri_scheme_as_secure(security, dialog_scheme.c_str());
+            webkit_security_manager_register_uri_scheme_as_cors_enabled(security, dialog_scheme.c_str());
         }
 
         m_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -183,6 +202,13 @@ public:
 
     ~GtkWindowImpl() override
     {
+        if (m_themed) {
+            if (m_themed->timer) g_source_remove(m_themed->timer);
+            GtkWidget* window{m_themed->window};
+            m_themed.reset();
+            gtk_widget_destroy(window);
+        }
+        if (m_native) gtk_widget_destroy(m_native);
         m_webview.reset();
         if (m_last_press) gdk_event_free(m_last_press);
         if (m_window) gtk_widget_destroy(m_window);
@@ -345,48 +371,66 @@ public:
         return out;
     }
 
-    void Snapshot(const std::string& png_path, std::function<void(bool ok)> done) override
+    void Snapshot(const std::string& png_path, std::function<void(bool ok)> done) override { SnapshotView(m_view, png_path, std::move(done)); }
+
+    void Ask(const dialog::Request& request, std::function<void(dialog::Answer)> done) override
     {
-        struct Job {
-            std::string path;
-            std::function<void(bool)> done;
-        };
-        auto* job{new Job{png_path, std::move(done)}};
-        webkit_web_view_get_snapshot(
-            m_view, WEBKIT_SNAPSHOT_REGION_VISIBLE, WEBKIT_SNAPSHOT_OPTIONS_NONE, nullptr,
-            +[](GObject* source, GAsyncResult* result, gpointer data) {
-                std::unique_ptr<Job> job{static_cast<Job*>(data)};
-                GError* error{nullptr};
-                cairo_surface_t* surface{webkit_web_view_get_snapshot_finish(WEBKIT_WEB_VIEW(source), result, &error)};
-                bool ok{false};
-                if (surface) {
-                    ok = cairo_surface_write_to_png(surface, job->path.c_str()) == CAIRO_STATUS_SUCCESS;
-                    cairo_surface_destroy(surface);
-                } else if (error) {
-                    LogWarning("webui: snapshot failed: %s", error->message);
-                    g_error_free(error);
-                }
-                job->done(ok);
-            },
-            job);
+        // One at a time: a dialog asked while one shows waits for it.
+        if (!m_pending.Push(request, done)) return;
+        ShowDialog(request, std::move(done));
     }
 
-    void Confirm(const ConfirmDialog& dialog, std::function<void(bool)> done) override
+    void TestDialog(const std::string& action, const std::string& arg, std::function<void(std::optional<std::string>)> done) override
     {
-        // A dialog of GTK, modal to the window; Cancel is the default response.
-        GtkWidget* box{gtk_message_dialog_new(GTK_WINDOW(m_window), GtkDialogFlags(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT), GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE, "%s", dialog.title.c_str())};
-        gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(box), "%s", dialog.message.c_str());
-        gtk_dialog_add_buttons(GTK_DIALOG(box), "_Cancel", GTK_RESPONSE_CANCEL, dialog.accept.c_str(), GTK_RESPONSE_ACCEPT, nullptr);
-        gtk_dialog_set_default_response(GTK_DIALOG(box), GTK_RESPONSE_CANCEL);
-        gtk_window_set_title(GTK_WINDOW(box), dialog.title.c_str());
-        auto* job{new std::function<void(bool)>{std::move(done)}};
-        g_signal_connect(box, "response", G_CALLBACK(+[](GtkDialog* d, gint response, gpointer data) {
-                             std::unique_ptr<std::function<void(bool)>> job{static_cast<std::function<void(bool)>*>(data)};
-                             gtk_widget_destroy(GTK_WIDGET(d));
-                             (*job)(response == GTK_RESPONSE_ACCEPT);
-                         }),
-                         job);
-        gtk_widget_show_all(box);
+        if (action == "kind") {
+            done(m_themed ? (m_themed->session->Shown() ? "\"themed\"" : "\"loading\"") : m_native ? "\"native\"" : "\"none\"");
+        } else if (action == "eval" && m_themed && m_themed->session->Shown()) {
+            auto* job{new std::function<void(std::optional<std::string>)>{std::move(done)}};
+            const auto finished{+[](GObject* source, GAsyncResult* result, gpointer data) {
+                std::unique_ptr<std::function<void(std::optional<std::string>)>> job{static_cast<std::function<void(std::optional<std::string>)>*>(data)};
+                GError* error{nullptr};
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+                JSCValue* value{webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(source), result, &error)};
+#else
+                WebKitJavascriptResult* js{webkit_web_view_run_javascript_finish(WEBKIT_WEB_VIEW(source), result, &error)};
+                JSCValue* value{js ? JSC_VALUE(g_object_ref(webkit_javascript_result_get_js_value(js))) : nullptr};
+                if (js) webkit_javascript_result_unref(js);
+#endif
+                std::optional<std::string> out;
+                if (value) {
+                    if (char* json{jsc_value_to_json(value, 0)}) {
+                        out = json;
+                        g_free(json);
+                    } else {
+                        out = "null";
+                    }
+                    g_object_unref(value);
+                } else if (error) {
+                    LogWarning("webui: test script in the dialog: %s", error->message);
+                    g_error_free(error);
+                }
+                (*job)(out);
+            }};
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+            webkit_web_view_evaluate_javascript(m_themed->web, arg.c_str(), static_cast<gssize>(arg.size()), nullptr, nullptr, nullptr, finished, job);
+#else
+            webkit_web_view_run_javascript(m_themed->web, arg.c_str(), nullptr, finished, job);
+#endif
+        } else if (action == "snapshot" && m_themed && m_themed->session->Shown()) {
+            SnapshotView(m_themed->web, arg, [done = std::move(done)](bool ok) { done(ok ? "true" : "false"); });
+        } else if (action == "native" && m_native) {
+            if (arg == "state") {
+                UniValue state{UniValue::VOBJ};
+                state.pushKV("title", m_native_title);
+                state.pushKV("message", m_native_message);
+                done(state.write());
+            } else {
+                gtk_dialog_response(GTK_DIALOG(m_native), arg == "accept" ? GTK_RESPONSE_ACCEPT : GTK_RESPONSE_CANCEL);
+                done("true");
+            }
+        } else {
+            done(std::nullopt);
+        }
     }
 
     void ChooseFile(const FileDialog& options, std::function<void(std::optional<std::string>)> done) override
@@ -421,8 +465,9 @@ public:
             std::function<void(std::optional<std::string>)> done;
             bool save;
             std::string suffix;
+            GtkWindowImpl* self;
         };
-        auto* job{new Job{std::move(done), options.save, suffix}};
+        auto* job{new Job{std::move(done), options.save, suffix, this}};
         g_signal_connect(chooser, "response", G_CALLBACK(+[](GtkNativeDialog* dialog, gint response, gpointer data) {
                              std::unique_ptr<Job> job{static_cast<Job*>(data)};
                              std::optional<std::string> path;
@@ -439,13 +484,327 @@ public:
                                  if (base.find('.') == std::string::npos) *path += job->suffix;
                              }
                              g_object_unref(dialog);
+                             job->self->SetScheme(dialog::Scheme::DESKTOP);
                              job->done(path);
                          }),
                          job);
+        // Dark or light as the app (a chooser of GTK in this process follows the setting; one of the portal, the desktop).
+        SetScheme(options.scheme);
         gtk_native_dialog_show(GTK_NATIVE_DIALOG(chooser));
     }
 
 private:
+    using Done = std::function<void(dialog::Answer)>;
+
+    //! The dialog window of the host shown now (dialog.h): its window, its web view, where its page is.
+    struct Themed {
+        uint64_t id{0};
+        std::unique_ptr<dialog::Session> session;
+        GtkWidget* window{nullptr};
+        std::unique_ptr<webview::webview> view;
+        WebKitWebView* web{nullptr};
+        Done done;
+        guint timer{0};
+    };
+
+    static void SnapshotView(WebKitWebView* view, const std::string& png_path, std::function<void(bool ok)> done)
+    {
+        struct Job {
+            std::string path;
+            std::function<void(bool)> done;
+        };
+        auto* job{new Job{png_path, std::move(done)}};
+        webkit_web_view_get_snapshot(
+            view, WEBKIT_SNAPSHOT_REGION_VISIBLE, WEBKIT_SNAPSHOT_OPTIONS_NONE, nullptr,
+            +[](GObject* source, GAsyncResult* result, gpointer data) {
+                std::unique_ptr<Job> job{static_cast<Job*>(data)};
+                GError* error{nullptr};
+                cairo_surface_t* surface{webkit_web_view_get_snapshot_finish(WEBKIT_WEB_VIEW(source), result, &error)};
+                bool ok{false};
+                if (surface) {
+                    ok = cairo_surface_write_to_png(surface, job->path.c_str()) == CAIRO_STATUS_SUCCESS;
+                    cairo_surface_destroy(surface);
+                } else if (error) {
+                    LogWarning("webui: snapshot failed: %s", error->message);
+                    g_error_free(error);
+                }
+                job->done(ok);
+            },
+            job);
+    }
+
+    /**
+     * Dark or light for the dialogs of GTK (the file choosers, the fallback dialog): GTK's prefer-dark setting of
+     * this program, set as the app's look while one shows, and back to the desktop's after (the theme "system").
+     */
+    void SetScheme(dialog::Scheme scheme)
+    {
+        GtkSettings* settings{gtk_settings_get_default()};
+        if (!settings) return;
+        if (!m_desktop_dark) {
+            gboolean dark{FALSE};
+            g_object_get(settings, "gtk-application-prefer-dark-theme", &dark, nullptr);
+            m_desktop_dark = dark != FALSE;
+        }
+        const gboolean dark{scheme == dialog::Scheme::DARK ? TRUE : scheme == dialog::Scheme::LIGHT ? FALSE : (*m_desktop_dark ? TRUE : FALSE)};
+        g_object_set(settings, "gtk-application-prefer-dark-theme", dark, nullptr);
+    }
+
+    void ShowDialog(const dialog::Request& request, Done done)
+    {
+        if (!request.test_fallback && OpenThemed(request, done)) return;
+        OpenNative(request, std::move(done));
+    }
+
+    /** The dialog shown is answered: its answer, then the next dialog asked meanwhile, if any. */
+    void Finish(const Done& done, dialog::Answer answer)
+    {
+        done(std::move(answer));
+        if (auto next{m_pending.Next()}) {
+            Post([this, request = std::move(next->first), done = std::move(next->second)] { ShowDialog(request, done); });
+        }
+    }
+
+    /** The dialog window, with the page of the dialogs. False when it cannot be made (then the dialog of GTK). */
+    bool OpenThemed(const dialog::Request& request, const Done& done)
+    {
+        auto themed{std::make_unique<Themed>()};
+        themed->id = ++m_dialog_serial;
+        themed->session = std::make_unique<dialog::Session>(request);
+        themed->done = done;
+        GtkWidget* window{gtk_window_new(GTK_WINDOW_TOPLEVEL)};
+        GtkWindow* gw{GTK_WINDOW(window)};
+        gtk_window_set_title(gw, request.title.c_str());
+        // Modal to the main window, over it and centred on it, without the frame of the system (the page draws it).
+        gtk_window_set_transient_for(gw, GTK_WINDOW(m_window));
+        gtk_window_set_modal(gw, TRUE);
+        gtk_window_set_destroy_with_parent(gw, TRUE);
+        gtk_window_set_decorated(gw, FALSE);
+        gtk_window_set_type_hint(gw, GDK_WINDOW_TYPE_HINT_DIALOG);
+        gtk_window_set_position(gw, GTK_WIN_POS_CENTER_ON_PARENT);
+        gtk_window_set_resizable(gw, FALSE);
+        gtk_window_set_skip_taskbar_hint(gw, TRUE);
+        gtk_window_set_skip_pager_hint(gw, TRUE);
+        gtk_window_set_default_size(gw, 460, 240);
+        themed->window = window;
+        try {
+            themed->view = std::make_unique<webview::webview>(false, window);
+            themed->web = WEBKIT_WEB_VIEW(themed->view->browser_controller().value());
+        } catch (const std::exception& e) {
+            LogWarning("webui: the dialog window cannot be made (%s): the dialog of the system instead", e.what());
+            themed->view.reset();
+            gtk_widget_destroy(window);
+            return false;
+        }
+        WebKitWebView* web{themed->web};
+        WebKitSettings* settings{webkit_web_view_get_settings(web)};
+        webkit_settings_set_enable_developer_extras(settings, FALSE);
+        webkit_settings_set_javascript_can_access_clipboard(settings, FALSE);
+        webkit_settings_set_javascript_can_open_windows_automatically(settings, FALSE);
+        webkit_settings_set_enable_back_forward_navigation_gestures(settings, FALSE);
+        webkit_settings_set_enable_webaudio(settings, FALSE);
+        webkit_settings_set_enable_webgl(settings, FALSE);
+        webkit_settings_set_enable_media(settings, FALSE);
+        // The page of the dialogs stays itself: no navigation, no new windows, no menu, no permissions.
+        g_signal_connect(web, "decide-policy", G_CALLBACK(+[](WebKitWebView*, WebKitPolicyDecision* decision, WebKitPolicyDecisionType type, gpointer) -> gboolean {
+                             if (type == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION || type == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) {
+                                 auto* navigation{WEBKIT_NAVIGATION_POLICY_DECISION(decision)};
+                                 WebKitNavigationAction* action{webkit_navigation_policy_decision_get_navigation_action(navigation)};
+                                 const char* uri{webkit_uri_request_get_uri(webkit_navigation_action_get_request(action))};
+                                 const bool own{uri && std::string_view{uri} == std::string{dialog::ORIGIN} + std::string{dialog::PAGE}};
+                                 if (type == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION || !own) {
+                                     webkit_policy_decision_ignore(decision);
+                                     return TRUE;
+                                 }
+                             }
+                             return FALSE;
+                         }),
+                         nullptr);
+        g_signal_connect(web, "context-menu", G_CALLBACK(+[](WebKitWebView*, WebKitContextMenu*, GdkEvent*, WebKitHitTestResult*, gpointer) -> gboolean { return TRUE; }), nullptr);
+        g_signal_connect(web, "permission-request", G_CALLBACK(+[](WebKitWebView*, WebKitPermissionRequest* request, gpointer) -> gboolean {
+                             webkit_permission_request_deny(request);
+                             return TRUE;
+                         }),
+                         nullptr);
+        const uint64_t id{themed->id};
+        auto* tag{new DialogTag{this, id}};
+        // The page gone (its process ended, or it did not load): the dialog of the system instead.
+        g_signal_connect_data(web, "web-process-terminated", G_CALLBACK(+[](WebKitWebView*, WebKitWebProcessTerminationReason reason, gpointer data) {
+                                  auto* t{static_cast<DialogTag*>(data)};
+                                  LogWarning("webui: the process of the dialog window ended (reason %d)", int(reason));
+                                  t->self->Fallback(t->id);
+                              }),
+                              tag, +[](gpointer data, GClosure*) { delete static_cast<DialogTag*>(data); }, GConnectFlags(0));
+        auto* tag2{new DialogTag{this, id}};
+        g_signal_connect_data(web, "load-failed", G_CALLBACK(+[](WebKitWebView*, WebKitLoadEvent, gchar* uri, GError* error, gpointer data) -> gboolean {
+                                  auto* t{static_cast<DialogTag*>(data)};
+                                  LogWarning("webui: the page of the dialog window did not load (%s): %s", uri ? uri : "", error ? error->message : "");
+                                  t->self->Fallback(t->id);
+                                  return TRUE;
+                              }),
+                              tag2, +[](gpointer data, GClosure*) { delete static_cast<DialogTag*>(data); }, GConnectFlags(0));
+        // Closed by the desktop (Alt+F4): Cancel.
+        auto* tag3{new DialogTag{this, id}};
+        g_signal_connect_data(window, "delete-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer data) -> gboolean {
+                                  auto* t{static_cast<DialogTag*>(data)};
+                                  t->self->CancelThemed(t->id);
+                                  return TRUE;
+                              }),
+                              tag3, +[](gpointer data, GClosure*) { delete static_cast<DialogTag*>(data); }, GConnectFlags(0));
+        // Its bridge: this web view's only, never the main page's.
+        themed->view->bind(std::string{dialog::BRIDGE}, [this, id](std::string call_id, std::string args, void*) {
+            OnDialogCall(id, call_id, args);
+            // The answer may hold a passphrase: not left in freed memory.
+            memory_cleanse(args.data(), args.size());
+        }, nullptr);
+        // The page says nothing in time: the dialog of the system instead.
+        themed->timer = g_timeout_add_full(
+            G_PRIORITY_DEFAULT, dialog::READY_TIMEOUT_MS,
+            +[](gpointer data) -> gboolean {
+                auto* t{static_cast<DialogTag*>(data)};
+                if (t->self->m_themed && t->self->m_themed->id == t->id) {
+                    t->self->m_themed->timer = 0;
+                    if (!t->self->m_themed->session->Shown()) {
+                        LogWarning("webui: the dialog window did not show in time: the dialog of the system instead");
+                        t->self->Fallback(t->id);
+                    }
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new DialogTag{this, id}, +[](gpointer data) { delete static_cast<DialogTag*>(data); });
+        m_themed = std::move(themed);
+        m_themed->view->navigate(std::string{dialog::ORIGIN} + std::string{dialog::PAGE});
+        return true;
+    }
+
+    struct DialogTag {
+        GtkWindowImpl* self;
+        uint64_t id;
+    };
+
+    void OnDialogCall(uint64_t id, const std::string& call_id, const std::string& args)
+    {
+        if (!m_themed || m_themed->id != id) return;
+        dialog::Session::Reply reply{m_themed->session->Call(args)};
+        if (reply.step == dialog::Session::Step::ANSWER) {
+            // Not answered: the page goes with its window.
+            dialog::Answer answer{m_themed->session->TakeAnswer()};
+            Done done{m_themed->done};
+            CloseThemed();
+            Finish(done, std::move(answer));
+            return;
+        }
+        m_themed->view->resolve(call_id, reply.status, reply.json);
+        if (reply.step == dialog::Session::Step::SHOW) ShowThemed();
+    }
+
+    void ShowThemed()
+    {
+        // As large as the page asks, within the work area of the monitor of the main window.
+        int max_w{1200}, max_h{800};
+        GdkDisplay* display{gtk_widget_get_display(m_window)};
+        GdkWindow* main{gtk_widget_get_window(m_window)};
+        if (GdkMonitor* monitor{main ? gdk_display_get_monitor_at_window(display, main) : gdk_display_get_primary_monitor(display)}) {
+            GdkRectangle area;
+            gdk_monitor_get_workarea(monitor, &area);
+            max_w = area.width - 32;
+            max_h = area.height * 85 / 100;
+        }
+        const dialog::Size size{m_themed->session->WindowSize(max_w, max_h)};
+        GtkWindow* gw{GTK_WINDOW(m_themed->window)};
+        gtk_window_set_default_size(gw, size.width, size.height);
+        gtk_widget_set_size_request(m_themed->window, size.width, size.height);
+        gtk_widget_show_all(m_themed->window);
+        gtk_window_present(gw);
+        gtk_widget_grab_focus(GTK_WIDGET(m_themed->web));
+    }
+
+    /** The dialog window goes (hidden now, destroyed once what its web view has queued ran). */
+    void CloseThemed()
+    {
+        if (!m_themed) return;
+        std::unique_ptr<Themed> themed{std::move(m_themed)};
+        if (themed->timer) g_source_remove(themed->timer);
+        themed->timer = 0;
+        gtk_widget_hide(themed->window);
+        Themed* raw{themed.release()};
+        Post([raw] {
+            std::unique_ptr<Themed> gone{raw};
+            GtkWidget* window{gone->window};
+            gone.reset();
+            gtk_widget_destroy(window);
+        });
+    }
+
+    void CancelThemed(uint64_t id)
+    {
+        if (!m_themed || m_themed->id != id || m_themed->session->Answered()) return;
+        Done done{m_themed->done};
+        CloseThemed();
+        Finish(done, {});
+    }
+
+    /** The dialog window failed before an answer: the same question in the dialog of the system. */
+    void Fallback(uint64_t id)
+    {
+        if (!m_themed || m_themed->id != id || m_themed->session->Answered()) return;
+        const dialog::Request request{m_themed->session->request()};
+        Done done{m_themed->done};
+        CloseThemed();
+        OpenNative(request, std::move(done));
+    }
+
+    /** The dialog of GTK, modal to the window; Cancel is the default response. */
+    void OpenNative(const dialog::Request& request, Done done)
+    {
+        const UniValue page{dialog::PageData(request)};
+        const std::string title{page.find_value("title").get_str()};
+        std::string message{page.find_value("message").get_str()};
+        if (!page.find_value("details").get_str().empty()) message += "\n\n" + page.find_value("details").get_str();
+        SetScheme(dialog::SchemeOf(request.look));
+        GtkWidget* box{gtk_message_dialog_new(GTK_WINDOW(m_window), GtkDialogFlags(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
+                                              request.level == dialog::Level::INFO ? GTK_MESSAGE_INFO : GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE, "%s", title.c_str())};
+        gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(box), "%s", message.c_str());
+        gtk_dialog_add_buttons(GTK_DIALOG(box), page.find_value("cancel").get_str().c_str(), GTK_RESPONSE_CANCEL, page.find_value("accept").get_str().c_str(), GTK_RESPONSE_ACCEPT, nullptr);
+        gtk_dialog_set_default_response(GTK_DIALOG(box), GTK_RESPONSE_CANCEL);
+        gtk_window_set_title(GTK_WINDOW(box), title.c_str());
+        GtkWidget* entry{nullptr};
+        if (request.passphrase) {
+            entry = gtk_entry_new();
+            gtk_entry_set_visibility(GTK_ENTRY(entry), FALSE);
+            gtk_entry_set_input_purpose(GTK_ENTRY(entry), GTK_INPUT_PURPOSE_PASSWORD);
+            gtk_entry_set_placeholder_text(GTK_ENTRY(entry), page.find_value("passphraseLabel").get_str().c_str());
+            gtk_container_add(GTK_CONTAINER(gtk_message_dialog_get_message_area(GTK_MESSAGE_DIALOG(box))), entry);
+        }
+        struct Job {
+            GtkWindowImpl* self;
+            Done done;
+            GtkWidget* entry;
+        };
+        auto* job{new Job{this, std::move(done), entry}};
+        g_signal_connect(box, "response", G_CALLBACK(+[](GtkDialog* d, gint response, gpointer data) {
+                             std::unique_ptr<Job> job{static_cast<Job*>(data)};
+                             dialog::Answer answer;
+                             answer.accepted = response == GTK_RESPONSE_ACCEPT;
+                             if (answer.accepted && job->entry) {
+                                 const char* text{gtk_entry_get_text(GTK_ENTRY(job->entry))};
+                                 answer.passphrase.assign(text ? text : "");
+                                 // Nothing typed is no answer to a question that needs it.
+                                 if (answer.passphrase.empty()) answer.accepted = false;
+                                 gtk_entry_set_text(GTK_ENTRY(job->entry), "");
+                             }
+                             job->self->m_native = nullptr;
+                             gtk_widget_destroy(GTK_WIDGET(d));
+                             job->self->SetScheme(dialog::Scheme::DESKTOP);
+                             job->self->Finish(job->done, std::move(answer));
+                         }),
+                         job);
+        m_native = box;
+        m_native_title = title;
+        m_native_message = message;
+        gtk_widget_show_all(box);
+    }
+
     /**
      * Where and when the button that starts a move or a resize was pressed: the last press in the
      * page (the page asks right after it, the button still down), else the pointer now.
@@ -480,6 +839,15 @@ private:
     bool m_maximized{false};
     bool m_frameless{false};
     GdkEvent* m_last_press{nullptr};
+    //! The dialogs of the host: the window shown now (or the dialog of GTK instead), the ones waiting their turn.
+    dialog::Pending m_pending;
+    std::unique_ptr<Themed> m_themed;
+    uint64_t m_dialog_serial{0};
+    GtkWidget* m_native{nullptr};
+    std::string m_native_title;
+    std::string m_native_message;
+    //! GTK's prefer-dark setting of the desktop, before the app set it for a dialog.
+    std::optional<bool> m_desktop_dark;
 };
 
 } // namespace
