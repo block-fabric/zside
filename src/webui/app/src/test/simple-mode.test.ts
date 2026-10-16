@@ -40,9 +40,9 @@ afterEach(() => {
 });
 
 describe('the preference', () => {
-  it('is Simple on a first start, and keeps only the two modes', () => {
-    // A fresh module would start Simple: the declaration says so (the tests run in Advanced, test/setup.ts).
-    expect(/uiMode: 'simple' as/.test(stateSource)).toBe(true);
+  it('is Advanced on a first start, and keeps only the two modes', () => {
+    // A fresh module starts Advanced (user decision): the declaration says so.
+    expect(/uiMode: 'advanced' as/.test(stateSource)).toBe(true);
     applyPrefs({ uiMode: 'advanced' });
     expect(prefs.uiMode).toBe('advanced');
     applyPrefs({ uiMode: 'expert' });

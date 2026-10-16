@@ -1,5 +1,5 @@
-// Simple or Advanced (user decision, 2026-10-16): Simple, the default, shows what a beginner needs in
-// plain words; Advanced is every section of every page, as before. The choice is a preference of the
+// Simple or Advanced (user decisions, 2026-10-16): Simple shows what a beginner needs in plain words;
+// Advanced, the default, is every section of every page, as before. The choice is a preference of the
 // app (per network, as the others), switched in the foot of the sidebar, in the palette and on Home's
 // first-run tips. A page that has no simple variant shows the same in both.
 //

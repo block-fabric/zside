@@ -116,7 +116,8 @@ export const prefs = $state({
   multisigKeys: [] as { name: string; value: string }[],
   multisigAddresses: [] as { name: string; value: string }[],
   /** Simple (the pages a beginner needs, in plain words) or Advanced (every section of every page); lib/uimode.svelte.ts. */
-  uiMode: 'simple' as 'simple' | 'advanced',
+  // Advanced on a first start (user decision, 2026-10-16: "everything should open advanced by default").
+  uiMode: 'advanced' as 'simple' | 'advanced',
   /** The first-run tips of Home were dismissed (components/FirstRunTips.svelte). */
   tipsDone: false,
   loaded: false,
