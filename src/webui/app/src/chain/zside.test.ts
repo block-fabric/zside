@@ -9,6 +9,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { CHAIN } from './config';
 import { LOCAL_COMMANDS, LOCAL_PAGES, type LocalPage } from './local';
 import LocalCards from './LocalCards.svelte';
+import LocalSend from './LocalSend.svelte';
+import { FIRST_STEPS } from './firststeps';
+import { pageShown } from '../lib/uimode.svelte';
 import DialogHost from '../components/DialogHost.svelte';
 import MeltCast from './pages/MeltCast.svelte';
 import Memos from './pages/Memos.svelte';
@@ -577,5 +580,99 @@ describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
     });
     render(Private);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Unlock to set up' })).toBeTruthy());
+  });
+});
+
+// Simple mode (lib/uimode.svelte.ts, user decision 2026-10-16): the private balance with Make private and Make
+// public, a "Send privately" switch on Send; memos, the activity of the notes, melt & cast, the pool and the
+// viewing keys are Advanced's. The same calls in both modes.
+describe('zSide in Simple mode', () => {
+  beforeEach(() => {
+    prefs.uiMode = 'simple';
+  });
+
+  it('leaves memos, the private activity, melt & cast and the pool out of the navigation', () => {
+    expect(pageShown('private')).toBe(true);
+    for (const id of ['memos', 'zhistory', 'meltcast', 'pool'] as const) expect(pageShown(id), id).toBe(false);
+    prefs.uiMode = 'advanced';
+    for (const id of ['memos', 'zhistory', 'meltcast', 'pool'] as const) expect(pageShown(id), id).toBe(true);
+    expect(FIRST_STEPS.length).toBe(3);
+  });
+
+  it('Private: the private balance, Make private and Make public with the calls of Advanced', async () => {
+    go('private', 'move');
+    render(Private);
+    render(DialogHost);
+    await loaded();
+    expect(screen.getAllByRole('tab').map((x) => x.textContent?.trim())).toEqual(['Private balance', 'Make private', 'Private address']);
+    // No other shielded address, no memo, no address to unshield to, no cast: the wallet's own.
+    expect(document.querySelector('#zs-shield-memo')).toBeNull();
+    expect(document.querySelector('#zs-unshield-to')).toBeNull();
+    await fireEvent.input(document.querySelector('#zs-shield-amount')!, { target: { value: '2' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Make private' }));
+    await answer('yes');
+    await waitFor(() => expect(called('shieldcoins').length).toBe(1));
+    expect(called('shieldcoins')[0].params).toEqual(['2', null, '']);
+    await fireEvent.click(screen.getAllByRole('button', { name: 'All' })[1]);
+    await fireEvent.click(screen.getByRole('button', { name: 'Make public' }));
+    await answer('yes');
+    await waitFor(() => expect(called('unshieldcoins').length).toBe(1));
+    expect(called('unshieldcoins')[0].params).toEqual(['all', null, true]);
+  });
+
+  it('Private: the viewing keys when asked for, and every tab in Advanced', async () => {
+    go('private', 'keys');
+    render(Private);
+    await loaded();
+    expect(screen.getAllByRole('tab').map((x) => x.textContent?.trim())).toEqual(['Private balance', 'Make private', 'Private address', 'Viewing keys']);
+    prefs.uiMode = 'advanced';
+    await waitFor(() => expect(screen.getAllByRole('tab').map((x) => x.textContent?.trim())).toEqual(['Overview', 'Pay', 'Shield & unshield', 'Receive', 'Viewing keys']));
+  });
+
+  it('Send: a "Send privately" switch, with the call of Private → Pay', async () => {
+    render(LocalSend);
+    render(DialogHost);
+    await loaded();
+    const toggle = screen.getByRole('switch', { name: /Send privately/ }) as HTMLInputElement;
+    expect(document.querySelector('#zs-sp-to')).toBeNull();
+    await fireEvent.click(toggle);
+    await waitFor(() => expect(document.querySelector('#zs-sp-to')).not.toBeNull());
+    await fireEvent.input(document.querySelector('#zs-sp-to')!, { target: { value: ZADDR2 } });
+    await waitFor(() => expect(screen.getByText('A shielded address')).toBeTruthy());
+    await fireEvent.input(document.querySelector('#zs-sp-amount')!, { target: { value: '1.5' } });
+    await fireEvent.input(document.querySelector('#zs-sp-memo')!, { target: { value: 'for the coffee' } });
+    const send = document.querySelector('#zs-sp-send') as HTMLButtonElement;
+    await waitFor(() => expect(send.disabled).toBe(false));
+    await fireEvent.click(send);
+    await answer('yes');
+    await waitFor(() => expect(called('sendshielded').length).toBe(1));
+    expect(called('sendshielded')[0].params).toEqual([{ [ZADDR2]: '1.5' }, 'for the coffee']);
+  });
+
+  it('Send: a public address gets no message, and Advanced keeps the kit form alone', async () => {
+    render(LocalSend);
+    render(DialogHost);
+    await loaded();
+    await fireEvent.click(screen.getByRole('switch', { name: /Send privately/ }));
+    await fireEvent.input(await waitFor(() => document.querySelector('#zs-sp-to')!), { target: { value: TRANSPARENT } });
+    await waitFor(() => expect(screen.getByText('A transparent address')).toBeTruthy(), { timeout: 3000 });
+    expect(document.querySelector('#zs-sp-memo')).toBeNull();
+    await fireEvent.input(document.querySelector('#zs-sp-amount')!, { target: { value: '1' } });
+    const send = document.querySelector('#zs-sp-send') as HTMLButtonElement;
+    await waitFor(() => expect(send.disabled).toBe(false));
+    await fireEvent.click(send);
+    await answer('yes');
+    await waitFor(() => expect(called('sendshielded')[0]?.params).toEqual([{ [TRANSPARENT]: '1' }, '']));
+    prefs.uiMode = 'advanced';
+    await waitFor(() => expect(screen.queryByRole('switch', { name: /Send privately/ })).toBeNull());
+  });
+
+  it('the home: the private card with Send privately; no memos card', async () => {
+    render(LocalCards);
+    await loaded();
+    await waitFor(() => expect(screen.getByRole('button', { name: /Send privately/ })).toBeTruthy());
+    expect(screen.queryByRole('heading', { name: 'Memos' })).toBeNull();
+    prefs.uiMode = 'advanced';
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Memos' })).toBeTruthy());
   });
 });

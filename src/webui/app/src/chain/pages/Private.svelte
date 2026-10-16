@@ -34,6 +34,8 @@
   import ZAddressInput from '../zs/ZAddressInput.svelte';
   import { describeTx, isViewingKey, MEMO_BYTES, memoBytes, viewingKeyHrp } from '../zs/model';
   import { prove, proving, refreshZs, startZs, zs } from '../zs/store.svelte';
+  import Term from '../../components/Term.svelte';
+  import { simpleMode } from '../../lib/uimode.svelte';
 
   $effect(() => startZs());
   $effect(() => {
@@ -49,6 +51,12 @@
     { id: 'keys', label: 'Viewing keys' },
   ];
   const tab = $derived(TABS.some((x) => x.id === nav.tab) ? nav.tab : 'overview');
+  // Simple mode (lib/uimode.svelte.ts): the private balance, making coins private (or public again) and the
+  // private address, in plain words; paying is the Send page's "Send privately", the viewing keys are
+  // Advanced's (both shown when asked for: a link, the palette). The same calls in both modes.
+  const simple = $derived(simpleMode());
+  const SIMPLE_LABELS: Record<string, string> = { overview: 'Private balance', move: 'Make private', receive: 'Private address' };
+  const tabs = $derived(simple ? TABS.filter((x) => x.id in SIMPLE_LABELS || x.id === tab).map((x) => ({ ...x, label: SIMPLE_LABELS[x.id] ?? x.label })) : TABS);
   const select = (id: string) => (nav.tab = id);
 
   const wallet = $derived(wallets.current);
@@ -356,7 +364,10 @@
   {#if noWallet}
     <NoWallet page={PAGES.private} />
   {:else}
-    <TabRow label="Private" tabs={TABS} current={tab} {select} />
+    {#if simple}
+      <p class="muted lead-simple">Coins here are <Term id="shielded">private</Term>: nobody can see how much you hold or whom you pay. Deposits arrive public; make them private, then send privately from the Send page.</p>
+    {/if}
+    <TabRow label="Private" tabs={tabs} current={tab} {select} />
 
     <ProvingPanel />
 
@@ -378,7 +389,7 @@
     {#if tab === 'overview'}
       <section class="zs-split" aria-label="Balances">
         <div class="zs-vault public">
-          <div class="head"><span class="label">Transparent</span><Privacy kind="public" /></div>
+          <div class="head"><span class="label">{simple ? t('Public') : t('Transparent')}</span><Privacy kind="public" /></div>
           <span class="big"><Amount sats={transparent} /></span>
           <span class="sub">
             {#if transparentPending > 0n}<Amount sats={transparentPending} /> waiting for a block or maturing ·{/if}
@@ -386,16 +397,16 @@
           </span>
         </div>
         <div class="zs-moves">
-          <button type="button" class="btn primary" disabled={watchOnly} onclick={() => select('move')}><Icon name="shield" size={16} /> Shield</button>
-          <button type="button" class="btn" disabled={watchOnly} onclick={() => select('move')}><Icon name="eye" size={16} /> Unshield</button>
-          <button type="button" class="btn ghost" onclick={() => go('meltcast')}><Icon name="meltcast" size={16} /> Melt & cast</button>
+          <button type="button" class="btn primary" disabled={watchOnly} onclick={() => select('move')}><Icon name="shield" size={16} /> {simple ? t('Make private') : t('Shield')}</button>
+          <button type="button" class="btn" disabled={watchOnly} onclick={() => select('move')}><Icon name="eye" size={16} /> {simple ? t('Make public') : t('Unshield')}</button>
+          {#if !simple}<button type="button" class="btn ghost" onclick={() => go('meltcast')}><Icon name="meltcast" size={16} /> Melt & cast</button>{/if}
         </div>
         <div class="zs-vault private">
-          <div class="head"><span class="label">Shielded</span><Privacy kind="private" /></div>
+          <div class="head"><span class="label">{simple ? t('Private') : t('Shielded')}</span><Privacy kind="private" /></div>
           <span class="big"><Amount sats={available} /></span>
           <span class="sub">
             {#if pending > 0n}<Amount sats={pending} /> waiting for a block ·{/if}
-            {tn('%n note(s)', zs.balance?.notes ?? 0)}
+            {#if simple}Only you can see it.{:else}{tn('%n note(s)', zs.balance?.notes ?? 0)}{/if}
             {#if watched > 0n}· <Amount sats={watched} /> watch-only{/if}
           </span>
         </div>
@@ -410,7 +421,7 @@
               <p>{t('%1% of what this wallet holds is in the shielded pool.', String(Math.round(share * 100)))}</p>
               <p class="muted small">Transparent coins show on the chain with their addresses. Shielded ones show nothing: not the amount, not who paid whom.</p>
               <div class="zs-actions">
-                <button type="button" class="btn primary" disabled={watchOnly || busy || available <= 0n} onclick={() => select('pay')}><Icon name="private" size={16} /> Pay privately</button>
+                <button type="button" class="btn primary" disabled={watchOnly || busy || available <= 0n} onclick={() => (simple ? go('send') : select('pay'))}><Icon name="private" size={16} /> {simple ? t('Send privately') : t('Pay privately')}</button>
                 <button type="button" class="btn" onclick={() => select('receive')}><Icon name="qr" size={16} /> Shielded address</button>
               </div>
             </div>
@@ -504,16 +515,21 @@
     {:else if tab === 'move'}
       <div class="zs-cols">
         <section class="panel">
-          <div class="panel-head"><h2>Shield</h2><span class="flow"><Privacy kind="public" bare /><Icon name="chevron-right" size={14} /><Privacy kind="private" bare /></span></div>
+          <div class="panel-head"><h2>{simple ? t('Make private') : t('Shield')}</h2><span class="flow"><Privacy kind="public" bare /><Icon name="chevron-right" size={14} /><Privacy kind="private" bare /></span></div>
           <div class="panel-body zs-form">
-            <p class="muted small">Move transparent coins of this wallet into the shielded pool. That move is public; what you do with the coins after is not.</p>
+            {#if simple}
+              <p class="muted small">Move public coins of this wallet into your private balance. The amount moved shows on the chain once; what you do with the coins after does not.</p>
+            {:else}
+              <p class="muted small">Move transparent coins of this wallet into the shielded pool. That move is public; what you do with the coins after is not.</p>
+            {/if}
             {#key shieldKey}
               <div class="amount-row">
                 <AmountInput id="zs-shield-amount" label="Amount" bind:value={shieldAmount} max={transparent} disabled={busy || watchOnly} />
                 <button type="button" class="btn small" disabled={busy || watchOnly || transparent <= SHIELD_FEE_ROOM} onclick={shieldAll} title="All the transparent balance in blocks, less a little for the fee">All</button>
               </div>
             {/key}
-            <span class="muted small">{t('Transparent, in blocks')}: <Amount sats={transparent} /></span>
+            <span class="muted small">{simple ? t('Public, ready to move') : t('Transparent, in blocks')}: <Amount sats={transparent} /></span>
+            {#if !simple}
             <label class="check"><input type="checkbox" bind:checked={shieldElsewhere} disabled={busy || watchOnly} /> To another shielded address</label>
             {#if shieldElsewhere}
               <ZAddressInput id="zs-shield-to" label="To" accept="shielded" bind:value={shieldTo} bind:valid={shieldToValid} disabled={busy} />
@@ -523,17 +539,22 @@
               <textarea id="zs-shield-memo" bind:value={shieldMemo} disabled={busy || watchOnly} placeholder={shieldElsewhere ? t('A memo only the recipient can read (optional, 512 bytes at most)') : t('A note to yourself (optional)')}></textarea>
               <span class="zs-counter" class:over={memoBytes(shieldMemo) > MEMO_BYTES}>{t('%1 / %2 bytes', String(memoBytes(shieldMemo)), String(MEMO_BYTES))}</span>
             </div>
+            {/if}
             {#if shieldProblem}<p class="error" role="alert">{shieldProblem}</p>{/if}
             <div class="zs-actions">
-              <button type="button" class="btn primary" disabled={busy || watchOnly || shieldAmount === null || !!shieldProblem || (shieldElsewhere && !shieldToValid)} id="zs-shield" onclick={shield}><Icon name="shield" size={16} /> Shield</button>
+              <button type="button" class="btn primary" disabled={busy || watchOnly || shieldAmount === null || !!shieldProblem || (shieldElsewhere && !shieldToValid)} id="zs-shield" onclick={shield}><Icon name="shield" size={16} /> {simple ? t('Make private') : t('Shield')}</button>
             </div>
           </div>
         </section>
 
         <section class="panel">
-          <div class="panel-head"><h2>Unshield</h2><span class="flow"><Privacy kind="private" bare /><Icon name="chevron-right" size={14} /><Privacy kind="public" bare /></span></div>
+          <div class="panel-head"><h2>{simple ? t('Make public') : t('Unshield')}</h2><span class="flow"><Privacy kind="private" bare /><Icon name="chevron-right" size={14} /><Privacy kind="public" bare /></span></div>
           <div class="panel-body zs-form">
-            <p class="muted small">Move coins out of the shielded pool. The amount and the address become public; where the coins came from does not. For amounts nobody can link to what went in, use Melt & cast.</p>
+            {#if simple}
+              <p class="muted small">Move private coins back to a public address of this wallet, for example to send them back to Chains. The amount becomes public; where the coins came from does not.</p>
+            {:else}
+              <p class="muted small">Move coins out of the shielded pool. The amount and the address become public; where the coins came from does not. For amounts nobody can link to what went in, use Melt & cast.</p>
+            {/if}
             {#key unshieldKey}
               <div class="amount-row">
                 <AmountInput id="zs-unshield-amount" label="Amount" bind:value={unshieldAmount} max={available} disabled={busy || watchOnly} />
@@ -541,14 +562,14 @@
               </div>
             {/key}
             {#if unshieldEverything}<span class="muted small">The whole shielded balance in blocks, the fee taken out of it.</span>{/if}
-            <ZAddressInput id="zs-unshield-to" label="To (empty: a new address of this wallet)" accept="transparent" required={false} bind:value={unshieldTo} bind:valid={unshieldToValid} disabled={busy || watchOnly} />
+            {#if !simple}<ZAddressInput id="zs-unshield-to" label="To (empty: a new address of this wallet)" accept="transparent" required={false} bind:value={unshieldTo} bind:valid={unshieldToValid} disabled={busy || watchOnly} />{/if}
             {#if !unshieldEverything}
               <label class="check"><input type="checkbox" bind:checked={subtractFee} disabled={busy || watchOnly} /> Take the fee out of the amount</label>
             {/if}
             {#if unshieldProblem}<p class="error" role="alert">{unshieldProblem}</p>{/if}
             <div class="zs-actions">
-              <button type="button" class="btn primary" disabled={busy || watchOnly || (!unshieldEverything && unshieldAmount === null) || !!unshieldProblem || (!!unshieldTo.trim() && !unshieldToValid)} id="zs-unshield" onclick={unshield}><Icon name="eye" size={16} /> Unshield</button>
-              <button type="button" class="btn ghost" onclick={() => go('meltcast', 'cast')}>Cast as bills instead</button>
+              <button type="button" class="btn primary" disabled={busy || watchOnly || (!unshieldEverything && unshieldAmount === null) || !!unshieldProblem || (!!unshieldTo.trim() && !unshieldToValid)} id="zs-unshield" onclick={unshield}><Icon name="eye" size={16} /> {simple ? t('Make public') : t('Unshield')}</button>
+              {#if !simple}<button type="button" class="btn ghost" onclick={() => go('meltcast', 'cast')}>Cast as bills instead</button>{/if}
             </div>
           </div>
         </section>
@@ -556,7 +577,7 @@
     {:else if tab === 'receive'}
       <div class="zs-cols">
         <section class="panel">
-          <div class="panel-head"><h2>Your shielded address</h2><Privacy kind="private" /></div>
+          <div class="panel-head"><h2>{simple ? t('Your private address') : t('Your shielded address')}</h2><Privacy kind="private" /></div>
           <div class="panel-body receive">
             {#if receiveAddress}
               <div class="qr"><QrCode text={receiveAddress} size={210} label={t('QR code of the shielded address')} /></div>
@@ -654,6 +675,10 @@
 </div>
 
 <style>
+  .lead-simple {
+    margin: 0 0 0.6rem;
+    max-width: 52rem;
+  }
   .privatepage {
     display: grid;
     gap: 1rem;

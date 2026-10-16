@@ -18,7 +18,8 @@ import { buildCommands, chainHas, menuSections, pageAvailable } from '../lib/com
 import { dialogs } from '../lib/dialogs.svelte';
 import { handleShortcut } from '../lib/keyboard';
 import { AREAS, chainBeforeTools, HOME_QUICK_ACTIONS, NAV_SECTIONS } from '../lib/layout';
-import { go, nav, type PageId } from '../lib/nav.svelte';
+import { go, nav, PAGES, type PageId } from '../lib/nav.svelte';
+import { FIRST_STEPS } from '../lib/firststeps';
 import type { NodeOptions } from '../lib/rpc';
 import { bmmBlocks, bmmShare, bundleHistory, depositsOf, depositTarget, EventLog, voteProgress, type SideEvent } from '../lib/side';
 import { noteBmm, side, stopSide } from '../lib/sidestate.svelte';
@@ -420,9 +421,10 @@ describe('Simple mode on a sidechain', () => {
     expect(within(quick).getByRole('button', { name: /Deposit/ })).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
     await waitFor(() => expect(document.querySelector('.side-blocks')).toBeTruthy());
-    // A step of the tips opens its page.
-    await fireEvent.click(screen.getByRole('button', { name: /Send coins back/ }));
-    expect([nav.page, nav.tab]).toEqual(['peg', 'withdraw']);
+    // A step of the tips opens its page (the chain's own steps, chain/firststeps.ts).
+    const step = FIRST_STEPS.find((s) => s.action && !s.action.panel)!.action!;
+    await fireEvent.click(within(document.querySelector('.tips') as HTMLElement).getByRole('button', { name: new RegExp(step.label) }));
+    expect(nav.page).toBe(PAGES[step.page as PageId].tabOf?.page ?? step.page);
   });
 
   it('Drivechains: two tabs in plain words, the withdrawal with the call of Advanced', async () => {

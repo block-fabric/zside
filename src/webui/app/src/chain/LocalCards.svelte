@@ -16,6 +16,7 @@
   import Ring from './zs/Ring.svelte';
   import { memosOf, sortPlan } from './zs/model';
   import { isRead, memoState, startZs, zs } from './zs/store.svelte';
+  import { simpleMode } from '../lib/uimode.svelte';
 
   $effect(() => startZs());
 
@@ -34,6 +35,8 @@
     return [...unread, ...memos.filter((m) => isRead(m.key))].slice(0, 3);
   });
   const toGo = $derived(sortPlan(zs.plan).filter((s) => s.status !== 'sent'));
+  // Simple mode: the private balance and its two moves; the memos and melt & cast are Advanced's.
+  const simple = $derived(simpleMode());
 </script>
 
 {#if wallets.current !== null && zs.loaded && zs.balance}
@@ -48,11 +51,17 @@
         </dl>
       </div>
       {#snippet actions()}
-        <button type="button" class="btn grow" onclick={() => go('private', 'pay')}><Icon name="private" size={15} /> Pay privately</button>
-        <button type="button" class="btn ghost" onclick={() => go('private', 'move')}>Shield</button>
+        {#if simple}
+          <button type="button" class="btn grow" onclick={() => go('send')}><Icon name="private" size={15} /> Send privately</button>
+          <button type="button" class="btn ghost" onclick={() => go('private', 'move')}>Make private</button>
+        {:else}
+          <button type="button" class="btn grow" onclick={() => go('private', 'pay')}><Icon name="private" size={15} /> Pay privately</button>
+          <button type="button" class="btn ghost" onclick={() => go('private', 'move')}>Shield</button>
+        {/if}
       {/snippet}
     </Card>
 
+    {#if !simple}
     <Card title="Memos" icon="memo" open={() => go('memos')} openLabel="Open the memos" stat>
       {#if memos.length === 0}
         <p class="muted">No memo yet: they come with shielded payments.</p>
@@ -72,7 +81,8 @@
       {/if}
     </Card>
 
-    {#if toGo.length}
+    {/if}
+    {#if toGo.length && !simple}
       <Card title="Melt & cast" icon="meltcast" open={() => go('meltcast')} openLabel="Open melt and cast" stat>
         <span class="muted">{tn('%n step(s) to go', toGo.length)}</span>
         {#if toGo[0]?.height !== undefined}
