@@ -2,12 +2,12 @@
 # Copyright (c) 2026 The Chains developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""A sidechain node keeps a good history: -prune below 5000 MiB refuses to start.
+"""A sidechain node keeps a good history: -prune below 10000 MiB refuses to start.
 
 The mainchain node is a stand-in (test_framework/sidechain_standin.py).
 
-- -prune=2, 550 or 4999: the node does not start, and says why;
-- -prune=5000 and more: the node starts, pruning to that target, and its blocks are mined and kept;
+- -prune=2, 550, 4999, 5000 or 9999: the node does not start, and says why;
+- -prune=10000 and more: the node starts, pruning to that target, and its blocks are mined and kept;
 - -prune=1 (manual pruning) and -prune=0 (off) are taken;
 - regtest without -sidechainslot is not a sidechain: Bitcoin's minimum (550 MiB).
 """
@@ -19,7 +19,7 @@ from test_framework.util import assert_equal, rpc_port
 
 SLOT = 3
 MIB = 1024 * 1024
-ERROR = "Error: -prune must be at least 5000 MiB on a sidechain (0 turns pruning off, 1 allows manual pruning, which keeps as much)."
+ERROR = "Error: -prune must be at least 10000 MiB on a sidechain (0 turns pruning off, 1 allows manual pruning, which keeps as much)."
 
 
 class SidechainPruneTest(BitcoinTestFramework):
@@ -67,12 +67,12 @@ class SidechainPruneTest(BitcoinTestFramework):
         self.mine(5)
         self.stop_node(0)
 
-        self.log.info("-prune below 5000 MiB: the sidechain node refuses to start")
-        for value in (2, 550, 4999):
+        self.log.info("-prune below 10000 MiB: the sidechain node refuses to start")
+        for value in (2, 550, 4999, 5000, 9999):
             node.assert_start_raises_init_error(self.side_args + [f"-prune={value}"], ERROR, match=ErrorMatch.FULL_TEXT)
 
-        self.log.info("-prune of 5000 MiB and more: pruning to that target")
-        for value in (5000, 12000):
+        self.log.info("-prune of 10000 MiB and more: pruning to that target")
+        for value in (10000, 12000):
             self.start_node(0, self.side_args + [f"-prune={value}"])
             info = node.getblockchaininfo()
             assert info["pruned"]

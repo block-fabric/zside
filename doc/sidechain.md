@@ -144,13 +144,13 @@ mainchain node is used, looked for in `~/.chains`.
 
 ## Pruning
 
-A sidechain node keeps a good history. `-prune` below 5000 MiB
+A sidechain node keeps a good history. `-prune` below 10000 MiB
 (`MIN_SIDECHAIN_PRUNE_TARGET` in `src/validation.h`) refuses to start
-("-prune must be at least 5000 MiB on a sidechain"); `-prune=0` (off) and
+("-prune must be at least 10000 MiB on a sidechain"); `-prune=0` (off) and
 `-prune=1` (manual pruning) are taken, and `pruneblockchain` then removes the
-oldest block files only as long as 5000 MiB of them are left. Pruning goes by
+oldest block files only as long as 10000 MiB of them are left. Pruning goes by
 whole block files with a margin for the next ones, so what is kept is never less
-than 5000 MiB less a block file and that margin: more than 5 GB of the most
+than 10000 MiB less a block file and that margin: more than 10 GB of the most
 recent blocks and their undo data.
 
 Whatever the size, a pruned sidechain node also keeps the blocks of the last

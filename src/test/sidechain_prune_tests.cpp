@@ -59,19 +59,19 @@ BOOST_FIXTURE_TEST_SUITE(sidechain_prune_tests, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(sidechain_prune_minimum)
 {
     PruneArg prune{*this};
-    BOOST_CHECK_EQUAL(MIN_SIDECHAIN_PRUNE_TARGET, 5000_MiB);
+    BOOST_CHECK_EQUAL(MIN_SIDECHAIN_PRUNE_TARGET, 10000_MiB);
     // A sidechain: every network of this chain, and regtest with a slot.
     for (const auto& [chain, more] : std::vector<std::pair<ChainType, std::vector<std::string>>>{
              {ChainType::MAIN, {}}, {ChainType::TESTNET, {}}, {ChainType::SIGNET, {}}, {ChainType::REGTEST, {"-sidechainslot=3"}}}) {
         BOOST_TEST_MESSAGE("network " << ChainTypeToString(chain));
         // Below the minimum: refused, with the reason.
-        for (const std::string value : {"2", "550", "4999"}) {
+        for (const std::string value : {"2", "550", "4999", "5000", "9999"}) {
             const auto refused{prune.Apply(chain, value, more)};
             BOOST_REQUIRE(!refused);
-            BOOST_CHECK(util::ErrorString(refused).original.find("-prune must be at least 5000 MiB on a sidechain") != std::string::npos);
+            BOOST_CHECK(util::ErrorString(refused).original.find("-prune must be at least 10000 MiB on a sidechain") != std::string::npos);
         }
         // The minimum and above: taken.
-        BOOST_CHECK_EQUAL(*Assert(prune.Apply(chain, "5000", more)), 5000_MiB);
+        BOOST_CHECK_EQUAL(*Assert(prune.Apply(chain, "10000", more)), 10000_MiB);
         BOOST_CHECK_EQUAL(*Assert(prune.Apply(chain, "20000", more)), 20000_MiB);
         // Off, and manual pruning (which keeps as much: below).
         BOOST_CHECK_EQUAL(*Assert(prune.Apply(chain, "0", more)), 0U);
@@ -103,7 +103,7 @@ BOOST_FIXTURE_TEST_CASE(sidechain_prune_keeps_history, SidechainPruneSetup)
     const CBlock& block{chainman.GetParams().GenesisBlock()};
     int written{0};
     int files{0};
-    while (files < 12) files = blockman.WriteBlock(block, ++written).nFile;
+    while (files < 22) files = blockman.WriteBlock(block, ++written).nFile;
     for (int n{0}; n < files; ++n) {
         blockman.GetBlockFileInfo(n)->nSize = 1000_MiB;
         blockman.GetBlockFileInfo(n)->nUndoSize = 0;
@@ -125,7 +125,7 @@ BOOST_FIXTURE_TEST_CASE(sidechain_prune_keeps_history, SidechainPruneSetup)
     BOOST_CHECK_EQUAL(chainstate.GetPruneRange(tip).second, tip - DRIVECHAIN_UNDO_DEPTH);
     BOOST_CHECK_EQUAL(chainstate.GetPruneRange(written).second, written);
 
-    // Asked to prune everything: the oldest files go, as long as 5000 MiB are left.
+    // Asked to prune everything: the oldest files go, as long as 10000 MiB are left.
     std::set<int> pruned;
     blockman.FindFilesToPruneManual(pruned, written, chainstate);
     const uint64_t left{blockman.CalculateCurrentUsage()};
@@ -133,7 +133,7 @@ BOOST_FIXTURE_TEST_CASE(sidechain_prune_keeps_history, SidechainPruneSetup)
     BOOST_CHECK_LT(left, MIN_SIDECHAIN_PRUNE_TARGET + 1000_MiB);
     BOOST_CHECK_EQUAL(left, (files - pruned.size()) * 1000_MiB + current);
     // The oldest ones.
-    BOOST_CHECK_EQUAL(pruned.size(), static_cast<size_t>(files - 5));
+    BOOST_CHECK_EQUAL(pruned.size(), static_cast<size_t>(files - 10));
     for (int n{0}; n < static_cast<int>(pruned.size()); ++n) BOOST_CHECK(pruned.contains(n));
     // Asked again: nothing more goes.
     std::set<int> again;
