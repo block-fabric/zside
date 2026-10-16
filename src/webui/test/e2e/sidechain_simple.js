@@ -18,7 +18,7 @@
       if (hide) hide.click();
     }
     await sleep(500);
-    await snapshot(`${stem}-${name}`);
+    await snapshot(`${stem}-tour-${name.replace(/^simple-/, '')}`);
   }
   try {
     await waitFor('the node to run', () => T() && T().app.phase === 'ready' && T().node.tip, 120000);
@@ -27,6 +27,12 @@
     await rpc('createwallet', ['side']);
     await waitFor('the wallet in the page', () => T().wallets.current === 'side');
     T().savePrefs({ layout: 'dashboard', tipsDone: false });
+    // Blocks of this chain, merged mined with every block of the mainchain (as a miner of the mainchain would),
+    // so that the pictures show a chain in sync.
+    const fees = await rpc('getnewaddress', [], 'side');
+    await host('test.confirmAnswer', { yes: true });
+    await host('bmm.set', { mine: true, address: fees, always: true, amount: '0.0001' });
+    await waitFor('the first blocks of this chain', () => T().node.tip.height >= 2 && !T().node.tip.ibd, 120000);
 
     for (const theme of ['midnight', 'light']) {
       T().savePrefs({ theme });

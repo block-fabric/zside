@@ -418,7 +418,7 @@ describe('Simple mode on a sidechain', () => {
     // The quick actions leave merged mining out; Drivechains stays.
     const quick = screen.getByRole('navigation', { name: 'Quick actions' });
     expect(within(quick).queryByRole('button', { name: /Merged mining/ })).toBeNull();
-    expect(within(quick).getByRole('button', { name: /Deposit/ })).toBeTruthy();
+    expect(within(quick).getByRole('button', { name: /Bring coins in/ })).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
     await waitFor(() => expect(document.querySelector('.side-blocks')).toBeTruthy());
     // A step of the tips opens its page (the chain's own steps, chain/firststeps.ts).

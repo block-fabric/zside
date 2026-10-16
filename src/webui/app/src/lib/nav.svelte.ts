@@ -49,6 +49,8 @@ export interface PageInfo {
   shortcut?: string;
   /** Only in the navigation of Advanced mode (lib/uimode.svelte.ts): Simple mode reaches it by the palette and links. */
   advanced?: boolean;
+  /** Its name in Simple mode, in plain words ("My bets" for Portfolio), where it differs (pageTitle). */
+  simpleTitle?: string;
 }
 
 export const PAGES: Record<PageId, PageInfo> = {
@@ -83,7 +85,7 @@ export const PAGES: Record<PageId, PageInfo> = {
   // A tab of Drivechains (user decision, 2026-10-15), next to Bundle; its id leads there.
   bmm: { id: 'bmm', title: 'Merged mining', icon: 'merged', summary: 'Have the miners of the mainchain mine the blocks of this chain, for its fees (blind merged mining)', parity: ['S04'], ready: true, tabOf: { page: 'peg', tab: 'bmm' }, advanced: true },
   ...(Object.fromEntries(
-    (LOCAL_PAGES as readonly LocalPage[]).map((p) => [p.id, { id: p.id, title: p.title, icon: p.icon, summary: p.summary, wallet: p.wallet, shortcut: p.shortcut, parity: [], ready: true, advanced: p.advanced }]),
+    (LOCAL_PAGES as readonly LocalPage[]).map((p) => [p.id, { id: p.id, title: p.title, icon: p.icon, summary: p.summary, wallet: p.wallet, shortcut: p.shortcut, parity: [], ready: true, advanced: p.advanced, simpleTitle: p.simpleTitle }]),
   ) as unknown as Record<LocalPageId, PageInfo>),
 };
 

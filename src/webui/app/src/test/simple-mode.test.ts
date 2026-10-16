@@ -229,3 +229,21 @@ describe('the history in Simple mode', () => {
     await waitFor(() => expect(document.querySelector('.status-word')).toBeNull());
   });
 });
+
+describe('the names of pages in Simple mode', () => {
+  afterEach(() => {
+    delete PAGES.overview.simpleTitle;
+  });
+
+  it('are the plain ones a page says, in the sidebar and the palette; the usual ones in Advanced', async () => {
+    PAGES.overview.simpleTitle = 'My money';
+    prefs.uiMode = 'simple';
+    render(Sidebar);
+    const names = () => [...document.querySelectorAll('nav.sidebar .scroll .entry .grow')].map((e) => e.textContent?.trim());
+    expect(names()).toContain('My money');
+    expect(buildCommands().find((c) => c.id === 'page.overview')?.label).toBe('My money');
+    prefs.uiMode = 'advanced';
+    await waitFor(() => expect(names()).toContain('Overview'));
+    expect(buildCommands().find((c) => c.id === 'page.overview')?.label).toBe('Overview');
+  });
+});

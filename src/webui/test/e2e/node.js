@@ -195,6 +195,8 @@
     await check('bundle: score shown out of the minimum', score && score.getAttribute('aria-valuetext') === '1 of 30', score && score.getAttribute('aria-valuetext'));
     brow.click();
     await sleep(100);
+    // Who the bundle pays: the row opens to them by its button (ui-tweaks, c647681ead).
+    $('button.expand', brow).click();
     await waitFor('the payouts', () => text('.payouts').includes('1.00000000'));
     await check('bundle: payouts of a known bundle', true);
     await click('Downvote sidechain');

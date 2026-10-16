@@ -175,6 +175,8 @@
   const simple = $derived(simpleMode());
   /** Simple mode: the blocks of the mainchain open on demand. */
   let bmmDetails = $state(false);
+  /** Simple mode: the quick actions of the peg in the words of Drivechains' tabs. */
+  const SIMPLE_QUICK: Record<string, string> = { Deposit: 'Bring coins in', Withdraw: 'Send coins back' };
 
   // --- The balance over time, in a timeframe ---
   const FRAMES = [
@@ -221,7 +223,7 @@
     </div>
     <nav class="quick" aria-label="Quick actions">
       {#each quickLinks as q (q.label)}
-        <button type="button" class="pill action" disabled={pageDisabled(q.page)} onclick={() => (q.panel ? openQuick(q.panel) : go(q.page, q.tab ?? ''))}><Icon name={q.icon} size={15} /> {t(q.label)}</button>
+        <button type="button" class="pill action" disabled={pageDisabled(q.page)} onclick={() => (q.panel ? openQuick(q.panel) : go(q.page, q.tab ?? ''))}><Icon name={q.icon} size={15} /> {t(simple ? (q.simpleLabel ?? SIMPLE_QUICK[q.label] ?? q.label) : q.label)}</button>
       {/each}
       <button type="button" class="pill action ghost" onclick={openPalette}><Icon name="search" size={15} /> All actions <kbd>Ctrl K</kbd></button>
     </nav>

@@ -17,7 +17,7 @@
   import { clampFontAdjust, THEMES } from '../lib/themes';
   import ThemePicker from './ThemePicker.svelte';
   import ModeSwitch from './ModeSwitch.svelte';
-  import { pageShown } from '../lib/uimode.svelte';
+  import { pageShown, pageTitle } from '../lib/uimode.svelte';
   import { isThemeChoice } from '../lib/customthemes';
   import { frame } from '../lib/windowframe.svelte';
 
@@ -98,7 +98,7 @@
             onpointerleave={() => (statusTip.text = '')}
           >
             <Icon name={pageIcon(id)} size={19} />
-            <span class="grow">{t(page.title)}</span>
+            <span class="grow">{pageTitle(id)}</span>
             {#if !page.ready}<span class="soon" title="Being rebuilt">•</span>{/if}
             {#if id === 'settings' && pendingNow() > 0}<span class="pending" title="Changes of the settings wait for Apply" aria-label="Changes wait for Apply"></span>{/if}
           </button>

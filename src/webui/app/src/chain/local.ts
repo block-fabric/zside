@@ -27,7 +27,9 @@ export interface LocalPage {
   /** More words to find it by in the palette. */
   keywords?: string;
   /** A quick action of the dashboard's home that opens it (after Send and Receive, with the chain's). */
-  quick?: { label: string; icon?: IconName; tab?: string };
+  quick?: { label: string; icon?: IconName; tab?: string; simpleLabel?: string };
+  /** Its name in Simple mode, in plain words, where it differs from the title ("My bets" for Portfolio). */
+  simpleTitle?: string;
   /** Only in the navigation of Advanced mode (lib/uimode.svelte.ts): Simple mode reaches it by the palette and links. */
   advanced?: boolean;
 }

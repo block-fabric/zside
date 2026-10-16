@@ -19,7 +19,7 @@ export const TEXT_FIELDS = new Set(['label', 'title', 'name', 'description', 'me
 export const UNTRUSTED_FIELDS = new Set(['memo', 'comment', 'subver', 'subversion', 'uri']);
 const TRANSLATE = new Set(['t', 'tn']);
 /** Functions that give words of the app already in the language shown (made with t() / tn()). */
-const SELF_TRANSLATED = new Set(['typeText', 'statusText', 'voteText', 'summaryText', 'signersText', 'pingText', 'rangeText', 'rateText', 'noWalletText', 'nodeWords', 'addressTypeText']);
+const SELF_TRANSLATED = new Set(['typeText', 'statusText', 'voteText', 'summaryText', 'signersText', 'pingText', 'rangeText', 'rateText', 'noWalletText', 'nodeWords', 'addressTypeText', 'pageTitle']);
 /** Where a toast or a dialog of the app takes its words: the arguments (by place) and the fields of an object argument. */
 const MESSAGE_CALLS: Record<string, { args: number[]; props: string[] }> = {
   toast: { args: [1, 2], props: [] },

@@ -5,6 +5,7 @@
 //
 // In Simple mode a page may hide sections, tabs or columns, never what a beginner needs; the pages
 // marked `advanced` (PAGES) leave the navigation, and stay reachable by the palette and by links.
+import { t } from './i18n.svelte';
 import { PAGES, type PageId } from './nav.svelte';
 import { prefs, savePrefs } from './state.svelte';
 
@@ -35,6 +36,18 @@ export function toggleUiMode(): void {
 /** The label of the command that switches to the other mode (English: where it is shown, t() translates it). */
 export function switchModeLabel(): string {
   return prefs.uiMode === 'simple' ? 'Switch to Advanced mode' : 'Switch to Simple mode';
+}
+
+/** The name of a page in the mode shown, in English (for what t() translates later: commands, places). */
+export function pageTitleSource(id: PageId): string {
+  const page = PAGES[id];
+  return simpleMode() && page?.simpleTitle ? page.simpleTitle : (page?.title ?? id);
+}
+
+/** The name of a page in the mode shown, in the language shown. */
+export function pageTitle(id: PageId): string {
+  const source = pageTitleSource(id);
+  return t(source);
 }
 
 /** Whether a page is in the navigation (sidebar, workspace tabs, quick actions) in the mode shown. */

@@ -21,7 +21,7 @@
   import { frame, titleBarDoubleClick, titleBarMouseDown } from '../../lib/windowframe.svelte';
   import SyncOverlay from '../../components/SyncOverlay.svelte';
   import PageView from '../PageView.svelte';
-  import { pageShown } from '../../lib/uimode.svelte';
+  import { pageShown, pageTitle } from '../../lib/uimode.svelte';
 
   // The top bar is the integrated title bar too: its empty part moves the window, the buttons of
   // the window at its right.
@@ -100,7 +100,7 @@
         title={PAGES[tb.page].shortcut ? `${t(PAGES[tb.page].summary)} (${PAGES[tb.page].shortcut})` : t(PAGES[tb.page].summary)}
         onclick={() => go(tb.page, tb.tab ?? '')}
       >
-        {t(tb.label ?? PAGES[tb.page].title)}
+        {tb.label ? t(tb.label) : pageTitle(tb.page)}
         {#if !PAGES[tb.page].ready}<span class="soon" aria-label="(being rebuilt)">•</span>{/if}
       </button>
     {/each}

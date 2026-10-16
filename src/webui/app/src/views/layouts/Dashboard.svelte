@@ -13,7 +13,8 @@
   import { detail } from '../../lib/detail.svelte';
   import { closeQuick } from '../../lib/quick.svelte';
   import { NAV_SECTIONS } from '../../lib/layout';
-  import { go, nav, PAGES } from '../../lib/nav.svelte';
+  import { go, nav } from '../../lib/nav.svelte';
+  import { pageTitle } from '../../lib/uimode.svelte';
   import SyncOverlay from '../../components/SyncOverlay.svelte';
   import PageView from '../PageView.svelte';
 
@@ -41,7 +42,7 @@
           <button type="button" class="link" onclick={() => go('home')}><Icon name="home" size={15} /> Home</button>
           <span class="sep" aria-hidden="true">/</span>
           {#if section}<span class="muted">{section}</span><span class="sep" aria-hidden="true">/</span>{/if}
-          <span class="here" aria-current="page">{t(PAGES[nav.page].title)}</span>
+          <span class="here" aria-current="page">{pageTitle(nav.page)}</span>
         {/if}
       </nav>
       <PaletteButton />

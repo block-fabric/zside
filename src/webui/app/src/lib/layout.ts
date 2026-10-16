@@ -2,6 +2,7 @@
 // (doc/webui-layouts.md). Only data here; the shells are in views/layouts.
 import type { IconName } from '../components/Icon.svelte';
 import { PAGES, type PageId } from './nav.svelte';
+import { pageTitleSource } from './uimode.svelte';
 import { SIDECHAIN } from '../chain/config';
 import { LOCAL_PAGES, type LocalPage } from '../chain/local';
 
@@ -177,7 +178,7 @@ export function areaOf(page: PageId): Area {
 }
 
 export function placeLabel(place: Place): string {
-  return place.label ?? PAGES[place.page].title;
+  return place.label ?? pageTitleSource(place.page);
 }
 
 export interface NavSection {
@@ -220,6 +221,8 @@ export interface QuickAction {
   page: PageId;
   tab?: string;
   panel?: 'send' | 'receive';
+  /** Its label in Simple mode, in plain words, where it differs. */
+  simpleLabel?: string;
 }
 
 /** The quick actions of Home: Send and Receive, then what concerns the chain, then the tools. */
@@ -232,11 +235,11 @@ export const HOME_QUICK_ACTIONS: readonly QuickAction[] = SIDECHAIN
       { label: 'Merged mining', icon: 'merged', page: 'bmm' },
       ...(LOCAL_PAGES as readonly LocalPage[])
         .filter((p) => p.quick && p.section !== 'tools')
-        .map((p): QuickAction => ({ label: p.quick!.label, icon: p.quick!.icon ?? p.icon, page: p.id as PageId, tab: p.quick!.tab })),
+        .map((p): QuickAction => ({ label: p.quick!.label, simpleLabel: p.quick!.simpleLabel, icon: p.quick!.icon ?? p.icon, page: p.id as PageId, tab: p.quick!.tab })),
       { label: 'Block explorer', icon: 'explorer', page: 'explorer' },
       ...(LOCAL_PAGES as readonly LocalPage[])
         .filter((p) => p.quick && p.section === 'tools')
-        .map((p): QuickAction => ({ label: p.quick!.label, icon: p.quick!.icon ?? p.icon, page: p.id as PageId, tab: p.quick!.tab })),
+        .map((p): QuickAction => ({ label: p.quick!.label, simpleLabel: p.quick!.simpleLabel, icon: p.quick!.icon ?? p.icon, page: p.id as PageId, tab: p.quick!.tab })),
     ]
   : [
       { label: 'Send', icon: 'send', page: 'send', panel: 'send' },
