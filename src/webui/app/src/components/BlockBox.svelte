@@ -49,7 +49,7 @@
   );
 </script>
 
-<button type="button" class="blk" class:is-open={selected} class:is-fresh={fresh} aria-pressed={selected} aria-label={label} title={label} onclick={() => onselect(block.hash)}>
+<button type="button" class="blk" class:side={!!CHAIN.mainchain} class:is-open={selected} class:is-fresh={fresh} aria-pressed={selected} aria-label={label} title={label} onclick={() => onselect(block.hash)}>
   <span class="blk-lid" aria-hidden="true"></span>
   <span class="blk-side" aria-hidden="true"></span>
   <span class="blk-face" use:css={{ '--fill': `${fill}%` }} data-tint={tint}>
@@ -69,6 +69,10 @@
         {#each block.bmm.slice(0, 4) as slot (slot)}<span class="badge accent" title="{t('Merged mined: sidechain')} {slot}">BMM {slot}</span>{/each}
         {#if block.bmm.length > 4}<span class="badge">+{block.bmm.length - 4}</span>{/if}
       </span>
+    {:else}
+      <!-- No badge (a block of stake, a block nobody merged mined): the row keeps its place, so every box
+           of the ribbon has the same height (user report: FastBlocks' blocks of stake were shorter). -->
+      <span class="bmm" aria-hidden="true"></span>
     {/if}
     <span class="foot">
       <span class="interval mono {tone}" title={t('Time since the block before it')}>{shortInterval(secs)}</span>
@@ -197,10 +201,19 @@
   .txs {
     white-space: nowrap;
   }
+  /* The badges' row: as high on every box (one row on a sidechain, which has one badge at most; two on
+     the mainchain, which shows up to five), whether it has badges or not. */
   .bmm {
     display: flex;
     flex-wrap: wrap;
+    align-content: flex-start;
     gap: 0.2rem;
+    min-height: var(--bmm-rows, 2.3rem);
+    max-height: var(--bmm-rows, 2.3rem);
+    overflow: hidden;
+  }
+  .blk.side .bmm {
+    --bmm-rows: 1.1rem;
   }
   .bmm .badge {
     padding: 0 0.35rem;

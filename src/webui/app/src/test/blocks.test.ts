@@ -204,3 +204,14 @@ describe('the ribbon', () => {
     expect(onmore).toHaveBeenCalled();
   });
 });
+
+describe('the boxes of the ribbon, all of one height', () => {
+  it('keep the row of the badges on a block with none (a block of stake, a block nobody merged mined)', () => {
+    const plain = render(BlockBox, { block: block({}), secs: 60, median: 60, now: 1_700_000_060, onselect: () => undefined });
+    const row = plain.container.querySelector('.blk-face .bmm');
+    expect(row).not.toBeNull();
+    expect(row!.children.length).toBe(0);
+    plain.unmount();
+  });
+});
+
