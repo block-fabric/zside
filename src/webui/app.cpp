@@ -1487,6 +1487,7 @@ void App::RegisterHostMethods()
                 UniValue entry{UniValue::VOBJ};
                 entry.pushKV("title", d.title);
                 entry.pushKV("message", d.message);
+                entry.pushKV("level", std::string{dialog::LevelName(d.level)});
                 out.push_back(std::move(entry));
             }
             return out;
