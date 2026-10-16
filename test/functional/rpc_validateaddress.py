@@ -192,7 +192,7 @@ class ValidateAddressMainTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.chain = ""  # main
         self.num_nodes = 1
-        self.extra_args = [["-prune=899"]] * self.num_nodes
+        self.extra_args = [["-prune=10000"]] * self.num_nodes  # (the least a sidechain takes, MIN_SIDECHAIN_PRUNE_TARGET)
 
     def setup_nodes(self):
         # Until its slot's activation height (SidechainParams::main_activation_height) is set, this
