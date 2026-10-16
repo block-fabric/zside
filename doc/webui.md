@@ -400,8 +400,11 @@ these too never conflict:
 | `src/chain/LocalSend.svelte` | What it sends beside its coin (an asset, a name), at the top of Send; `active` set while its own form takes the place of the kit's |
 | `chain/local.ts` `shortcut: 'Alt+6'` | Alt+6 and on open its pages (lib/keyboard.ts), never over the kit's Alt+1 to Alt+5 |
 | `chain.json` `blockWeight` | Not needed: the explorer draws blocks against the weight the node says (`app.info.blockWeight`, `consensus.max_block_weight` of the network); `blockWeight` is only the fallback before it has |
+| `chain.json` `blockTarget` | The time between blocks the chain aims at, in seconds: the "target" of the explorer's ribbon (Chains' 60 when not set) |
+| `src/chain/explorer.ts` | `EXPLORER`: its columns of the block list (after Height, from `getblock`), the kit's columns it hides, facts at the top of a block's details, the tag of a ribbon box, the block target as the node says it (`target()`, over `blockTarget`), a `refresh` with each tip. The template's is empty |
+| `src/chain/roles.ts` + `local::CoinbaseRoles` (local.cpp) | The roles of the outputs of its coinbases (the 19th field of a wallet record): the history says the role's label instead of "Mined", the details its source, the type filter has one entry per role; an output of a role that pays 0 is left out. The template's are empty |
 | `src/webui/test/local_tests.cpp` | The unit tests of local.cpp, built into `test_<stem>-app` when the file is there |
-| `src/webui/test/e2e/local.cmake` | `webui_local_e2e(<name> <port> [options])` for each page script `e2e/<name>.js` of its pages: run by run_sidechain.py (`--script`, `--app-arg`, `--js-var NAME=VALUE`; `window.__E2E_DIR` is the folder of the run) against a live mainchain, as `webui_e2e_<name>` |
+| `src/webui/test/e2e/local.cmake` | `webui_local_e2e(<name> <port> [options])` for each page script `e2e/<name>.js` of its pages: run by run_sidechain.py (`--script`, `--app-arg`, `--js-var NAME=VALUE`, `--file NAME=TEXT` written in the folder of the run, `{tmp}` in an `--app-arg` for that folder, `--width`; `window.__E2E_DIR` is the folder of the run) against a live mainchain, as `webui_e2e_<name>` |
 
 ```ts
 // chain/local.ts

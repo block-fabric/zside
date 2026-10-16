@@ -47,7 +47,7 @@
         for (const r of fresh.filter((x) => x.txid === txid && !(x.type === 'mined' && x.amount === 0n))) {
           const incoming = r.amount >= 0n;
           const amount = prefs.mask ? '••••••' : formatAmount(r.amount, prefs.unit, { withUnit: true, plus: true });
-          const lines = [t('Date: %1', formatTime(r.time)), t('Amount: %1', amount), t('Type: %1', typeText(r.type) || t('Other'))];
+          const lines = [t('Date: %1', formatTime(r.time)), t('Amount: %1', amount), t('Type: %1', typeText(r.type, r.role) || t('Other'))];
           if (wallets.list.length > 1) lines.push(t('Wallet: %1', walletDisplayName(wallet)));
           if (r.label) lines.push(t('Label: %1', r.label));
           else if (r.address) lines.push(t('Address: %1', addressText(r)));

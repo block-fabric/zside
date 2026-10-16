@@ -32,7 +32,8 @@ describe('the catalogs', () => {
     // Made again from the catalogs (src/webui/locale) and the sources, nothing changes.
     expect(existsSync(join(APP, '../locale/bitcoin_de.ts'))).toBe(true);
     execFileSync(process.execPath, [join(APP, 'scripts/i18n.mjs'), '--check'], { stdio: 'pipe' });
-  });
+    // The script runs as a process of its own: 30 s, not vitest's 5, for a machine under load (user decision).
+  }, 30_000);
 });
 
 describe('a language', () => {

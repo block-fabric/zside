@@ -561,9 +561,11 @@ BOOST_AUTO_TEST_CASE(history_in_parts)
     BOOST_CHECK_EQUAL(all["records"].size(), 3U);
     BOOST_CHECK_EQUAL(all["height"].getInt<int>(), 105);
     BOOST_CHECK_EQUAL(all["maturity"].getInt<int>(), 101);
-    // The fields the status follows from: block height, state, coinbase, abandoned, trusted.
+    // The fields the status follows from: block height, state, coinbase, abandoned, trusted; then the role of a
+    // coinbase output in the chain's words (local::CoinbaseRoles): none for blocks no role is known of.
     const UniValue& first{all["records"][0]};
-    BOOST_REQUIRE_EQUAL(first.size(), 18U);
+    BOOST_REQUIRE_EQUAL(first.size(), 19U);
+    BOOST_CHECK_EQUAL(first[18].get_str(), "");
     const int height{first[13].getInt<int>()};
     BOOST_CHECK(height >= 101 && height <= 103);
     BOOST_CHECK_EQUAL(first[14].get_str(), "c");

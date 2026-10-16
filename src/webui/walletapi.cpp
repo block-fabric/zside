@@ -6,6 +6,7 @@
 
 #include <webui/walletapi.h>
 #include <webui/chainconfig.h>
+#include <webui/local.h>
 
 #include <addresstype.h>
 #include <chainparams.h>
@@ -17,6 +18,7 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <core_io.h>
+#include <interfaces/chain.h>
 #include <interfaces/node.h>
 #include <interfaces/wallet.h>
 #include <key_io.h>
@@ -299,13 +301,15 @@ struct Record {
     CAmount debit{0};
     CAmount credit{0};
     int idx{0};
+    //! What the chain says the output pays, for an output of a coinbase (local::CoinbaseRoles); "" else.
+    std::string role;
 };
 
 //! Number of confirmations recommended for accepting a transaction (TransactionRecord::RecommendedNumConfirmations).
 constexpr int RECOMMENDED_CONFIRMATIONS{6};
 
 /** TransactionRecord::decomposeTransaction. */
-std::vector<Record> Decompose(const interfaces::WalletTx& wtx)
+std::vector<Record> Decompose(const interfaces::WalletTx& wtx, const std::vector<std::string>& roles = {})
 {
     std::vector<Record> parts;
     const int64_t nTime{wtx.time};
@@ -362,6 +366,7 @@ std::vector<Record> Decompose(const interfaces::WalletTx& wtx)
                     sub.address = wtx.from.value_or("");
                 }
                 if (wtx.is_coinbase) sub.type = RecordType::Generated;
+                if (wtx.is_coinbase && i < roles.size()) sub.role = roles[i];
                 parts.push_back(sub);
             }
         }
@@ -505,6 +510,8 @@ UniValue RecordJson(const Record& rec, const RecordStatus& s, const interfaces::
     r.push_back(status.is_coinbase);
     r.push_back(status.is_abandoned);
     r.push_back(status.is_trusted);
+    // The role of an output of a coinbase, in the chain's words (local::CoinbaseRoles): "" mostly.
+    r.push_back(rec.role);
     return r;
 }
 
@@ -514,7 +521,9 @@ void AppendRecords(UniValue& records, const wallet::CWallet& w, const wallet::CW
     const interfaces::WalletTx tx{MakeTx(w, wtx)};
     const interfaces::WalletTxStatus status{MakeStatus(w, wtx, trusted_parents)};
     const char* state{StateCode(wtx)};
-    for (const Record& rec : Decompose(tx)) records.push_back(RecordJson(rec, StatusOf(rec, status), status, state, labels));
+    std::vector<std::string> roles;
+    if (const auto* confirmed{wtx.state<wallet::TxStateConfirmed>()}; confirmed && wtx.IsCoinBase()) roles = local::CoinbaseRoles(w.chain(), confirmed->confirmed_block_hash);
+    for (const Record& rec : Decompose(tx, roles)) records.push_back(RecordJson(rec, StatusOf(rec, status), status, state, labels));
 }
 
 /** TransactionDesc::FormatTxStatus. */
@@ -595,7 +604,23 @@ UniValue Describe(interfaces::Node& node, interfaces::Wallet& wallet, const Txid
 
     // From
     if (wtx.is_coinbase) {
-        rows.push_back(TextRow("Source", "Generated"));
+        UniValue source{TextRow("Source", "Generated")};
+        // What the output pays, in the chain's words (local::CoinbaseRoles): the page says it instead.
+        if (wallet::CWallet* cw{wallet.wallet()}; cw && idx >= 0) {
+            uint256 block;
+            {
+                LOCK(cw->cs_wallet);
+                const auto it{cw->mapWallet.find(txid)};
+                if (it != cw->mapWallet.end()) {
+                    if (const auto* confirmed{it->second.state<wallet::TxStateConfirmed>()}) block = confirmed->confirmed_block_hash;
+                }
+            }
+            if (!block.IsNull()) {
+                const auto roles{local::CoinbaseRoles(cw->chain(), block)};
+                if (static_cast<size_t>(idx) < roles.size() && !roles[idx].empty()) source.pushKV("role", roles[idx]);
+            }
+        }
+        rows.push_back(std::move(source));
     } else if (wtx.from) {
         rows.push_back(TextRow("From", *wtx.from));
     } else if (nNet > 0) {

@@ -7,7 +7,7 @@
   import { t } from '../lib/i18n.svelte';
   import Amount from '../components/Amount.svelte';
   import BlockRibbon from '../components/BlockRibbon.svelte';
-  import { coinbaseTag, type RibbonBlock } from '../lib/blocks';
+  import { coinbaseTag, TARGET_SPACING, type RibbonBlock } from '../lib/blocks';
   import { every } from '../lib/poll';
   import CopyButton from '../components/CopyButton.svelte';
   import Pager from '../components/Pager.svelte';
@@ -27,6 +27,7 @@
   import { SIDECHAIN } from '../chain/config';
   import { bmmCommitments } from '../lib/chain';
   import { side, startSide } from '../lib/sidestate.svelte';
+  import { EXPLORER, type ChainBlock } from '../chain/explorer';
 
   /** Most waiting transactions listed (MAX_MEMPOOL_ROWS). */
   const MAX_MEMPOOL_ROWS = 1000;
@@ -42,6 +43,8 @@
     hash: string;
     /** The id of its coinbase (for the miner's tag). */
     coinbase?: string;
+    /** What getblock said of it, without its transactions: for the columns of the chain (chain/explorer.ts). */
+    chain?: ChainBlock;
   }
   interface MempoolRow {
     txid: string;
@@ -122,7 +125,8 @@
     const known = cache.get(hash);
     if (known) return known;
     const b = await rpc.raw<Block>('getblock', [hash, 1]);
-    const row = { height: b.height, time: b.time, nTx: b.nTx as number, size: b.size, weight: b.weight, difficulty: b.difficulty, hash, previousblockhash: b.previousblockhash, coinbase: b.tx?.[0] };
+    const { tx: _tx, ...chain } = b;
+    const row = { height: b.height, time: b.time, nTx: b.nTx as number, size: b.size, weight: b.weight, difficulty: b.difficulty, hash, previousblockhash: b.previousblockhash, coinbase: b.tx?.[0], chain };
     cache.set(hash, row);
     return row;
   }
@@ -167,6 +171,11 @@
     void prefs.explorerCount;
     refreshBlocks();
   });
+  // What the chain's columns read besides the blocks (chain/explorer.ts), with each block.
+  $effect(() => {
+    void node.tip?.height;
+    EXPLORER.refresh?.().then(() => detailsVersion++);
+  });
   $effect(() => {
     void node.mempool.size;
     void node.tip?.height;
@@ -194,8 +203,8 @@
   async function extraOf(row: BlockRow): Promise<void> {
     if (extras.has(row.hash)) return;
     const stats = await rpc.raw<{ subsidy: number; totalfee: number; avgfeerate: number }>('getblockstats', [row.hash, ['subsidy', 'totalfee', 'avgfeerate']]);
-    let tag = '';
-    if (row.coinbase) {
+    let tag = (row.chain && EXPLORER.tag?.(row.chain)) || '';
+    if (!tag && row.coinbase) {
       const cb = await rpc.raw<{ vin: { coinbase?: string }[] }>('getrawtransaction', [row.coinbase, true, row.hash]).catch(() => null);
       tag = coinbaseTag(cb?.vin[0]?.coinbase ?? '');
     }
@@ -345,7 +354,9 @@
     search(q);
   });
 
-  const blockColumns: Column<BlockRow>[] = [
+  // The chain's own columns (chain/explorer.ts) come after the height; the kit's it has no use for are left out.
+  const chainColumns: Column<BlockRow>[] = EXPLORER.columns.map((c) => ({ key: `chain:${c.key}`, label: c.label, width: c.width, align: c.align, mono: c.mono, words: !c.mono, value: (b) => (b.chain ? c.value(b.chain) : undefined) }));
+  const kitColumns: Column<BlockRow>[] = [
     { key: 'height', label: 'Height', value: (b) => b.height, width: '6rem', align: 'end' },
     { key: 'time', label: 'Time', value: (b) => b.time, width: '11.5rem' },
     { key: 'nTx', label: 'Transactions', value: (b) => b.nTx, width: '7.5rem', align: 'end' },
@@ -354,6 +365,13 @@
     { key: 'difficulty', label: 'Difficulty', value: (b) => b.difficulty, width: '10rem', align: 'end' },
     { key: 'hash', label: 'Hash', value: (b) => b.hash, width: 'minmax(14rem, 1fr)', mono: true },
   ];
+  const blockColumns: Column<BlockRow>[] = [kitColumns[0], ...chainColumns, ...kitColumns.slice(1)].filter((c) => !EXPLORER.hide.includes(c.key));
+  // The pace the chain aims at: the node's when the chain reads it (chain/explorer.ts), else chain.json's.
+  const blockTarget = $derived.by(() => {
+    void detailsVersion;
+    return EXPLORER.target?.() ?? TARGET_SPACING;
+  });
+  const chainColumnOf = (key: string) => EXPLORER.columns.find((c) => `chain:${c.key}` === key);
   const sortedBlocks = $derived.by(() => {
     void detailsVersion;
     return filterAndSort(blocks.map(withDetails), blockColumns, '', blockSort, blockDir);
@@ -396,7 +414,7 @@
     <button type="button" class="btn" onclick={() => { cache.clear(); blocks = []; refreshBlocks(); refreshMempool(); }}>Refresh</button>
   </form>
 
-  <BlockRibbon blocks={ribbon} selected={selectedBlock} {fresh} now={nowSecs} onselect={pickBlock} onmore={moreDetails} />
+  <BlockRibbon blocks={ribbon} selected={selectedBlock} {fresh} now={nowSecs} onselect={pickBlock} onmore={moreDetails} {blockTarget} />
 
   <div class="list-bar">
   <div class="tabs" role="tablist" aria-label="Lists" id="explorer-lists">
@@ -413,7 +431,13 @@
     <div class="table-box fit" use:css={{ height: `${(Math.max(1, blocksShown.length) + 1) * ROW + 2}px` }}>
       <DataTable fit rows={blocksShown} columns={blockColumns} key={(b) => b.hash} bind:selected={selectedBlock} bind:sortKey={blockSort} bind:sortDir={blockDir} label="Blocks" empty="Loading…" onactivate={(b) => showBlock(b.hash)}>
         {#snippet cell(b, column)}
-          {#if column.key === 'time'}{formatTime(b.time)}
+          {#if column.key.startsWith('chain:')}
+            {@const c = chainColumnOf(column.key)}
+            {@const v = column.value(b)}
+            {#if v === undefined || v === null || !c}<span class="faint">{b.chain ? '' : '…'}</span>
+            {:else if c.badge?.(b.chain!)}{@const badge = c.badge(b.chain!)!}<span class="badge {badge.tone}" title={badge.tip}>{v}</span>
+            {:else}<span title={c.tip?.(b.chain!)}>{typeof v === 'number' ? formatCount(v) : v}</span>{/if}
+          {:else if column.key === 'time'}{formatTime(b.time)}
           {:else if column.key === 'size'}{#if b.size === undefined}<span class="faint">…</span>{:else}{formatBytes(b.size)}{/if}
           {:else if column.key === 'weight' && b.weight === undefined}<span class="faint">…</span>
           {:else if column.key === 'difficulty'}{b.difficulty.toPrecision(8)}
@@ -452,6 +476,7 @@
       {:else}
         <div class="panel-body block-grid">
           <dl class="facts">
+            {#each EXPLORER.facts(b) as f (f.dt)}<dt>{f.dt}</dt><dd class:mono={f.mono} class="break">{f.dd}</dd>{/each}
             <dt>Hash</dt><dd class="mono break">{b.hash} <CopyButton text={b.hash} label="Copy the block hash" /></dd>
             <dt>Time</dt><dd>{formatTime(b.time)} <span class="faint">(median {formatTime(b.mediantime)})</span></dd>
             <dt>Confirmations</dt><dd class="num">{formatCount(b.confirmations)}</dd>

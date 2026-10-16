@@ -233,7 +233,7 @@
                   <TxStatusIcon record={r} />
                   <span class="what">
                     <span class="addr" class:muted={!r.label} translate="no">{addressText(r)}</span>
-                    <span class="faint small">{typeText(r.type) || 'Other'} · {formatTime(r.time)}</span>
+                    <span class="faint small">{typeText(r.type, r.role) || 'Other'} · {formatTime(r.time)}</span>
                   </span>
                   <span class:pending={!r.countsForBalance} title={r.countsForBalance ? undefined : 'Not counted in the balance yet'}><Amount sats={r.amount} colored plus /></span>
                 </button>

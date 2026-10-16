@@ -16,6 +16,9 @@ import {
   intervalTone,
   medianInterval,
   shortInterval,
+  CHAINS_TARGET_SPACING,
+  TARGET_SPACING,
+  shortTarget,
   type RibbonBlock,
 } from '../lib/blocks';
 
@@ -161,9 +164,27 @@ describe('the ribbon', () => {
     expect(boxes[0].classList.contains('is-fresh')).toBe(true);
     expect(boxes[1].getAttribute('aria-pressed')).toBe('true');
     expect(container.textContent).toContain('median 1m 0s');
+    // The target: chain.json's blockTarget, else Chains' minute.
+    expect(container.textContent).toContain(`target ${shortTarget(CHAIN.blockTarget ?? 60)}`);
     boxes[0].focus();
     await fireEvent.keyDown(container.querySelector('.strip')!, { key: 'ArrowRight' });
     expect(document.activeElement).toBe(boxes[1]);
+  });
+
+  it("the target is the chain's (chain.json blockTarget, or what the node says: chain/explorer.ts), Chains' minute by default", () => {
+    expect(CHAINS_TARGET_SPACING).toBe(60);
+    expect(TARGET_SPACING).toBe(CHAIN.blockTarget ?? 60);
+    expect(shortTarget(60)).toBe('1m');
+    expect(shortTarget(30)).toBe('30s');
+    expect(shortTarget(1)).toBe('1s');
+    expect(shortTarget(90)).toBe('1m 30s');
+    expect(shortTarget(600)).toBe('10m');
+    expect(shortTarget(3600)).toBe('1h');
+    expect(shortTarget(0)).toBe('–');
+    const blocks = [block({ height: 121, hash: 'bb'.repeat(32), time: 1_700_000_030 }), block()];
+    const { container } = render(BlockRibbon, { blocks, selected: null, fresh: null, now: 1_700_000_100, onselect: () => undefined, blockTarget: 30 });
+    expect(container.querySelector('.ribbon-head')!.textContent).toContain('target 30s');
+    expect(container.querySelector('.ribbon-head')!.textContent).not.toContain('target 1m');
   });
 
   it('scrolled near its right end, the strip asks for older blocks; the wheel scrolls it sideways', async () => {

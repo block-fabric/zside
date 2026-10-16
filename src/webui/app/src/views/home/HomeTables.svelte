@@ -247,8 +247,8 @@
                   <button type="button" class="row-name" disabled={prefs.mask} title={prefs.mask ? 'Hidden: privacy mode' : 'Show the details'} onclick={() => details(r)}>
                     <span class="bubble" class:in={r.amount >= 0n}><Icon name={r.type === 'mined' ? 'mine' : r.amount < 0n ? 'send' : 'receive'} size={16} /></span>
                     <span class="what">
-                      <span class="ellipsis strong">{#if addressText(r)}<SafeText text={addressText(r)} />{:else}{typeText(r.type) || 'Other'}{/if}</span>
-                      <span class="faint small">{typeText(r.type) || 'Other'}</span>
+                      <span class="ellipsis strong">{#if addressText(r)}<SafeText text={addressText(r)} />{:else}{typeText(r.type, r.role) || 'Other'}{/if}</span>
+                      <span class="faint small">{typeText(r.type, r.role) || 'Other'}</span>
                     </span>
                   </button>
                 </td>

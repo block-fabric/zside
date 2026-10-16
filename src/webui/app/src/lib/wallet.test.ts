@@ -9,6 +9,7 @@ import {
   confirmationProgress,
   dateRange,
   filterRecords,
+  isEmptyRoleOutput,
   isoLocal,
   nearestConfTarget,
   parseRecords,
@@ -127,6 +128,35 @@ describe('transaction records', () => {
     const h = balanceHistory(records);
     expect(h.map((p) => p.balance)).toEqual([5_000_000_000n, 3_999_990_000n, 4_249_990_000n, 9_249_990_000n]);
     expect(h.map((p) => p.time)).toEqual([1_700_000_000, 1_700_100_000, 1_700_200_000, 1_700_300_000]);
+  });
+});
+
+describe('the roles of coinbase outputs (chain/roles.ts, the 19th field)', () => {
+  // A coinbase of a chain that names what its outputs pay (FastBlocks: Staked, BMM reward); the template names none.
+  const cb = (txid: string, idx: number, amount: number, role: unknown) => [txid, idx, 'mined', 'rchn1qme', '', 1_700_600_000, amount, 0, 'confirmed', 10, 0, true, `r${idx}`, 100, 'c', true, false, true, role];
+
+  it("reads the role, '' when the host sends none (an older host: 18 fields)", () => {
+    const [a, b] = parseRecords([cb('11'.repeat(32), 0, 5000, 'staked'), raw[0].concat([100, 'c', true, false, true])]);
+    expect(a.role).toBe('staked');
+    expect(b.role).toBe('');
+    expect(parseRecords([cb('11'.repeat(32), 0, 5000, 7)])[0].role).toBe('');
+  });
+
+  it('leaves out an output of a role that pays nothing (a block of stake without fees), keeps those that pay', () => {
+    const rows = parseRecords([cb('22'.repeat(32), 0, 0, 'staked'), cb('22'.repeat(32), 1, 1200, 'bmm'), cb('33'.repeat(32), 0, 700, 'staked')]);
+    expect(rows.map((r) => [r.txid.slice(0, 2), r.idx, r.role])).toEqual([['22', 1, 'bmm'], ['33', 0, 'staked']]);
+    expect(isEmptyRoleOutput({ role: 'staked', type: 'mined', amount: 0n })).toBe(true);
+    expect(isEmptyRoleOutput({ role: 'staked', type: 'mined', amount: 1n })).toBe(false);
+    // A coinbase without a role is the kit's as before, whatever it pays.
+    expect(isEmptyRoleOutput({ role: '', type: 'mined', amount: 0n })).toBe(false);
+    expect(parseRecords([cb('44'.repeat(32), 0, 0, '')])).toHaveLength(1);
+    // So the CSV has no row for it either.
+    expect(transactionsCsv(parseRecords([cb('22'.repeat(32), 0, 0, 'staked')]), 'CHN').trim().split('\n')).toHaveLength(1);
+  });
+
+  it('a role the chain does not name reads as the kit\'s Mined', () => {
+    expect(typeText('mined', 'nothing-of-the-chain')).toBe('Mined');
+    expect(typeText('recv', 'staked')).toBe('Received with');
   });
 });
 

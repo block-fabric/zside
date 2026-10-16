@@ -17,8 +17,10 @@ on the way. The test then checks on the mainchain that the withdrawal was paid.
 
 A sidechain made from the template runs its own page script the same way: --script <its .js, in this
 folder>, with --app-arg for options of the app and --js-var NAME=VALUE for values the script reads
-(window.__E2E_<NAME>); window.__E2E_DIR is the folder of the run (for files the script chooses). Only
-sidechain.js makes a withdrawal, checked here on the mainchain.
+(window.__E2E_<NAME>); window.__E2E_DIR is the folder of the run (for files the script chooses). --file
+NAME=TEXT writes a file in the folder of the run before the app starts (a validator's key file, say), and
+{tmp} in an --app-arg is that folder; --width starts the window that wide (700 for the narrow pictures).
+Only sidechain.js makes a withdrawal, checked here on the mainchain.
 
 Nothing outside --tmp is touched; the nodes use ports of their own (--port and the three after it).
 """
@@ -115,6 +117,8 @@ def main():
     parser.add_argument("--script", default="sidechain.js", help="the page script, in this folder (default: sidechain.js)")
     parser.add_argument("--app-arg", action="append", default=[], help="an option given to the app (repeat for more)")
     parser.add_argument("--js-var", action="append", default=[], help="NAME=VALUE: window.__E2E_<NAME> = VALUE (JSON) for the page script")
+    parser.add_argument("--file", action="append", default=[], help="NAME=TEXT: a file of the folder of the run, written before the app starts (\\n in TEXT a new line; {tmp} in --app-arg is that folder)")
+    parser.add_argument("--width", type=int, default=0, help="the width of the window, in pixels (default: the app's own, 1180)")
     args = parser.parse_args()
 
     if shutil.which("xvfb-run") is None:
@@ -162,10 +166,18 @@ def main():
             name, value = var.split("=", 1)
             prelude += f"window.__E2E_{name} = {value};\n"
         page_script.write_text(script(args.script, prelude))
+        for item in args.file:
+            name, text = item.split("=", 1)
+            if "/" in name or name.startswith("."):
+                raise RuntimeError(f"--file {name}: a name in the folder of the run")
+            (base / name).write_text(text.replace("\\n", "\n") + "\n")
+            (base / name).chmod(0o600)
+        if args.width:
+            (base / "app.json").write_text(json.dumps({"window": {"width": args.width, "height": 860, "maximized": False}}))
         cmd = ["-regtest", f"-sidechainslot={SLOT}", f"-port={args.port + 2}", f"-rpcport={args.port + 3}", "-listen=0", "-dnsseed=0", "-fixedseeds=0",
                "-fallbackfee=0.0002", f"-datadir={datadir}", f"-mainchainrpcport={args.port}", f"-mainchainrpcuser={USER}",
                f"-mainchainrpcpasswordfile={password_file}", "-mainchainrpcwallet=miner",
-               f"-webuiconfig={base / 'app.json'}", f"-webuitestshots={args.shots.resolve()}", f"-webuitestscript={page_script}"] + args.app_arg
+               f"-webuiconfig={base / 'app.json'}", f"-webuitestshots={args.shots.resolve()}", f"-webuitestscript={page_script}"] + [a.replace("{tmp}", str(base)) for a in args.app_arg]
         app = App(args.app, cmd, env, base / "sidechain.log")
         code = app.wait(1800)
         result = app.result()

@@ -8,7 +8,9 @@ export const CHAINS_MAX_BLOCK_WEIGHT = 800_000;
 /** The most weight a block of this chain may have when the node has not said (app.info.blockWeight, per network): chain.json blockWeight, else Chains'. */
 export const BLOCK_WEIGHT = CHAIN.blockWeight ?? CHAINS_MAX_BLOCK_WEIGHT;
 /** The pace Chains aims at: a block a minute (nPowTargetSpacing). */
-export const TARGET_SPACING = 60;
+export const CHAINS_TARGET_SPACING = 60;
+/** The pace this chain aims at, in seconds (the ribbon's target): chain.json blockTarget, else Chains'. */
+export const TARGET_SPACING = CHAIN.blockTarget ?? CHAINS_TARGET_SPACING;
 
 /** A block of the ribbon: the row of the table, and what getblockstats, the coinbase and the sidechains add. */
 export interface RibbonBlock {
@@ -84,6 +86,19 @@ export function shortInterval(secs: number | null): string {
   if (secs < 60) return `${Math.round(secs)}s`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m ${Math.round(secs % 60)}s`;
   return `${(secs / 3600).toFixed(1)}h`;
+}
+
+/** A block target, short: 1m, 30s, 1m 30s, 1h. */
+export function shortTarget(secs: number): string {
+  if (!(secs > 0)) return '–';
+  const parts: string[] = [];
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = Math.round(secs % 60);
+  if (h) parts.push(`${h}h`);
+  if (m) parts.push(`${m}m`);
+  if (s || parts.length === 0) parts.push(`${s}s`);
+  return parts.join(' ');
 }
 
 /** How full a block is, in percent of the most weight it may have: 0 for an empty one, at least 6 when it holds any. */

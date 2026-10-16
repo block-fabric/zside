@@ -7,6 +7,7 @@
   import CopyButton from './CopyButton.svelte';
   import { formatTime } from '../lib/format';
   import { walletApi, type DetailRow, type TxDetails, type TxRecord } from '../lib/wallet';
+  import { COINBASE_ROLES } from '../chain/roles';
 
   let { wallet, record }: { wallet: string; record: Pick<TxRecord, 'txid' | 'idx' | 'address'> } = $props();
 
@@ -36,6 +37,9 @@
     {row.time ? formatTime(row.time) : ''}
   {:else if row.k === 'Status'}
     <span class="break"><SafeText text={row.text ?? ''} /></span>
+  {:else if row.k === 'Source' && row.role && COINBASE_ROLES[row.role]}
+    <!-- What the output pays, in the chain's words (chain/roles.ts). -->
+    <span class="break">{t(COINBASE_ROLES[row.role].source)}</span>
   {:else}
     <SafeText class="break" text={row.text} />
   {/if}

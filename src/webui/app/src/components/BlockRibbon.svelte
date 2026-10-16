@@ -5,7 +5,7 @@
   // (epool.cash): components/BlockBox.svelte, lib/blocks.ts.
   import { t } from '../lib/i18n.svelte';
   import BlockBox from './BlockBox.svelte';
-  import { intervalOf, medianInterval, shortInterval, type RibbonBlock } from '../lib/blocks';
+  import { intervalOf, medianInterval, shortInterval, shortTarget, TARGET_SPACING, type RibbonBlock } from '../lib/blocks';
 
 
   let {
@@ -15,6 +15,7 @@
     now,
     onselect,
     onmore,
+    blockTarget = TARGET_SPACING,
   }: {
     blocks: readonly RibbonBlock[];
     selected: string | null;
@@ -24,6 +25,8 @@
     onselect: (hash: string) => void;
     /** Older blocks wanted: the strip scrolled near its right end. */
     onmore?: () => void;
+    /** The time between blocks the chain aims at, in seconds (chain.json blockTarget, or the node's: chain/explorer.ts). */
+    blockTarget?: number;
   } = $props();
 
   /** Near the right end (within two boxes' width): ask for older blocks. */
@@ -57,7 +60,7 @@
 <section class="ribbon" aria-label="Latest blocks">
   <div class="ribbon-head">
     <h2 class="caps">{t('Latest blocks')}</h2>
-    <span class="faint mono">{median !== null ? `${t('median')} ${shortInterval(median)} ${t('between blocks')} · ${t('target')} 1m` : t('newest first')}</span>
+    <span class="faint mono">{median !== null ? `${t('median')} ${shortInterval(median)} ${t('between blocks')} · ${t('target')} ${shortTarget(blockTarget)}` : t('newest first')}</span>
   </div>
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (the arrows between the boxes; each box is a button) -->
   <div class="strip" role="list" onkeydown={keys} onwheel={wheel} onscroll={(e) => nearEnd(e.currentTarget as HTMLElement)}>

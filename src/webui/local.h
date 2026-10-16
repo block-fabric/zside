@@ -12,8 +12,11 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
+class uint256;
 namespace interfaces {
+class Chain;
 class Node;
 } // namespace interfaces
 
@@ -42,6 +45,13 @@ void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm);
 
 /** zSide: what the desktop asks before the viewing key of a wallet is shown (zside.viewingkey.export). */
 Window::ConfirmDialog ViewingKeyConfirmation(const std::string& wallet);
+
+/**
+ * What each output of the coinbase of a block of the wallet pays, by the chain's own words (a short id,
+ * "" for an output it has nothing to say of): the history shows such an output by its role rather than
+ * "Mined" (chain/roles.ts, COINBASE_ROLES). The template has none: empty.
+ */
+std::vector<std::string> CoinbaseRoles(interfaces::Chain& chain, const uint256& block);
 
 } // namespace webui::local
 

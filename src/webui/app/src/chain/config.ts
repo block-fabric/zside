@@ -38,6 +38,8 @@ export interface ChainConfig {
   links: { website?: string; source?: string; issues?: string; guide?: string };
   /** The weight a block of this chain may have (consensus.max_block_weight), for how full its blocks are drawn; Chains' 800 000 when not set. */
   blockWeight?: number;
+  /** The time between blocks this chain aims at, in seconds, for the ribbon of the explorer; Chains' 60 when not set (chain/explorer.ts may say the node's own). */
+  blockTarget?: number;
   /** Pages of the kit this chain does not have (a sidechain: no sidechains of its own, no solo mining). */
   drop: PageId[];
 }

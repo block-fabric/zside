@@ -144,7 +144,7 @@
       : [
           { key: 'status', label: '', value: (r) => r.sortKey, width: '2.6rem', align: 'center', noFilter: true },
           { key: 'date', label: 'Date', value: (r) => r.time, width: '11.5rem' },
-          { key: 'type', label: 'Type', value: (r) => typeText(r.type), width: '10rem' },
+          { key: 'type', label: 'Type', value: (r) => typeText(r.type, r.role), width: '10rem' },
           { key: 'label', label: 'Label', value: (r) => addressText(r, true), width: 'minmax(14rem, 1fr)' },
           { key: 'amount', label: `Amount (${prefs.unit})`, value: (r) => r.amount, width: '12rem', align: 'end' },
         ],
@@ -282,11 +282,11 @@
           oncontext={(r, e) => openMenu(r, e)}
         >
           {#snippet cell(row, column)}
-            <span class="cellwrap {rowClass(row)}" title={column.key === 'label' ? `${statusText(row)}\n${typeText(row.type)} ${addressText(row, true)}` : undefined}>
+            <span class="cellwrap {rowClass(row)}" title={column.key === 'label' ? `${statusText(row)}\n${typeText(row.type, row.role)} ${addressText(row, true)}` : undefined}>
               {#if column.key === 'status'}<TxStatusIcon record={row} />
               {:else if column.key === 'date'}{narrow ? formatTime(row.time, true) : formatTime(row.time)}
-              {:else if column.key === 'type'}<span class="type {row.type}"><Icon name={row.type === 'mined' ? 'mine' : row.amount < 0n ? 'send' : 'receive'} size={14} /> {typeText(row.type) || 'Other'}</span>
-              {:else if column.key === 'label'}{#if narrow}<span class="type {row.type}" title={typeText(row.type) || 'Other'}><Icon name={row.type === 'mined' ? 'mine' : row.amount < 0n ? 'send' : 'receive'} size={14} /></span> {/if}<span class:bare={!row.label} translate="no">{addressText(row)}</span>
+              {:else if column.key === 'type'}<span class="type {row.type}"><Icon name={row.type === 'mined' ? 'mine' : row.amount < 0n ? 'send' : 'receive'} size={14} /> {typeText(row.type, row.role) || 'Other'}</span>
+              {:else if column.key === 'label'}{#if narrow}<span class="type {row.type}" title={typeText(row.type, row.role) || 'Other'}><Icon name={row.type === 'mined' ? 'mine' : row.amount < 0n ? 'send' : 'receive'} size={14} /></span> {/if}<span class:bare={!row.label} translate="no">{addressText(row)}</span>
               {:else if column.key === 'amount'}
                 {#if prefs.mask}<Amount sats={row.amount} showUnit={false} />
                 {:else}<span class="amt" class:neg={row.amount < 0n} translate="no">{amountText(row, prefs.unit)}</span>{/if}
