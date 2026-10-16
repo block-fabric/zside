@@ -3,11 +3,12 @@
   // workspace tabs or dashboard (doc/webui-layouts.md). Whatever the
   // layout: the same pages, the command palette (Ctrl+K), the notices of new transactions.
   import { untrack } from 'svelte';
+  import { pageTitleSource } from '../lib/uimode.svelte';
   import CommandPalette from '../components/CommandPalette.svelte';
   import TitleStrip from '../components/TitleStrip.svelte';
   import TxNotifier from '../components/TxNotifier.svelte';
   import { closeDetail, detail } from '../lib/detail.svelte';
-  import { go, nav, PAGES } from '../lib/nav.svelte';
+  import { go, nav } from '../lib/nav.svelte';
   import { prefs, wallets } from '../lib/state.svelte';
   import Dashboard from './layouts/Dashboard.svelte';
   import Workspace from './layouts/Workspace.svelte';
@@ -39,7 +40,7 @@
 <div class="frame">
   <!-- The integrated title bar: the workspace's is its top bar; the dashboard has a slim strip. -->
   {#if prefs.layout !== 'workspace'}
-    <TitleStrip title={PAGES[nav.page]?.title ?? ''} detail={wallets.current !== null ? wallets.current || 'default wallet' : ''} />
+    <TitleStrip title={pageTitleSource(nav.page)} detail={wallets.current !== null ? wallets.current || 'default wallet' : ''} />
   {/if}
   <div class="layout">
     {#if prefs.layout === 'workspace'}
