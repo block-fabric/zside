@@ -1,5 +1,5 @@
-// zSide in Simple mode (run_sidechain.py --script zside_simple.js --js-var SIMPLE=true): the default of a first
-// start. The wallet gets coins (a deposit by the helper of the mainchain wallet, merged mining on); then through
+// zSide in Simple mode (run_sidechain.py --script zside_simple.js --js-var SIMPLE=true): as a user chooses it;
+// (a first start is in Advanced). The wallet gets coins (a deposit by the helper of the mainchain wallet, merged mining on); then through
 // the pages of Simple mode: the private balance, coins made private (Make private), a payment with a message
 // to a second wallet from the Send page's "Send privately", and coins made public again; pictures of each in
 // Midnight and Light.
@@ -52,7 +52,7 @@
 
   try {
     await waitFor('the node to run', () => T() && T().app.phase === 'ready' && T().node.tip, 120000);
-    await check('Advanced on a first start (user decision), Simple once chosen', window.__E2E_FIRST_MODE === 'advanced' \&\& T().prefs.uiMode === 'simple', `${window.__E2E_FIRST_MODE} ${T().prefs.uiMode}`);
+    await check('Advanced on a first start (user decision), Simple once chosen', window.__E2E_FIRST_MODE === 'advanced' && T().prefs.uiMode === 'simple', `${window.__E2E_FIRST_MODE} ${T().prefs.uiMode}`);
     await waitFor('the node to reach the mainchain', async () => (await rpc('getmainchaininfo')).connected, 60000);
 
     await rpc('createwallet', ['zs2']);
