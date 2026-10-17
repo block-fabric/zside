@@ -221,7 +221,11 @@ all of it against a live mainchain: `src/webui/test/e2e/run_sidechain.py`.
    block that activated it (`activationheight` in the mainchain's
    `getsidechain`): a main network release without it refuses to start,
    whatever the slot (slot 0 too), a testnet or signet one warns; regtest
-   does not ask for it, nor do the template's own networks. Set
+   does not ask for it (`-sidechainactivationheight` sets it there), nor do
+   the template's own networks. A new node's record of the mainchain starts
+   at that block: it needs nothing below it, which a mainchain node that
+   pruned before it kept the index of BMM accepts cannot give (a record kept
+   from before starts where it did). Set
    `pending_min_score` (a tenth of the
    mainchain's `withdrawal_min_score`: 6480 on main and signet, 30 on testnet)
    and `unproposed_expiry_blocks` (1440 on main and signet, 60 on testnet).

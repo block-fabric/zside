@@ -36,6 +36,8 @@ from test_framework.util import assert_equal, assert_raises_rpc_error, rpc_port
 
 SLOT = 3
 BUNDLE_RETRY_DELAY = 5
+# How far below the tip of the record commitments are checked at startup (Follower::MOVED_CHECK_DEPTH).
+MOVED_CHECK_DEPTH = 100
 
 
 class SidechainRecordTest(BitcoinTestFramework):
@@ -358,6 +360,36 @@ class SidechainRecordTest(BitcoinTestFramework):
             self.start_node(0)
             node.syncmainchain()
         self.wait_until(lambda: node.getbestblockhash() == base)
+
+        self.log.info("At startup, commitments moved in a reorg the node did not act on, and the mainchain went on further than the check reaches: checked from where the record changed")
+        # (Audit 7 B3: the window was measured from the tip of the record after it caught up, and only
+        # the tip was checked again; the blocks below it kept what they did against the old record.)
+        moved = [self.mine() for _ in range(3)]
+        [first_at] = [b["height"] for b in main.blocks if b.get("bmm") == moved[0]]
+
+        def move_deep():
+            del main.blocks[first_at:]
+            main.add_block(branch=6, deposits=[self.deposit(1)])
+            for block_hash in moved:
+                main.add_block(branch=6, bmm=block_hash)
+            for _ in range(MOVED_CHECK_DEPTH + 10):
+                main.add_block(branch=6)
+        self.change_unacted(move_deep)
+        self.stop_node(0)
+        main.fail_from = None
+        with node.assert_debug_log([f"The commitment of block {moved[0]} moved on the mainchain"]):
+            self.start_node(0)
+            node.syncmainchain()
+        self.wait_until(lambda: node.getbestblockhash() == base)
+        assert_equal(self.status(moved[-1]), "invalid")
+        # The next block pays the deposit.
+        balance = node.getbalance()
+        self.mine()
+        assert_equal(node.getbalance(), balance + 1)
+        # Acted on: a restart checks nothing again.
+        with node.assert_debug_log([], unexpected_msgs=["moved on the mainchain", "have no commitment on the mainchain"]):
+            self.restart_node(0)
+            node.syncmainchain()
 
         self.log.info("Rebuilt under other parameters, with a record that disagrees: the chain goes back; what the operator invalidated stays so")
         manual = self.mine()

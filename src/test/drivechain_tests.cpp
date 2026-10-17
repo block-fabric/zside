@@ -1798,6 +1798,95 @@ BOOST_AUTO_TEST_CASE(record_keeps_what_the_follower_needs)
     BOOST_CHECK(record.GetFailure(block_b) == sidechain::Mainchain::Failure::MANUAL);
 }
 
+BOOST_AUTO_TEST_CASE(record_starts_at_the_activation)
+{
+    // A new record starts at the block that activated the sidechain in its slot (audit 7 B4): a
+    // mainchain node that pruned before it kept the index of BMM accepts has nothing below to give.
+    const DBParams params{.path = m_args.GetDataDirBase() / "mainchain_base", .cache_bytes = 1 << 20};
+    const auto block_at{[](int height, std::optional<uint256> bmm = std::nullopt) {
+        sidechain::MainBlock block;
+        block.hash = uint256{static_cast<uint8_t>(height)};
+        block.prev_hash = uint256{static_cast<uint8_t>(height - 1)};
+        block.time = 1000 + height;
+        block.bmm = bmm;
+        block.pending.push_back({uint256{0xc}, static_cast<uint32_t>(height)});
+        return block;
+    }};
+    const uint256 side{0x5a};
+    {
+        sidechain::Mainchain record{params};
+        BOOST_CHECK_EQUAL(record.Base(), 0);
+        BOOST_REQUIRE(record.Start(20));
+        BOOST_CHECK_EQUAL(record.Height(), -1);
+        BOOST_CHECK_EQUAL(record.Base(), 20);
+        for (int h{20}; h <= 25; ++h) BOOST_REQUIRE(record.Append(block_at(h, h == 23 ? std::optional{side} : std::nullopt)));
+        // Not once it has blocks.
+        BOOST_CHECK(!record.Start(0));
+    }
+    sidechain::Mainchain record{params};
+    // Loaded from where it starts.
+    BOOST_CHECK_EQUAL(record.Base(), 20);
+    BOOST_CHECK_EQUAL(record.Height(), 25);
+    BOOST_CHECK(!record.GetBlock(19));
+    BOOST_CHECK(record.GetBlock(20)->hash == uint256{20});
+    BOOST_CHECK(record.HashAt(25) == uint256{25});
+    BOOST_CHECK(!record.HashAt(26));
+    BOOST_CHECK(record.BmmAt(23) == side);
+    BOOST_CHECK(record.CommittedHeight(side) == 23);
+    BOOST_CHECK(record.TimeHeight(1022) == 22);
+    BOOST_CHECK(!record.TimeHeight(1019));
+    BOOST_CHECK(record.SupportedPending(22, 22, uint256{}));
+    BOOST_CHECK(!record.SupportedPending(22, 23, uint256{}));
+    BOOST_CHECK(!record.SupportedPending(19, 0, uint256{}));
+    // Rising from the first block on record, when the window reaches below it.
+    BOOST_CHECK(record.RisingLeader(25, 10, 5, uint256{}));
+    BOOST_CHECK(!record.RisingLeader(25, 10, 6, uint256{}));
+    // Dropped and appended again by height.
+    const auto removed{record.Truncate(22)};
+    BOOST_REQUIRE_EQUAL(removed.size(), 3U);
+    BOOST_CHECK(!record.CommittedHeight(side));
+    BOOST_CHECK_EQUAL(record.Height(), 22);
+    BOOST_REQUIRE(record.Append(block_at(23)));
+    BOOST_CHECK_EQUAL(record.Height(), 23);
+    // All of it dropped: it starts where it did.
+    record.Truncate(10);
+    BOOST_CHECK_EQUAL(record.Height(), -1);
+    BOOST_CHECK_EQUAL(record.Base(), 20);
+}
+
+BOOST_AUTO_TEST_CASE(record_notes_changes_not_acted_on)
+{
+    // Blocks dropped from the record are noted with the drop, on disk, until the follower acted on them
+    // (audit 7 B3): a node stopped in between checks its chain from there at its next start.
+    const DBParams params{.path = m_args.GetDataDirBase() / "mainchain_unacted", .cache_bytes = 1 << 20};
+    {
+        sidechain::Mainchain record{params};
+        BOOST_CHECK(!record.UnactedFrom());
+        for (int h{0}; h <= 10; ++h) {
+            sidechain::MainBlock block;
+            block.hash = uint256{static_cast<uint8_t>(h + 1)};
+            block.prev_hash = uint256{static_cast<uint8_t>(h)};
+            BOOST_REQUIRE(record.Append(block));
+        }
+        // Nothing dropped: nothing noted.
+        record.Truncate(10);
+        BOOST_CHECK(!record.UnactedFrom());
+        record.Truncate(8);
+        BOOST_CHECK(record.UnactedFrom() == 8);
+        // The lowest drop counts.
+        record.Truncate(7);
+        BOOST_CHECK(record.UnactedFrom() == 7);
+    }
+    {
+        sidechain::Mainchain record{params};
+        BOOST_CHECK(record.UnactedFrom() == 7);
+        record.ClearUnacted();
+        BOOST_CHECK(!record.UnactedFrom());
+    }
+    sidechain::Mainchain record{params};
+    BOOST_CHECK(!record.UnactedFrom());
+}
+
 BOOST_AUTO_TEST_CASE(record_format)
 {
     // A block on record round-trips, with the bundles it proposed and those pending after it.

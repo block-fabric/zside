@@ -164,7 +164,8 @@ private:
     static constexpr int CATCH_UP_WINDOW{144};
     /** Once, when the record has caught up: drop from the active chain the blocks the mainchain does not commit to. */
     void CheckActiveChain() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    //! How far below the tip of the mainchain record commitments are checked at start (CheckActiveChain).
+    //! How far below the tip of the mainchain record commitments are checked at start (CheckActiveChain);
+    //! below where the record last changed, if the node stopped before it acted on that.
     static constexpr int MOVED_CHECK_DEPTH{100};
     //! Least time between two calls to the mainchain node on behalf of block headers (Poll).
     static constexpr auto POLL_SPACING{std::chrono::seconds{2}};
@@ -207,6 +208,8 @@ private:
     Mutex m_act_mutex;
     NodeClock::time_point m_last_poll GUARDED_BY(m_mutex){};
     bool m_chain_checked GUARDED_BY(m_mutex){false};
+    //! Counts the times UpdateRecord dropped blocks of the record (see Sync).
+    uint64_t m_record_drops GUARDED_BY(m_mutex){0};
     bool m_slot_checked GUARDED_BY(m_mutex){false};
     //! The bundle whose payout was last asked of the mainchain node, and at which mainchain height.
     std::pair<uint256, int> m_payout_tried GUARDED_BY(m_mutex){uint256{}, -1};

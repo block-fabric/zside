@@ -701,26 +701,44 @@ BOOST_AUTO_TEST_CASE(disconnect_without_undo_data)
 
 BOOST_AUTO_TEST_CASE(headers_waiting_for_commitments_are_bounded)
 {
-    // Anyone can send headers no mainchain block will ever commit to: at most MAX_BMM_WAITING wait, and
-    // past that the oldest of the peer that sent the most goes.
+    // Anyone can send headers no mainchain block will ever commit to: at most MAX_BMM_WAITING wait, at
+    // most MAX_BMM_WAITING_PER_PEER of a peer, and past that the newest of the peer that sent the most
+    // goes (audit 7 B2: the oldest of an honest peer's run is the one that links to the chain).
     LOCK(::cs_main);
     auto& waiting{Chainman().m_bmm_waiting};
     waiting.clear();
+    Chainman().m_bmm_waiting_dropped.clear();
     const auto header{[](uint32_t n) {
         CBlockHeader h;
         h.nNonce = n;
         h.nTime = 7;
         return h;
     }};
-    for (uint32_t i{0}; i < 600; ++i) Chainman().AddBmmWaiting(header(i), /*peer=*/1);
-    for (uint32_t i{600}; i < 1000; ++i) Chainman().AddBmmWaiting(header(i), /*peer=*/2);
+    static_assert(ChainstateManager::MAX_BMM_WAITING == 1000 && ChainstateManager::MAX_BMM_WAITING_PER_PEER == 128);
+    // Peer 1 sends its most; peers 2 to 8, 124 each; peer 9 the rest.
+    uint32_t n{0};
+    for (; n < 128; ++n) Chainman().AddBmmWaiting(header(n), /*peer=*/1);
+    for (int64_t peer{2}; peer <= 8; ++peer) {
+        for (int i{0}; i < 124; ++i, ++n) Chainman().AddBmmWaiting(header(n), peer);
+    }
+    for (; n < 1000; ++n) Chainman().AddBmmWaiting(header(n), /*peer=*/9);
     BOOST_CHECK_EQUAL(waiting.size(), 1000U);
-    Chainman().AddBmmWaiting(header(1000), /*peer=*/2);
+    BOOST_CHECK(Chainman().m_bmm_waiting_dropped.empty());
+    // Over its share, a peer's header is not kept.
+    Chainman().AddBmmWaiting(header(1001), /*peer=*/1);
+    BOOST_CHECK(!waiting.contains(header(1001).GetHash()));
+    BOOST_CHECK(Chainman().m_bmm_waiting_dropped.contains(1));
+    Chainman().m_bmm_waiting_dropped.clear();
+    // Full: peer 1's newest makes room.
+    Chainman().AddBmmWaiting(header(1000), /*peer=*/9);
     BOOST_CHECK_EQUAL(waiting.size(), 1000U);
-    BOOST_CHECK(!waiting.contains(header(0).GetHash()));
-    BOOST_CHECK(waiting.contains(header(1).GetHash()));
-    BOOST_CHECK(waiting.contains(header(600).GetHash()));
+    BOOST_CHECK(!waiting.contains(header(127).GetHash()));
+    BOOST_CHECK(waiting.contains(header(0).GetHash()));
+    BOOST_CHECK(waiting.contains(header(126).GetHash()));
+    BOOST_CHECK(waiting.contains(header(128).GetHash()));
     BOOST_CHECK(waiting.contains(header(1000).GetHash()));
+    BOOST_CHECK(Chainman().m_bmm_waiting_dropped.contains(1));
+    Chainman().m_bmm_waiting_dropped.clear();
     // A header validation looked at, without a peer, takes the peer that sends it later; a peer that
     // sends it again changes nothing.
     Chainman().AddBmmWaiting(header(2000), /*peer=*/-1);
@@ -730,6 +748,7 @@ BOOST_AUTO_TEST_CASE(headers_waiting_for_commitments_are_bounded)
     Chainman().AddBmmWaiting(header(2000), /*peer=*/6);
     BOOST_CHECK_EQUAL(waiting.at(header(2000).GetHash()).peer, 5);
     waiting.clear();
+    Chainman().m_bmm_waiting_dropped.clear();
 }
 
 BOOST_AUTO_TEST_CASE(duplicate_table_ids_refuse_to_load)

@@ -2147,6 +2147,88 @@ struct WaitingLateHooks final : LateCheckedHooks {
 };
 } // namespace
 
+BOOST_FIXTURE_TEST_CASE(waiting_headers_are_dropped_fairly, SidechainSetup)
+{
+    // The waiting set is bounded (audit 7 B2): many inbound peers cannot crowd out the headers of a peer
+    // this node chose; one peer cannot fill it; of peers with as many, the one connected last loses one,
+    // its newest; a peer that loses headers is noted, to be asked again.
+    ChainstateManager& chainman{*m_node.chainman};
+    LOCK(::cs_main);
+    auto& waiting{chainman.m_bmm_waiting};
+    auto& dropped{chainman.m_bmm_waiting_dropped};
+    waiting.clear();
+    dropped.clear();
+    uint32_t next{0};
+    const auto header{[&] {
+        CBlockHeader h;
+        h.nVersion = 0x20000000;
+        h.nNonce = ++next;
+        return h;
+    }};
+    const auto count{[&](int64_t peer) {
+        return std::count_if(waiting.begin(), waiting.end(), [&](const auto& entry) { return entry.second.peer == peer; });
+    }};
+    constexpr size_t RUN{16};
+    // An outbound peer's run, then inbound peers' runs as long, until the set is over full.
+    std::vector<CBlockHeader> outbound;
+    for (size_t i{0}; i < RUN; ++i) {
+        outbound.push_back(header());
+        chainman.AddBmmWaiting(outbound.back(), /*peer=*/1, /*preferred=*/true);
+    }
+    constexpr int64_t FIRST_INBOUND{100};
+    const int64_t inbound_peers{ChainstateManager::MAX_BMM_WAITING / RUN + 4};
+    for (int64_t peer{FIRST_INBOUND}; peer < FIRST_INBOUND + inbound_peers; ++peer) {
+        for (size_t i{0}; i < RUN; ++i) chainman.AddBmmWaiting(header(), peer);
+    }
+    BOOST_CHECK_EQUAL(waiting.size(), ChainstateManager::MAX_BMM_WAITING);
+    for (const CBlockHeader& h : outbound) BOOST_CHECK(waiting.contains(h.GetHash()));
+    BOOST_CHECK(!dropped.contains(1));
+    // The inbound peers share the loss: none lost more than two.
+    for (int64_t peer{FIRST_INBOUND}; peer < FIRST_INBOUND + inbound_peers; ++peer) BOOST_CHECK_GE(count(peer), int64_t(RUN - 2));
+    BOOST_CHECK(dropped.contains(FIRST_INBOUND));
+
+    // An inbound peer with more than any other loses its newest header first.
+    waiting.clear();
+    dropped.clear();
+    std::vector<CBlockHeader> crowded;
+    for (size_t i{0}; i < RUN; ++i) {
+        crowded.push_back(header());
+        chainman.AddBmmWaiting(crowded.back(), /*peer=*/2);
+    }
+    for (int64_t peer{FIRST_INBOUND}; waiting.size() < ChainstateManager::MAX_BMM_WAITING; ++peer) {
+        for (size_t i{0}; i < RUN - 1 && waiting.size() < ChainstateManager::MAX_BMM_WAITING; ++i) chainman.AddBmmWaiting(header(), peer);
+    }
+    chainman.AddBmmWaiting(header(), /*peer=*/FIRST_INBOUND);
+    BOOST_CHECK(dropped.contains(2));
+    BOOST_CHECK(!waiting.contains(crowded.back().GetHash()));
+    BOOST_CHECK(waiting.contains(crowded.front().GetHash()));
+    BOOST_CHECK_EQUAL(count(2), int64_t(RUN - 1));
+
+    // A peer keeps MAX_BMM_WAITING_PER_PEER at most; a header of its own that validation kept without
+    // a peer goes too, once known to be its.
+    waiting.clear();
+    dropped.clear();
+    for (size_t i{0}; i < ChainstateManager::MAX_BMM_WAITING_PER_PEER + 5; ++i) chainman.AddBmmWaiting(header(), /*peer=*/3, /*preferred=*/true);
+    BOOST_CHECK_EQUAL(count(3), int64_t(ChainstateManager::MAX_BMM_WAITING_PER_PEER));
+    BOOST_CHECK(dropped.contains(3));
+    dropped.clear();
+    const CBlockHeader unknown{header()};
+    chainman.AddBmmWaiting(unknown, /*peer=*/-1);
+    BOOST_CHECK(waiting.contains(unknown.GetHash()));
+    chainman.AddBmmWaiting(unknown, /*peer=*/3, /*preferred=*/true);
+    BOOST_CHECK(!waiting.contains(unknown.GetHash()));
+    BOOST_CHECK(dropped.contains(3));
+    // Another peer's is kept, with its peer and whether it is preferred.
+    const CBlockHeader other{header()};
+    chainman.AddBmmWaiting(other, /*peer=*/-1);
+    chainman.AddBmmWaiting(other, /*peer=*/4, /*preferred=*/true);
+    BOOST_REQUIRE(waiting.contains(other.GetHash()));
+    BOOST_CHECK_EQUAL(waiting.at(other.GetHash()).peer, 4);
+    BOOST_CHECK(waiting.at(other.GetHash()).preferred);
+    waiting.clear();
+    dropped.clear();
+}
+
 BOOST_FIXTURE_TEST_CASE(waiting_unchecked_header_is_never_the_nodes_own, SidechainSetup)
 {
     // A header that waits is kept without a peer by validation (a block message: the net layer tells

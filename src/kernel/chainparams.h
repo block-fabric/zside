@@ -160,6 +160,8 @@ public:
         bool enforce_bip94{false};
         //! If set, the chain is a sidechain in this slot of the mainchain.
         std::optional<uint32_t> sidechain_slot{};
+        //! With sidechain_slot: SidechainParams::main_activation_height.
+        int sidechain_activation_height{0};
         //! Drivechain parameters to set, by the name of their field in Consensus::DrivechainParams.
         std::vector<std::pair<std::string, int>> drivechain_params{};
     };

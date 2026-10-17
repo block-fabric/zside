@@ -8334,39 +8334,70 @@ util::Result<void> ChainstateManager::ActivateBestChains()
     return {};
 }
 
-void ChainstateManager::AddBmmWaiting(const CBlockHeader& header, int64_t peer) const
+void ChainstateManager::AddBmmWaiting(const CBlockHeader& header, int64_t peer, bool preferred) const
 {
     AssertLockHeld(::cs_main);
-    static constexpr size_t MAX_BMM_WAITING{1000};
     const uint256 hash{header.GetHash()};
+    // Over its share, a peer's header is not kept (the store tells the net layer to ask it again later).
+    const auto over_share{[&] {
+        if (peer < 0) return false;
+        size_t count{0};
+        for (const auto& [_, waiting] : m_bmm_waiting) count += waiting.peer == peer;
+        return count >= MAX_BMM_WAITING_PER_PEER;
+    }};
     if (const auto it{m_bmm_waiting.find(hash)}; it != m_bmm_waiting.end()) {
         // A header without a peer was looked at by validation; the peer that sent it is the one to keep.
-        if (it->second.peer < 0) it->second.peer = peer;
+        if (it->second.peer < 0 && peer >= 0) {
+            if (over_share()) {
+                m_bmm_waiting.erase(it);
+                m_bmm_waiting_dropped.insert(peer);
+                return;
+            }
+            it->second.peer = peer;
+            it->second.preferred = preferred;
+        }
+        return;
+    }
+    if (over_share()) {
+        m_bmm_waiting_dropped.insert(peer);
         return;
     }
     if (m_bmm_waiting.size() >= MAX_BMM_WAITING) {
+        // The peer with the most headers, among those not preferred if any has one; of peers with as
+        // many, the one connected last. (Peer ids grow with each connection; -1, headers whose peer is
+        // not known yet, counts as a peer.)
         std::map<int64_t, size_t> counts;
-        for (const auto& [_, waiting] : m_bmm_waiting) ++counts[waiting.peer];
-        const int64_t crowded{std::max_element(counts.begin(), counts.end(), [](const auto& a, const auto& b) { return a.second < b.second; })->first};
-        auto oldest{m_bmm_waiting.end()};
-        for (auto it{m_bmm_waiting.begin()}; it != m_bmm_waiting.end(); ++it) {
-            if (it->second.peer == crowded && (oldest == m_bmm_waiting.end() || it->second.sequence < oldest->second.sequence)) oldest = it;
+        bool any_other{false};
+        for (const auto& [_, waiting] : m_bmm_waiting) any_other |= !waiting.preferred;
+        for (const auto& [_, waiting] : m_bmm_waiting) {
+            if (!any_other || !waiting.preferred) ++counts[waiting.peer];
         }
-        m_bmm_waiting.erase(oldest);
+        int64_t crowded{counts.begin()->first};
+        for (const auto& [id, count] : counts) {
+            if (count >= counts.at(crowded)) crowded = id;
+        }
+        // Its newest header.
+        auto newest{m_bmm_waiting.end()};
+        for (auto it{m_bmm_waiting.begin()}; it != m_bmm_waiting.end(); ++it) {
+            if (it->second.peer != crowded || (any_other && it->second.preferred)) continue;
+            if (newest == m_bmm_waiting.end() || it->second.sequence > newest->second.sequence) newest = it;
+        }
+        m_bmm_waiting.erase(newest);
+        if (crowded >= 0) m_bmm_waiting_dropped.insert(crowded);
     }
-    m_bmm_waiting.emplace(hash, BmmWaiting{header, peer, m_bmm_waiting_sequence++});
+    m_bmm_waiting.emplace(hash, BmmWaiting{header, peer, m_bmm_waiting_sequence++, preferred});
 }
 
 std::vector<std::pair<uint256, int64_t>> ChainstateManager::RetryBmmWaiting()
 {
     AssertLockNotHeld(::cs_main);
-    std::vector<std::pair<CBlockHeader, int64_t>> pending;
+    std::vector<BmmWaiting> pending;
     {
         LOCK(::cs_main);
         if (!m_mainchain) return {};
-        std::multimap<int64_t, std::pair<CBlockHeader, int64_t>> ready;
+        std::multimap<int64_t, BmmWaiting> ready;
         for (const auto& [_, waiting] : m_bmm_waiting) {
-            if (const auto order{sidechain::Hooks().WaitingReady(waiting.header, *m_mainchain)}) ready.emplace(*order, std::make_pair(waiting.header, waiting.peer));
+            if (const auto order{sidechain::Hooks().WaitingReady(waiting.header, *m_mainchain)}) ready.emplace(*order, waiting);
         }
         for (auto& [_, entry] : ready) pending.push_back(std::move(entry));
     }
@@ -8376,9 +8407,11 @@ std::vector<std::pair<uint256, int64_t>> ChainstateManager::RetryBmmWaiting()
     while (!pending.empty()) {
         // A header the hooks put before its parent (the same key, say) is tried again after it, as long
         // as each pass takes another header in.
-        std::vector<std::pair<CBlockHeader, int64_t>> orphans;
+        std::vector<BmmWaiting> orphans;
         bool progress{false};
-        for (const auto& [header, peer] : pending) {
+        for (const BmmWaiting& entry : pending) {
+            const CBlockHeader& header{entry.header};
+            const int64_t peer{entry.peer};
             const uint256 hash{header.GetHash()};
             BlockValidationState state;
             const CBlockIndex* pindex{nullptr};
@@ -8393,10 +8426,10 @@ std::vector<std::pair<uint256, int64_t>> ChainstateManager::RetryBmmWaiting()
                 taken.emplace_back(hash, from);
                 progress = true;
             } else if (state.GetResult() == BlockValidationResult::BLOCK_MISSING_PREV) {
-                orphans.emplace_back(header, peer);
+                orphans.push_back(entry);
             } else if (state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE && sidechain::Hooks().IsWaitReason(state.GetRejectReason())) {
                 // Still waiting: kept, with its peer (put back if it was made room for meanwhile).
-                AddBmmWaiting(header, peer);
+                AddBmmWaiting(header, peer, entry.preferred);
             } else if (it != m_bmm_waiting.end()) {
                 m_bmm_waiting.erase(it);
             }
@@ -8407,8 +8440,8 @@ std::vector<std::pair<uint256, int64_t>> ChainstateManager::RetryBmmWaiting()
     // Headers whose parent did not come: they wait as long as it does. Of a parent not waiting, the
     // peer that sent them sends the rest of its chain when asked, as for any header.
     LOCK(::cs_main);
-    for (const auto& [header, _] : pending) {
-        if (!m_bmm_waiting.contains(header.hashPrevBlock)) m_bmm_waiting.erase(header.GetHash());
+    for (const BmmWaiting& entry : pending) {
+        if (!m_bmm_waiting.contains(entry.header.hashPrevBlock)) m_bmm_waiting.erase(entry.header.GetHash());
     }
     return taken;
 }
