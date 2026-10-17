@@ -957,6 +957,8 @@ interfaces::WalletLoader& WalletApi::Loader() const
 
 dialog::Answer WalletApi::Ask(const Window::ConfirmDialog& dialog) const
 {
+    // Every fact of a confirmation shown, none cut: more than a dialog shows is refused instead.
+    if (dialog.rows.size() > dialog::MAX_ROWS) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("Too much for one question (%u facts; at most %u): make it in parts", dialog.rows.size(), dialog::MAX_ROWS));
     // Without a way to ask (a test that gives none), nothing is accepted.
     return m_ask ? m_ask(dialog) : dialog::Answer{};
 }

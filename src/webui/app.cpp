@@ -780,6 +780,8 @@ bool App::Confirm(const Window::ConfirmDialog& confirm)
 
 dialog::Answer App::AskHost(const Window::ConfirmDialog& confirm)
 {
+    // Every fact of a confirmation shown, none cut: more than a dialog shows is refused instead.
+    if (confirm.rows.size() > dialog::MAX_ROWS) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("Too much for one question (%u facts; at most %u): make it in parts", confirm.rows.size(), dialog::MAX_ROWS));
     const std::string kind{confirm.kind.empty() ? confirm.title : confirm.kind};
     Window::ConfirmDialog shown{confirm};
     {

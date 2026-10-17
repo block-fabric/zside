@@ -812,6 +812,11 @@ private:
     /** The dialog of GTK, modal to the window; Cancel is the default response. */
     void OpenNative(const dialog::Request& request, Done done)
     {
+        if (request.rows.size() > dialog::MAX_NATIVE_ROWS) {
+            // The dialog of GTK does not scroll: facts off the screen are never accepted unseen.
+            LogWarning("webui: no dialog window for a question of %u facts: declined", request.rows.size());
+            return Finish(done, {});
+        }
         const UniValue page{dialog::PageData(request)};
         const std::string title{page.find_value("title").get_str()};
         const std::string message{dialog::FallbackText(page)};

@@ -397,10 +397,10 @@ BOOST_AUTO_TEST_CASE(rows_of_facts)
     BOOST_CHECK_EQUAL(page["error"].get_str(), "The passphrase was not correct.");
     // Never a fact dropped without a word: past the most shown, the count of the rest.
     dialog::Request many{Sample()};
-    for (int i{0}; i < 100; ++i) many.rows.push_back({"Pay to", "rchn1q" + std::to_string(i), dialog::Row::Kind::ADDRESS});
+    for (size_t i{0}; i < dialog::MAX_ROWS + 20; ++i) many.rows.push_back({"Pay to", "rchn1q" + std::to_string(i), dialog::Row::Kind::ADDRESS});
     const UniValue many_rows{dialog::PageData(many)["rows"]};
-    BOOST_CHECK_EQUAL(many_rows.size(), 81U);
-    BOOST_CHECK_EQUAL(many_rows[80]["value"].get_str(), "… and 20 more");
+    BOOST_CHECK_EQUAL(many_rows.size(), dialog::MAX_ROWS + 1);
+    BOOST_CHECK_EQUAL(many_rows[dialog::MAX_ROWS]["value"].get_str(), "… and 20 more");
     // The dialog of the system says them too, one a line.
     const std::string text{dialog::FallbackText(page)};
     BOOST_CHECK(text.find("Pay to: rchn1q evil") != std::string::npos);

@@ -145,7 +145,7 @@ public:
     UniValue Call(const UniValue& params);
 
     /** At most this many calls in one rpc.confirmed. */
-    static constexpr size_t MAX_CALLS{1000};
+    static constexpr size_t MAX_CALLS{100};
 
 private:
     NodeFn m_node;

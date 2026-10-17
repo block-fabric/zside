@@ -1003,6 +1003,11 @@ private:
             LogWarning("webui: no dialog window for a passphrase: declined");
             return Finish(done, {});
         }
+        if (request.rows.size() > dialog::MAX_NATIVE_ROWS) {
+            // A message box does not scroll: facts off the screen are never accepted unseen.
+            LogWarning("webui: no dialog window for a question of %u facts: declined", request.rows.size());
+            return Finish(done, {});
+        }
         const std::string message{dialog::FallbackText(page)};
         m_native = true;
         m_native_title = page.find_value("title").get_str();

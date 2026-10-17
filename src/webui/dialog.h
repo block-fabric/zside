@@ -54,8 +54,13 @@ inline constexpr int READY_TIMEOUT_MS{10000};
 //! How grave what is asked is: the colour of the icon and of the button that accepts.
 enum class Level { INFO, WARNING, DANGER };
 
-//! The most rows (Row) a dialog shows; more are cut. A confirmation never has more (confirm.cpp refuses it instead).
-constexpr size_t MAX_ROWS{80};
+//! The most rows (Row) a dialog shows, in a list that scrolls: every payment of a batch of 1500 recipients (Thunder's part)
+//! with its amount. A confirmation never has more: the host refuses to ask it rather than cut it (App::AskHost,
+//! WalletApi::Ask, confirm.cpp); the page cuts what is over only as a last guard.
+constexpr size_t MAX_ROWS{5000};
+//! The most rows the dialog of the system (the fallback, which does not scroll) is trusted to show whole: a question with
+//! more is declined there, never answered with facts off the screen.
+constexpr size_t MAX_NATIVE_ROWS{40};
 
 /**
  * A fact the dialog shows apart from its text, on a line of its own: what a spend pays and to whom, what a vote

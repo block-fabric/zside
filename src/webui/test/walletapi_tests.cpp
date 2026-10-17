@@ -817,6 +817,22 @@ BOOST_AUTO_TEST_CASE(keys_for_one_call)
             return std::make_pair(e.code, UniValue{});
         }
     }};
+    // A confirmation is never cut: one with more facts than a dialog shows is refused, not asked, and nothing runs.
+    {
+        webui::Window::ConfirmDialog huge;
+        huge.title = "Pay";
+        for (size_t i{0}; i <= webui::dialog::MAX_ROWS; ++i) huge.rows.push_back({"To", strprintf("address %u", i), webui::dialog::Row::Kind::ADDRESS});
+        bool ran{false};
+        asked.clear();
+        try {
+            api->WithKeys("k", huge, /*always=*/true, /*fee_unknown=*/false, [&] { ran = true; return UniValue{}; });
+            BOOST_ERROR("asked");
+        } catch (const webui::HostError& e) {
+            BOOST_CHECK_EQUAL(e.code, webui::BRIDGE_INVALID_REQUEST);
+        }
+        BOOST_CHECK(!ran);
+        BOOST_CHECK(asked.empty());
+    }
     const UniValue sign{Obj({{"method", "signmessage"}, {"params", List({UniValue{a}, UniValue{"I own this"}})}})};
     asked.clear();
     BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"calls", List({sign})}})).first, webui::BRIDGE_CANCELLED);
@@ -930,12 +946,16 @@ BOOST_AUTO_TEST_CASE(keys_for_one_call)
     BOOST_CHECK(RowOf(asked[0], "Message", RowOf(asked[0], "Message") + 1) > 0);
     BOOST_CHECK(RowOf(asked[0], "1 of 2") >= 0);
     BOOST_CHECK(RowOf(asked[0], "2 of 2") > RowOf(asked[0], "1 of 2"));
+    // As many as one question takes: every one of them shown; one more, refused.
     UniValue many{UniValue::VARR};
-    for (int i{0}; i < 30; ++i) many.push_back(sign);
-    std::string why;
-    BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"calls", many}}), &why).first, webui::BRIDGE_INVALID_REQUEST);
-    BOOST_CHECK(why.find("Too much for one question") != std::string::npos);
-    BOOST_CHECK_EQUAL(asked.size(), 1U);
+    for (size_t i{0}; i < webui::confirm::ConfirmedRpc::MAX_CALLS; ++i) many.push_back(sign);
+    BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"calls", many}})).first, webui::BRIDGE_CANCELLED);
+    BOOST_REQUIRE_EQUAL(asked.size(), 2U);
+    BOOST_CHECK(asked[1].rows.size() <= webui::dialog::MAX_ROWS);
+    BOOST_CHECK_EQUAL(std::ranges::count_if(asked[1].rows, [&](const webui::dialog::Row& r) { return r.label == "Address"; }), static_cast<long>(webui::confirm::ConfirmedRpc::MAX_CALLS));
+    many.push_back(sign);
+    BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"calls", many}})).first, webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(asked.size(), 2U);
 #endif
 }
 
