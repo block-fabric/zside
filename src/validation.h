@@ -1306,15 +1306,34 @@ public:
         //! The peer that sent it, -1 if not known (validation looked at it; the net layer tells who sent it).
         int64_t peer{-1};
         uint64_t sequence{0};
+        //! Sent by a peer this node chose (an outbound connection): kept before those of other peers
+        //! when the store makes room.
+        bool preferred{false};
     };
+    //! How many headers the store keeps at most.
+    static constexpr size_t MAX_BMM_WAITING{1000};
+    //! How many headers of one peer the store keeps at most (a headers message adds 16 at most).
+    static constexpr size_t MAX_BMM_WAITING_PER_PEER{128};
     mutable std::map<uint256, BmmWaiting> m_bmm_waiting GUARDED_BY(::cs_main);
     mutable uint64_t m_bmm_waiting_sequence GUARDED_BY(::cs_main){0};
     /**
-     * Remember a header the mainchain has not committed to yet. The headers kept are bounded;
-     * a full store makes room by dropping the oldest header of the peer that has the most, so
-     * that a peer flooding it with headers that will never be committed to only crowds out its own.
+     * The peers whose waiting headers the store dropped (to make room, or over their share): the net
+     * layer asks them for their headers again once the record or the chain moved on
+     * (PeerManagerImpl::SendMessages), as it does for the headers left out of a message. Without this, a
+     * peer whose headers others crowded out would never be asked again before it announced a new block.
      */
-    void AddBmmWaiting(const CBlockHeader& header, int64_t peer) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    mutable std::set<int64_t> m_bmm_waiting_dropped GUARDED_BY(::cs_main);
+    /**
+     * Remember a header the mainchain has not committed to yet. The headers kept are bounded, overall
+     * (MAX_BMM_WAITING) and per peer (MAX_BMM_WAITING_PER_PEER, over which a peer's header is not kept).
+     * A full store makes room by dropping the newest header of the peer with the most, among the peers
+     * not `preferred` if any has one (inbound peers, which anyone can open many of, cannot crowd out
+     * those of the peers this node chose); of peers with as many, the one connected last (the highest
+     * id). A peer flooding the store with headers that will never be committed to crowds out its own;
+     * the newest of a peer's headers goes, so that what is left of an honest peer's run is the part
+     * that links to the chain. A peer whose header is dropped goes to m_bmm_waiting_dropped.
+     */
+    void AddBmmWaiting(const CBlockHeader& header, int64_t peer, bool preferred = false) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * The source of a header whose sender is not known (a waiting header kept with peer -1, tried
      * again): unlike -1, the node's own, it holds no unchecked header (m_unchecked), so it is taken in

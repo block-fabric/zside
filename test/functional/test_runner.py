@@ -177,6 +177,7 @@ BASE_SCRIPTS = [
     'feature_sidechain_headers.py',
     'feature_sidechain_catchup.py',
     'feature_sidechain_prune.py',
+    'feature_sidechain_mainchain_pruned.py',
     'feature_sidechain_follower.py',
     'feature_sidechain_rules.py',
     'feature_sidechain_record.py',

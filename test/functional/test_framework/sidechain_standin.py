@@ -35,6 +35,9 @@ class StandInMainchain:
         self.no_proposed = False
         # getsidechainevents from this height on answers an error.
         self.fail_from = None
+        # getsidechainevents below this height answers the error of a mainchain node that pruned those
+        # blocks before it kept the index of BMM accepts.
+        self.unavailable_below = None
         # getsidechainevents answers, at this height, a block that does not follow the one before.
         self.stray_at = None
         # method -> error message to answer with, or HTTP status to answer with and no JSON.
@@ -83,6 +86,8 @@ class StandInMainchain:
     def events(self, height, count):
         if self.fail_from is not None and height >= self.fail_from:
             return None, {"code": -1, "message": "the stand-in is not answering this now"}
+        if self.unavailable_below is not None and height < self.unavailable_below:
+            return None, {"code": -1, "message": f"Block {height} is not available (pruned?)"}
         answer = [dict(block) for block in self.blocks[height:height + count]]
         for block in answer:
             if block["height"] == self.stray_at:

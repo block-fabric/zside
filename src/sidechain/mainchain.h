@@ -118,6 +118,18 @@ public:
 
     /** Height of the last block on record, -1 if there is none. */
     int Height() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Height of the first block on record (where the record starts: 0, or the block that activated
+     * this sidechain in its slot, Start). A record kept from before starts where its first block is.
+     */
+    int Base() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Have an empty record start at `height`: the first block appended is the mainchain's block at that
+     * height. Below the block that activated this sidechain in its slot, the mainchain did nothing
+     * for it (State::ApplyMainEvents leaves it out), and a mainchain node may not have it all to give
+     * (pruned). @return false if the record is not empty.
+     */
+    bool Start(int height) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Hash of the last block on record; null if there is none. */
     uint256 TipHash() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     std::optional<MainBlock> GetBlock(int height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -190,8 +202,19 @@ public:
 
     /** Add the block that follows the last one on record. @return false if it does not follow it. */
     bool Append(const MainBlock& block) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /** Forget the blocks above `height`. @return the forgotten blocks, lowest first. */
+    /**
+     * Forget the blocks above `height`. @return the forgotten blocks, lowest first. Notes, with them,
+     * that the record changed above `height` (UnactedFrom), until ClearUnacted.
+     */
     std::vector<MainBlock> Truncate(int height) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * The lowest height above which the record dropped blocks since the follower last acted on all its
+     * changes (ClearUnacted): kept on disk, so that a node stopped in between knows how far down to
+     * check its chain at its next start (Follower::CheckActiveChain).
+     */
+    std::optional<int> UnactedFrom() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** The follower acted on every change of the record. */
+    void ClearUnacted() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
      * While an object of this class lives, sidechain blocks that no mainchain
@@ -232,6 +255,12 @@ private:
     std::map<uint256, Failure> m_failures GUARDED_BY(m_mutex);
     std::optional<SlotIdentity> m_slot_identity GUARDED_BY(m_mutex);
     std::optional<int> m_assumed_height GUARDED_BY(m_mutex);
+    //! Height of the first block of m_blocks (Base).
+    int m_base GUARDED_BY(m_mutex){0};
+    //! See UnactedFrom.
+    std::optional<int> m_unacted GUARDED_BY(m_mutex);
+    /** The block on record at `height`, if any. */
+    const MainBlock* At(int height) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     std::unique_ptr<CDBWrapper> m_db;
 };
 

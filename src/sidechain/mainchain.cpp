@@ -6,6 +6,7 @@
 
 #include <logging.h>
 #include <tinyformat.h>
+#include <util/check.h>
 #include <util/fs.h>
 
 #include <algorithm>
@@ -24,6 +25,8 @@ constexpr uint32_t RECORD_VERSION{3};
 constexpr uint8_t DB_SLOT_IDENTITY{'i'};
 //! Why blocks of this chain failed (Mainchain::Failure), by hash.
 constexpr uint8_t DB_FAILURE{'F'};
+//! The height above which the record changed (blocks dropped) and the follower has not acted on it yet.
+constexpr uint8_t DB_UNACTED{'u'};
 
 /** Key of a block: its height, big endian so that the blocks are stored in order. */
 struct BlockKey {
@@ -62,14 +65,20 @@ Mainchain::Mainchain(const std::optional<DBParams>& db_params)
     for (it->Seek(BlockKey{0}); it->Valid(); it->Next()) {
         BlockKey key;
         MainBlock block;
-        if (!it->GetKey(key) || key.height != m_blocks.size() || !it->GetValue(block)) break;
+        if (!it->GetKey(key)) break;
+        // The record starts where its first block is (Start).
+        if (m_blocks.empty()) m_base = static_cast<int>(key.height);
+        const int height{m_base + static_cast<int>(m_blocks.size())};
+        if (key.height != static_cast<uint32_t>(height) || !it->GetValue(block)) break;
         // The record is only as long as it is consistent.
         if (!m_blocks.empty() && block.prev_hash != m_blocks.back().hash) break;
-        if (block.bmm) m_bmm.emplace(*block.bmm, m_blocks.size());
-        IndexEvents(block, m_blocks.size(), /*add=*/true);
+        if (block.bmm) m_bmm.emplace(*block.bmm, height);
+        IndexEvents(block, height, /*add=*/true);
         m_blocks.push_back(std::move(block));
     }
+    if (m_blocks.empty()) m_base = 0;
     if (SlotIdentity identity; m_db->Read(DB_SLOT_IDENTITY, identity)) m_slot_identity = identity;
+    if (int32_t unacted; m_db->Read(DB_UNACTED, unacted)) m_unacted = unacted;
     {
         const std::unique_ptr<CDBIterator> failures{m_db->NewIterator()};
         for (failures->Seek(std::make_pair(DB_FAILURE, uint256{})); failures->Valid(); failures->Next()) {
@@ -79,13 +88,34 @@ Mainchain::Mainchain(const std::optional<DBParams>& db_params)
             m_failures.emplace(key.second, static_cast<Failure>(failure));
         }
     }
-    LogInfo("Loaded the record of %d mainchain blocks", m_blocks.size());
+    LogInfo("Loaded the record of %d mainchain blocks%s", m_blocks.size(), m_base > 0 ? strprintf(" from height %d", m_base) : "");
 }
 
 int Mainchain::Height() const
 {
     LOCK(m_mutex);
-    return static_cast<int>(m_blocks.size()) - 1;
+    return m_blocks.empty() ? -1 : m_base + static_cast<int>(m_blocks.size()) - 1;
+}
+
+int Mainchain::Base() const
+{
+    LOCK(m_mutex);
+    return m_base;
+}
+
+bool Mainchain::Start(int height)
+{
+    LOCK(m_mutex);
+    if (!m_blocks.empty() || height < 0) return false;
+    m_base = height;
+    return true;
+}
+
+const MainBlock* Mainchain::At(int height) const
+{
+    AssertLockHeld(m_mutex);
+    if (height < m_base || height - m_base >= static_cast<int>(m_blocks.size())) return nullptr;
+    return &m_blocks[height - m_base];
 }
 
 uint256 Mainchain::TipHash() const
@@ -97,8 +127,9 @@ uint256 Mainchain::TipHash() const
 std::optional<MainBlock> Mainchain::GetBlock(int height) const
 {
     LOCK(m_mutex);
-    if (height < 0 || height >= static_cast<int>(m_blocks.size())) return std::nullopt;
-    return m_blocks[height];
+    const MainBlock* const block{At(height)};
+    if (!block) return std::nullopt;
+    return *block;
 }
 
 std::optional<int> Mainchain::CommittedHeight(const uint256& side_hash) const
@@ -183,8 +214,8 @@ bool Mainchain::PendingAfter(const uint256& hash, int height) const
 bool Mainchain::SupportedPending(int main_height, uint32_t min_score, const uint256& ours) const
 {
     LOCK(m_mutex);
-    if (main_height < 0 || m_blocks.empty()) return false;
-    const MainBlock& block{m_blocks[std::min<size_t>(main_height, m_blocks.size() - 1)]};
+    if (main_height < m_base || m_blocks.empty()) return false;
+    const MainBlock& block{*Assert(At(std::min(main_height, m_base + static_cast<int>(m_blocks.size()) - 1)))};
     return std::any_of(block.pending.begin(), block.pending.end(), [&](const MainPendingBundle& bundle) {
         return bundle.hash != ours && bundle.score >= min_score;
     });
@@ -193,9 +224,9 @@ bool Mainchain::SupportedPending(int main_height, uint32_t min_score, const uint
 bool Mainchain::RisingLeader(int main_height, int window, uint32_t min_rise, const uint256& ours) const
 {
     LOCK(m_mutex);
-    if (main_height < 0 || m_blocks.empty()) return false;
-    const int at{std::min(main_height, static_cast<int>(m_blocks.size()) - 1)};
-    const std::vector<MainPendingBundle>& pending{m_blocks[at].pending};
+    if (main_height < m_base || m_blocks.empty()) return false;
+    const int at{std::min(main_height, m_base + static_cast<int>(m_blocks.size()) - 1)};
+    const std::vector<MainPendingBundle>& pending{Assert(At(at))->pending};
     // The leader: the one score above all others. A tie leads nobody (as LEADING_BY_50 sees it).
     const MainPendingBundle* leader{nullptr};
     bool tie{false};
@@ -211,7 +242,7 @@ bool Mainchain::RisingLeader(int main_height, int window, uint32_t min_rise, con
     // Its score `window` blocks before (or after the first block on record, if fewer); a bundle
     // proposed since started at NEW_BUNDLE_SCORE (1).
     uint32_t before{1};
-    for (const MainPendingBundle& bundle : m_blocks[std::max(at - window, 0)].pending) {
+    for (const MainPendingBundle& bundle : Assert(At(std::max(at - window, m_base)))->pending) {
         if (bundle.hash == leader->hash) before = bundle.score;
     }
     return leader->score >= before + min_rise;
@@ -220,15 +251,17 @@ bool Mainchain::RisingLeader(int main_height, int window, uint32_t min_rise, con
 std::optional<uint256> Mainchain::BmmAt(int height) const
 {
     LOCK(m_mutex);
-    if (height < 0 || height >= static_cast<int>(m_blocks.size())) return std::nullopt;
-    return m_blocks[height].bmm;
+    const MainBlock* const block{At(height)};
+    if (!block) return std::nullopt;
+    return block->bmm;
 }
 
 std::optional<uint256> Mainchain::HashAt(int height) const
 {
     LOCK(m_mutex);
-    if (height < 0 || height >= static_cast<int>(m_blocks.size())) return std::nullopt;
-    return m_blocks[height].hash;
+    const MainBlock* const block{At(height)};
+    if (!block) return std::nullopt;
+    return block->hash;
 }
 
 std::optional<int> Mainchain::TimeHeight(int64_t time) const
@@ -236,7 +269,7 @@ std::optional<int> Mainchain::TimeHeight(int64_t time) const
     LOCK(m_mutex);
     const auto after{std::partition_point(m_blocks.begin(), m_blocks.end(), [&](const MainBlock& block) { return block.time <= time; })};
     if (after == m_blocks.begin()) return std::nullopt;
-    return static_cast<int>(after - m_blocks.begin()) - 1;
+    return m_base + static_cast<int>(after - m_blocks.begin()) - 1;
 }
 
 void Mainchain::NoteFailure(const uint256& block_hash, Failure failure)
@@ -306,10 +339,11 @@ bool Mainchain::Append(const MainBlock& block)
 {
     LOCK(m_mutex);
     if (!m_blocks.empty() && block.prev_hash != m_blocks.back().hash) return false;
+    const int height{m_base + static_cast<int>(m_blocks.size())};
     // A sidechain block has one place in the mainchain; a second commitment to it means nothing.
-    if (block.bmm) m_bmm.emplace(*block.bmm, m_blocks.size());
-    IndexEvents(block, m_blocks.size(), /*add=*/true);
-    if (m_db) m_db->Write(BlockKey{static_cast<uint32_t>(m_blocks.size())}, block);
+    if (block.bmm) m_bmm.emplace(*block.bmm, height);
+    IndexEvents(block, height, /*add=*/true);
+    if (m_db) m_db->Write(BlockKey{static_cast<uint32_t>(height)}, block);
     m_blocks.push_back(block);
     return true;
 }
@@ -318,22 +352,43 @@ std::vector<MainBlock> Mainchain::Truncate(int height)
 {
     LOCK(m_mutex);
     std::vector<MainBlock> removed;
-    const size_t keep{height < 0 ? 0 : static_cast<size_t>(height) + 1};
+    const size_t keep{height < m_base ? 0 : static_cast<size_t>(height - m_base) + 1};
     if (keep >= m_blocks.size()) return removed;
     removed.assign(m_blocks.begin() + keep, m_blocks.end());
+    // What the follower acts on when blocks are dropped is kept in memory until it has; noted with the
+    // drop (in the same write), a node that stops in between checks its chain from there at its next
+    // start (Follower::CheckActiveChain).
+    const int unacted{m_unacted ? std::min(*m_unacted, height) : height};
     if (m_db) {
         CDBBatch batch{*m_db};
-        for (size_t i{keep}; i < m_blocks.size(); ++i) batch.Erase(BlockKey{static_cast<uint32_t>(i)});
+        for (size_t i{keep}; i < m_blocks.size(); ++i) batch.Erase(BlockKey{static_cast<uint32_t>(m_base + i)});
+        batch.Write(DB_UNACTED, int32_t{unacted});
         m_db->WriteBatch(batch, /*fSync=*/true);
     }
+    m_unacted = unacted;
     for (size_t i{keep}; i < m_blocks.size(); ++i) {
-        IndexEvents(m_blocks[i], i, /*add=*/false);
+        const int at{m_base + static_cast<int>(i)};
+        IndexEvents(m_blocks[i], at, /*add=*/false);
         if (!m_blocks[i].bmm) continue;
         const auto it{m_bmm.find(*m_blocks[i].bmm)};
-        if (it != m_bmm.end() && it->second == static_cast<int>(i)) m_bmm.erase(it);
+        if (it != m_bmm.end() && it->second == at) m_bmm.erase(it);
     }
     m_blocks.resize(keep);
     return removed;
+}
+
+std::optional<int> Mainchain::UnactedFrom() const
+{
+    LOCK(m_mutex);
+    return m_unacted;
+}
+
+void Mainchain::ClearUnacted()
+{
+    LOCK(m_mutex);
+    if (!m_unacted) return;
+    m_unacted.reset();
+    if (m_db) m_db->Erase(DB_UNACTED, /*fSync=*/true);
 }
 
 } // namespace sidechain

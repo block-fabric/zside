@@ -49,6 +49,7 @@
 #include <random.h>
 #include <scheduler.h>
 #include <sidechain/hooks.h>
+#include <sidechain/mainchain.h>
 #include <script/script.h>
 #include <serialize.h>
 #include <span.h>
@@ -400,12 +401,24 @@ struct Peer {
     /** Time of the last getheaders message to this peer */
     NodeClock::time_point m_last_getheaders_timestamp GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /**
-     * The tip when a header of this peer's failed through no fault of its own (a sidechain's header
-     * the node could not take yet: BLOCK_TIME_FUTURE that does not wait, BLOCK_HEADER_LOW_WORK), or
-     * when headers waiting for their commitment were left out of the waiting set (more than it keeps
-     * of a message): its headers are asked for again once the tip moved on from it, when they may be taken.
+     * Where the node stood when a header of this peer's failed through no fault of its own (a
+     * sidechain's header the node could not take yet: BLOCK_TIME_FUTURE that does not wait,
+     * BLOCK_HEADER_LOW_WORK), or when headers waiting for their commitment were left out of the
+     * waiting set (more than it keeps of a message) or dropped from it: its headers are asked for again
+     * once the node moved on from there, when they may be taken.
      */
-    std::optional<uint256> m_headers_retry_after GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+    struct HeadersRetry {
+        //! The tip: asked again once it moved.
+        uint256 tip;
+        //! For headers that wait for the record (left out of the waiting set, or dropped from it): asked
+        //! again also once the best header or the record of the mainchain moved. Those headers may come
+        //! in then; the tip need not move for that (the blocks of the headers that waited may not
+        //! connect yet, or none of this peer's waited any more).
+        bool on_progress{false};
+        uint256 best_header;
+        int record_height{-1};
+    };
+    std::optional<HeadersRetry> m_headers_retry_after GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
     /** Protects m_headers_sync **/
     Mutex m_headers_sync_mutex;
@@ -811,6 +824,10 @@ private:
     bool MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     /** Potentially fetch blocks from this peer upon receipt of a new headers tip */
     void HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header);
+    /** Where the node stands now, for a peer's headers to be asked for again once it moved on (Peer::m_headers_retry_after). */
+    Peer::HeadersRetry HeadersRetryPoint(bool on_progress) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Whether the node moved on from `point` (Peer::HeadersRetry). */
+    bool MovedOnFrom(const Peer::HeadersRetry& point) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Update peer state based on received headers message */
     void UpdatePeerStateForReceivedHeaders(CNode& pfrom, const CBlockIndex& last_header, bool received_new_header, bool may_have_more_headers)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
@@ -1816,6 +1833,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     }
     CNodeState *state = State(nodeid);
     assert(state != nullptr);
+    m_chainman.m_bmm_waiting_dropped.erase(nodeid);
 
     if (state->fSyncStarted)
         nSyncStarted--;
@@ -3208,6 +3226,23 @@ bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& loc
  * We require that the given tip have at least as much work as our tip, and for
  * our current tip to be "close to synced" (see CanDirectFetch()).
  */
+Peer::HeadersRetry PeerManagerImpl::HeadersRetryPoint(bool on_progress) const
+{
+    AssertLockHeld(cs_main);
+    return {.tip = m_chainman.ActiveChain().Tip()->GetBlockHash(),
+            .on_progress = on_progress,
+            .best_header = m_chainman.m_best_header ? m_chainman.m_best_header->GetBlockHash() : uint256{},
+            .record_height = m_chainman.m_mainchain ? m_chainman.m_mainchain->Height() : -1};
+}
+
+bool PeerManagerImpl::MovedOnFrom(const Peer::HeadersRetry& point) const
+{
+    AssertLockHeld(cs_main);
+    const Peer::HeadersRetry now{HeadersRetryPoint(point.on_progress)};
+    if (now.tip != point.tip) return true;
+    return point.on_progress && (now.best_header != point.best_header || now.record_height != point.record_height);
+}
+
 void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header)
 {
     LOCK(cs_main);
@@ -3537,19 +3572,29 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                     const uint256 hash{header.GetHash()};
                     prev = hash;
                     if (m_chainman.m_blockman.LookupBlockIndex(hash)) continue;
-                    m_chainman.AddBmmWaiting(header, pfrom.GetId());
+                    m_chainman.AddBmmWaiting(header, pfrom.GetId(), /*preferred=*/!pfrom.IsInboundConn());
                     if (++kept >= MAX_WAITING_PER_MESSAGE) break;
+                }
+                // The headers taken before the first that waits (their commitments on record, while the
+                // record is still catching up) are the peer's, and their blocks are fetched now: their
+                // children wait, and the blocks of those, fetched once they are taken, would not connect
+                // without them. (The last header of the message, not known, is noted too: it is the
+                // peer's best once taken.)
+                if (pindexLast) {
+                    UpdateBlockAvailability(pfrom.GetId(), pindexLast->GetBlockHash());
+                    HeadersDirectFetchBlocks(pfrom, peer, *pindexLast);
                 }
                 UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash());
                 // Headers left out (beyond those kept, or beyond a message of the largest size): asked
-                // for again once the tip moved, which it does when the kept ones are committed to and
-                // their blocks connected. Without this, a node catching up from a peer whose headers
-                // came before its record of the mainchain had their commitments (a node just started,
-                // following a mainchain node it has not caught up with yet) took the first ones and
-                // never asked that peer for the rest: with no other peer, or none announcing a new
-                // block, it stopped there for good (16 blocks: the headers kept of the first message).
+                // for again once the node moved on: the tip, when the blocks of the kept ones connect, or
+                // the best header or the record of the mainchain, when the kept ones are taken in, or
+                // more commitments are on record (the blocks of the headers taken may not connect yet).
+                // Without this, a node catching up from a peer whose headers came before its record of
+                // the mainchain had their commitments (a node just started, following a mainchain node
+                // it has not caught up with yet) took the first ones and never asked that peer for the
+                // rest: with no other peer, or none announcing a new block, it stopped there for good.
                 if (looked < headers.size() || nCount == m_opts.max_headers_result) {
-                    peer.m_headers_retry_after = m_chainman.ActiveChain().Tip()->GetBlockHash();
+                    peer.m_headers_retry_after = HeadersRetryPoint(/*on_progress=*/true);
                 }
             } else if (pindexLast && (state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE || state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK)) {
                 // The headers taken before the one that failed for a reason that is not the peer's
@@ -3564,7 +3609,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 // unchecked headers, of which a peer holds so many: those whose blocks the node connected
                 // since make room). Without this, a node that had all a peer had room for would not ask
                 // it for more before it announced a new block.
-                peer.m_headers_retry_after = m_chainman.ActiveChain().Tip()->GetBlockHash();
+                peer.m_headers_retry_after = HeadersRetryPoint(/*on_progress=*/false);
             }
             MaybePunishNodeForBlock(pfrom.GetId(), state, via_compact_block, "invalid header received");
             return;
@@ -3919,7 +3964,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         // by validation: this one sent it. The header is taken in, once it can be, within this peer's
         // budget (not as the node's own, ChainstateManager::UNKNOWN_SOURCE), and its block fetched from it.
         if (const auto waiting{m_chainman.m_bmm_waiting.find(block->GetHash())}; waiting != m_chainman.m_bmm_waiting.end() && waiting->second.peer < 0) {
-            waiting->second.peer = node.GetId();
+            m_chainman.AddBmmWaiting(*block, node.GetId(), /*preferred=*/!node.IsInboundConn());
         }
     }
 }
@@ -5077,7 +5122,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                     // And who sent it: the block is fetched from that peer once the header is taken in,
                     // which availability alone does not do for a header with less work than the
                     // peer's best known block (one the record made invalid, say).
-                    m_chainman.AddBmmWaiting(cmpctblock.header, pfrom.GetId());
+                    m_chainman.AddBmmWaiting(cmpctblock.header, pfrom.GetId(), /*preferred=*/!pfrom.IsInboundConn());
                 }
                 MaybePunishNodeForBlock(pfrom.GetId(), state, /*via_compact_block=*/true, "invalid header via cmpctblock");
                 return;
@@ -6477,8 +6522,18 @@ bool PeerManagerImpl::SendMessages(CNode& node)
             }
         }
 
-        // Headers of this peer's that failed through no fault of its own: asked for again once the tip moved.
-        if (peer.m_headers_retry_after && *peer.m_headers_retry_after != m_chainman.ActiveChain().Tip()->GetBlockHash()) {
+        // Headers of this peer's that waited for the record and were dropped from the waiting set (others
+        // crowded them out, or it had too many): asked for again once the node moved on, as for those
+        // left out of a message.
+        if (m_chainman.m_bmm_waiting_dropped.erase(node.GetId())) {
+            if (peer.m_headers_retry_after) {
+                peer.m_headers_retry_after->on_progress = true;
+            } else {
+                peer.m_headers_retry_after = HeadersRetryPoint(/*on_progress=*/true);
+            }
+        }
+        // Headers of this peer's that failed through no fault of its own: asked for again once the node moved on.
+        if (peer.m_headers_retry_after && MovedOnFrom(*peer.m_headers_retry_after)) {
             const CBlockIndex* from{state.pindexBestKnownBlock ? state.pindexBestKnownBlock : m_chainman.m_best_header};
             if (MaybeSendGetHeaders(node, GetLocator(from), peer)) {
                 LogDebug(BCLog::NET, "getheaders (%d) again to peer=%d, its headers refused before through no fault of its own", from->nHeight, node.GetId());

@@ -21,6 +21,7 @@
 #include <util/strencodings.h>
 #include <sidechain/hooks.h>
 #include <sidechain/mainchain.h>
+#include <util/signalinterrupt.h>
 #include <util/threadnames.h>
 #include <util/translation.h>
 #include <txmempool.h>
@@ -157,10 +158,30 @@ Follower::Status Follower::GetStatus() const
 bool Follower::UpdateRecord(bool may_drop)
 {
     Mainchain& record{*Assert(m_node.chainman->m_mainchain)};
-    const uint32_t slot{m_node.chainman->GetConsensus().sidechain.slot};
+    const Consensus::SidechainParams& params{m_node.chainman->GetConsensus().sidechain};
+    const uint32_t slot{params.slot};
     const auto fetch{[&](int height, int count) {
-        return m_client.Call("getsidechainevents", Params({static_cast<uint64_t>(slot), height, count}));
+        try {
+            return m_client.Call("getsidechainevents", Params({static_cast<uint64_t>(slot), height, count}));
+        } catch (const MainClientError& e) {
+            // A mainchain node that pruned blocks before it kept what sidechains need of them (the index
+            // of BMM accepts) cannot give them. Said so, with what to do: retrying does not help.
+            if (!e.rpc_error || e.rpc_message.find("not available") == std::string::npos) throw;
+            throw std::runtime_error(strprintf("The mainchain node cannot give its blocks from height %d on (%s). This node needs every mainchain block from the one "
+                                               "that activated this sidechain in its slot (height %d) on; a mainchain node that pruned its blocks before it kept the "
+                                               "index of BMM accepts does not have them all. Restart that node once with -reindex, or follow one that has them "
+                                               "(-mainchainrpcconnect)",
+                                               height, e.rpc_message, params.main_activation_height));
+        }
     }};
+    // A new record starts at the block that activated this sidechain in its slot: what the mainchain
+    // did before it is not this chain's (State::ApplyMainEvents), and a mainchain node that pruned
+    // before it kept the index of BMM accepts cannot give it. (A record kept from before starts where
+    // it did, at 0 for one written by an earlier release.)
+    if (record.Height() < 0 && record.Base() != params.main_activation_height && record.Start(params.main_activation_height) && params.main_activation_height > 0) {
+        LogInfo("The record of the mainchain starts at height %d, the block that activated this sidechain in slot %u", params.main_activation_height, slot);
+    }
+    const int base{record.Base()};
 
     bool changed{false};
     // Before blocks on record are dropped, which cannot be taken back, the slot is checked to hold the
@@ -178,12 +199,13 @@ bool Follower::UpdateRecord(bool may_drop)
     // waits for the operator (syncmainchain with allowdeepreorg): a wrong or lying mainchain node
     // could otherwise make this node drop its chain.
     const auto before_drop{[&](int keep) {
-        const UniValue first{fetch(0, 1)};
-        const auto genesis{record.GetBlock(0)};
+        // (The first block on record: the mainchain's first, or the one the record starts at.)
+        const UniValue first{fetch(base, 1)};
+        const auto genesis{record.GetBlock(base)};
         if (first.empty() || !genesis || Hash256(first[0]["hash"]) != genesis->hash) {
-            throw std::runtime_error(strprintf("The mainchain node is on another chain than the one on record (its first block is %s, the record's %s); "
+            throw std::runtime_error(strprintf("The mainchain node is on another chain than the one on record (its block at height %d is %s, the record's %s); "
                                                "check -mainchainrpcconnect and -mainchainrpcport",
-                                               first.empty() ? "missing" : first[0]["hash"].getValStr(), genesis ? genesis->hash.ToString() : "missing"));
+                                               base, first.empty() ? "missing" : first[0]["hash"].getValStr(), genesis ? genesis->hash.ToString() : "missing"));
         }
         int commitments{0};
         for (int h{keep + 1}; h <= record.Height(); ++h) {
@@ -203,7 +225,7 @@ bool Follower::UpdateRecord(bool may_drop)
     while (!m_stop) {
         const int height{record.Height()};
         // The block on record is asked for again, to learn whether the mainchain still has it.
-        const UniValue events{fetch(std::max(height, 0), BATCH)};
+        const UniValue events{fetch(height >= 0 ? height : base, BATCH)};
         size_t first_new{0};
         if (height >= 0) {
             if (events.empty() || Hash256(events[0]["hash"]) != record.TipHash()) {
@@ -222,6 +244,10 @@ bool Follower::UpdateRecord(bool may_drop)
                 // record's block at that height. It has dropped nothing; it catches up.
                 if (events.empty()) {
                     const int node_height{m_client.Call("getblockcount", UniValue{UniValue::VARR}).getInt<int>()};
+                    if (node_height >= 0 && node_height < base) {
+                        throw std::runtime_error(strprintf("The mainchain node is behind the record (at height %d, the record starts at %d); waiting for it to catch up",
+                                                           node_height, base));
+                    }
                     if (node_height >= 0 && node_height < height) {
                         const UniValue tip{fetch(node_height, 1)};
                         const auto on_record{record.GetBlock(node_height)};
@@ -234,8 +260,8 @@ bool Follower::UpdateRecord(bool may_drop)
                 // The mainchain dropped blocks on record: go back to the last one it still has, a
                 // batch of blocks at a time.
                 int common{height - 1};
-                while (common >= 0) {
-                    const int from{std::max(common - BATCH + 1, 0)};
+                while (common >= base) {
+                    const int from{std::max(common - BATCH + 1, base)};
                     const UniValue batch{fetch(from, common - from + 1)};
                     int found{-1};
                     for (int h{common}; h >= from; --h) {
@@ -255,6 +281,8 @@ bool Follower::UpdateRecord(bool may_drop)
                 const std::vector<MainBlock> removed{record.Truncate(common)};
                 LogInfo("The mainchain dropped %d blocks above height %d", removed.size(), common);
                 LOCK(m_mutex);
+                // To be acted on (Sync, which clears the note of the record once it did).
+                ++m_record_drops;
                 for (const MainBlock& block : removed) {
                     // A block the mainchain committed to twice keeps its first commitment, below the
                     // blocks dropped: dropping the second one changes nothing for it.
@@ -276,7 +304,7 @@ bool Follower::UpdateRecord(bool may_drop)
                 // after them and finds out. None: the answer starts at the tip on record, then does not
                 // follow it; asking again at once would get the same answer, for ever.
                 if (i == first_new) {
-                    throw std::runtime_error(strprintf("The mainchain node sent blocks that do not follow each other (at height %d); asking again shortly", std::max(height, 0) + static_cast<int>(i)));
+                    throw std::runtime_error(strprintf("The mainchain node sent blocks that do not follow each other (at height %d); asking again shortly", (height >= 0 ? height : base) + static_cast<int>(i)));
                 }
                 break;
             }
@@ -326,8 +354,18 @@ bool Follower::Sync(std::string& error)
             // One at a time: two callers acting on the same changes could otherwise invalidate a
             // block after the other found it committed again.
             LOCK(m_act_mutex);
+            // The drops of the record so far: Act takes up what they left to act on.
+            const uint64_t drops{WITH_LOCK(m_mutex, return m_record_drops)};
             Act();
             CheckActiveChain();
+            // Acted on every drop of the record so far, and checked the chain: the record's note of
+            // where it changed (Mainchain::UnactedFrom) is no longer needed. Not if another drop came
+            // meanwhile (another caller updating the record), whose changes may not have been taken up
+            // yet; nor while the record is updated (its next drop is counted only after it is made).
+            if (!m_stop && !m_node.chainman->m_interrupt) {
+                LOCK(m_sync_mutex);
+                if (WITH_LOCK(m_mutex, return m_record_drops == drops)) m_node.chainman->m_mainchain->ClearUnacted();
+            }
         }
         SendBundle();
     } catch (const std::exception& e) {
@@ -500,6 +538,10 @@ void Follower::CheckActiveChain()
     // takes back each block that lost its commitment (Act); as far as a reorg could reach.
     CBlockIndex* lowest{nullptr};
     CBlockIndex* moved{nullptr};
+    // The window reaches as far below the record as a reorg of the mainchain could: from its tip, or
+    // from where it last changed without the node acting on it (stopped in between, Mainchain::UnactedFrom),
+    // which may be far below a tip that moved on meanwhile.
+    const int top{std::min(record.Height(), record.UnactedFrom().value_or(record.Height()))};
     {
         LOCK(::cs_main);
         // Blocks that need no commitment (none, in the template) are valid whatever the record says.
@@ -507,7 +549,7 @@ void Follower::CheckActiveChain()
             const auto commitment{Hooks().CommitmentOf(*pindex)};
             if (!commitment) continue;
             if (const auto height{record.CommittedHeight(*commitment)}) {
-                if (*height < record.Height() - MOVED_CHECK_DEPTH) break;
+                if (*height < top - MOVED_CHECK_DEPTH) break;
                 continue;
             }
             lowest = pindex;
@@ -525,7 +567,7 @@ void Follower::CheckActiveChain()
                     const auto bmm_height{record.CommittedHeight(*commitment)};
                     if (!bmm_height) break;
                     if (*bmm_height - 1 != main_height) moved = pindex;
-                    if (*bmm_height < record.Height() - MOVED_CHECK_DEPTH) break;
+                    if (*bmm_height < top - MOVED_CHECK_DEPTH) break;
                 }
                 // What the mainchain had done before this block is what it had done after its parent.
                 drivechain::BlockUndo undo;
@@ -634,7 +676,7 @@ void Follower::SendBundle()
     // second time, and a chain without a new block for a while would otherwise keep it upvoted.
     if (!hash.IsNull()) {
         const Mainchain& record{*Assert(chainman.m_mainchain)};
-        for (int h{side_main_height + 1}; h <= record.Height() && !hash.IsNull(); ++h) {
+        for (int h{std::max(side_main_height + 1, record.Base())}; h <= record.Height() && !hash.IsNull(); ++h) {
             const auto block{record.GetBlock(h)};
             if (!block) break;
             for (const MainBundleEvent& event : block->bundles) {
