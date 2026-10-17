@@ -24,10 +24,16 @@
  * the two: 13.47 shielded and 13.47 unshielded an hour later. Melt and cast leave nothing to link.
  *
  * - Melt: each transparent coin goes into the pool alone (it is the only input of its transaction,
- *   whole, with no change), at a random height over the next blocks. No two coins are ever seen together.
+ *   whole, with no change), at a random height over the next blocks, one coin a block at most: no two
+ *   coins go in one transaction or one block. Their timing (a run of melts over a few hours) can still
+ *   hint, on a quiet chain, that they are one wallet's.
  * - Cast: coins come out only as standard bills, 0.01 CHN times a power of two, each to a new
- *   address of the wallet, and only at the heights every wallet uses for that bill: a cast of
- *   0.64 looks like every other cast of 0.64 that day.
+ *   address of the wallet, only at the heights every wallet uses for that bill, and with the same
+ *   fee (CastFee) in every wallet: a cast of 0.64 looks like other casts of 0.64 that day. A cast
+ *   spends notes at least ANCHOR_CONFIRMATIONS deep, at the anchor every payment of that height uses.
+ *   A wallet whose notes are fragmented spends more than one note, which shows (more actions).
+ *   Bills of one cast go within a few periods of each other: on a quiet chain their sum can still
+ *   be matched against what went in.
  *
  * The plan is kept in the wallet, and carried out by the wallet as the blocks come (it has to be
  * running, and unlocked, at those heights). Nothing of it is a rule of the chain.
@@ -44,6 +50,13 @@ static constexpr int NUM_BILLS{21};
 static constexpr int WINDOW{3};
 //! Coins smaller than this, or than four times their fee, are not melted.
 static constexpr CAmount MIN_MELT{100'000};
+//! The largest spread of a melt (blocks) or a cast (periods).
+static constexpr int MAX_SPREAD{100'000};
+//! The fee rate of every cast, the same in every wallet (sat/kvB): a cast's fee is public (what leaves
+//! the pool less the bill), and a fee of the wallet's own rate would tell wallets apart.
+static constexpr CAmount CAST_FEE_RATE{2'000};
+/** The fee of every cast of one bill: CAST_FEE_RATE for a bundle of two actions and a transparent output. */
+CAmount CastFee();
 
 /** Blocks between the windows of a bill: a day on the main and test networks, 12 blocks on regtest. */
 int CastPeriod();

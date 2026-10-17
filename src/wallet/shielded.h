@@ -138,6 +138,8 @@ struct ShieldedAccount {
     //! The notes payments being proved spend (by nullifier), which the wallet's lock is not held for:
     //! no other payment picks them meanwhile (not kept).
     std::set<uint256> in_flight;
+    //! Melt: the height the last melt went at (not kept): one melt a block at most.
+    int last_melt_height{-1};
 };
 
 /** A spending key, in memory that is locked and wiped when freed. */
@@ -247,6 +249,9 @@ std::vector<NoteStatus> ShieldedNotes(const CWallet& wallet);
 struct ShieldedBalance {
     //! In notes in blocks, not spent.
     CAmount available{0};
+    //! The part of available in notes ANCHOR_CONFIRMATIONS deep at least: what a payment can spend now
+    //! (a note less deep would name its block by the anchor of the spend).
+    CAmount spendable{0};
     //! In notes waiting for a block (change and incoming), not spent.
     CAmount pending{0};
     int notes{0};
@@ -275,6 +280,10 @@ std::optional<size_t> MaxShieldedSpends(const std::vector<CTxOut>& transparent, 
  * Pay out of the shielded account: no transparent inputs; the change goes back to the account.
  * @param[in] fee  the fee, or none for the wallet's fee rate
  * @param[in] subtract_fee  take the fee out of the one transparent recipient's amount (unshielding all of it)
+ * @param[in] hold_back  what it must leave in notes it can spend (casts planned: CastReserved)
+ * It spends only notes ANCHOR_CONFIRMATIONS deep at least, all at the anchor of the block
+ * ANCHOR_CONFIRMATIONS - 1 under the tip: the anchor is then the same for every payment of a height, and
+ * names no note's block.
  * @return the transaction, or the error
  * Not with the wallet's lock held: it waits for -orchardindex to catch up first (but not on the
  * scheduler's thread, where it finds the notes in the index as it is). The notes are picked and the
@@ -282,7 +291,20 @@ std::optional<size_t> MaxShieldedSpends(const std::vector<CTxOut>& transparent, 
  * back from other payments meanwhile; it is committed under the lock again if they are still unspent.
  * So are ShieldCoins, ShieldCoin and BumpShieldedFee made.
  */
-std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fee = std::nullopt, bool subtract_fee = false);
+std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fee = std::nullopt, bool subtract_fee = false, CAmount hold_back = 0);
+/** What a payment out of the shielded account would pay, before it is made (EstimateShielded). */
+struct ShieldedEstimate {
+    CAmount fee{0};
+    //! How many notes it would spend.
+    size_t notes{0};
+    //! What each recipient would get, in order (less the fee for the one it is taken from).
+    std::vector<CAmount> amounts;
+};
+/**
+ * The fee and the notes of SendShielded with the same arguments, at this moment: nothing is made, no key
+ * is needed (a locked wallet can say). Passed to SendShielded as its fee, the fee shown is the fee paid.
+ */
+std::variant<ShieldedEstimate, std::string> EstimateShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fee = std::nullopt, bool subtract_fee = false, CAmount hold_back = 0);
 /**
  * Pay the same again, with a higher fee: a transaction that replaces one of the wallet's, out of its shielded
  * account, waiting for a block (it spends the same notes, and more if they do not cover the fee).

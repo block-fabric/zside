@@ -30,6 +30,11 @@ class ZSideEdgesTest(SidechainTest):
             self.sync_mempools()
         return self.bmm(node=node)
 
+    def deepen(self):
+        """Two blocks more: the notes of the last block are 3 deep, as a payment spends them (ANCHOR_CONFIRMATIONS)."""
+        self.mine_txs()
+        self.mine_txs()
+
     def mine_without_txs(self, node):
         """A block of no transaction but the coinbase, on the node's tip, committed to by the mainchain."""
         block = self.generateblock(node, self.side_address, [], False, sync_fun=self.no_op)
@@ -61,6 +66,7 @@ class ZSideEdgesTest(SidechainTest):
         side.shieldcoins(5)
         other.shieldcoins(2)
         self.mine_txs()
+        self.deepen()
         assert_equal(side.getshieldedbalance()["available"], 5)
         assert_equal(other.getshieldedbalance()["available"], 2)
 
@@ -119,6 +125,7 @@ class ZSideEdgesTest(SidechainTest):
     def run_bump_unshield_test(self):
         side, other = self.nodes
         self.log.info("A fee bump of an unshielding pays the same transparent output")
+        self.deepen()
         to = other.getnewaddress()
         txid = side.sendshielded({to: Decimal("0.25")})["txid"]
         self.sync_mempools()
@@ -140,6 +147,7 @@ class ZSideEdgesTest(SidechainTest):
     def run_package_test(self):
         side, other = self.nodes
         self.log.info("A shielded transaction in a package is refused before the mempool checks it (they would not see the others)")
+        self.deepen()
         txid = side.sendshielded({other.getshieldedaddress(): Decimal("0.05")})["txid"]
         old = side.gettransaction(txid)["hex"]
         side.bumpshieldedfee(txid)
@@ -173,8 +181,10 @@ class ZSideEdgesTest(SidechainTest):
         other.createwallet("switched")
         switched = other.get_wallet_rpc("switched")
         address = switched.getshieldedaddress()
+        self.deepen()
         side.sendshielded({address: Decimal("0.3")})
         self.mine_txs()
+        self.deepen()
         assert_equal(switched.getshieldedbalance()["available"], Decimal("0.3"))
 
         def receiving(wallet):
@@ -199,6 +209,7 @@ class ZSideEdgesTest(SidechainTest):
         self.mine_txs()
         assert_equal(switched.gettransaction(txid)["confirmations"], 1)
         # The original active again: the same.
+        self.deepen()
         make_active(switched, original)
         txid = switched.sendshielded({to: Decimal("0.1")})["txid"]
         self.mine_txs()
@@ -212,8 +223,10 @@ class ZSideEdgesTest(SidechainTest):
         other.createwallet("later")
         later = other.get_wallet_rpc("later")
         address = later.getshieldedaddress()
+        self.deepen()
         side.sendshielded({address: Decimal("0.3")})
         self.mine_txs()
+        self.deepen()
         before = later.listdescriptors()["descriptors"]
         later.encryptwallet("secret")
         assert later.listdescriptors()["descriptors"] != before
@@ -225,6 +238,7 @@ class ZSideEdgesTest(SidechainTest):
         txid = later.sendshielded({side.getshieldedaddress(): Decimal("0.1")})["txid"]
         self.mine_txs()
         assert_equal(later.gettransaction(txid)["confirmations"], 1)
+        self.deepen()
         unshield = later.unshieldcoins(Decimal("0.1"))
         self.mine_txs()
         assert_equal(later.getreceivedbyaddress(unshield["address"]), Decimal("0.1"))
@@ -237,30 +251,35 @@ class ZSideEdgesTest(SidechainTest):
         self.log.info("While a fee bump is proved: its notes are held from other payments, and if the transaction it replaces is mined meanwhile, it is not sent")
         other.createwallet("racer")
         racer = other.get_wallet_rpc("racer")
-        # Twenty notes, deep enough to be spent first; one more, newer. A bump of a payment of the twenty
-        # proves more than twenty actions, for seconds, and takes the newer note for its higher fee.
+        # Twenty notes of 0.01; one more of 0.005, newer, which a payment of 0.2 leaves (largest first). A bump
+        # of a payment of the twenty proves more than twenty actions, for seconds, and takes the smaller note
+        # for its higher fee.
         for _ in range(2):
+            self.deepen()
             side.sendshielded({racer.getshieldedaddress(True): Decimal("0.01") for _ in range(10)})
             self.mine_txs()
         self.mine_txs()
         self.mine_txs()
-        side.sendshielded({racer.getshieldedaddress(True): Decimal("0.05")})
+        side.sendshielded({racer.getshieldedaddress(True): Decimal("0.005")})
         self.mine_txs()
-        assert_equal(racer.getshieldedbalance(), {"available": Decimal("0.25"), "pending": 0, "notes": 21})
+        # (3 deep, as every note a payment spends.)
+        self.mine_txs()
+        self.mine_txs()
+        assert_equal(racer.getshieldedbalance(), {"available": Decimal("0.205"), "spendable": Decimal("0.205"), "pending": 0, "notes": 21})
         # The twenty, no change.
         fee = Decimal("0.001")
         to = side.getshieldedaddress()
         txid = racer.sendshielded({to: Decimal("0.2") - fee}, None, fee)["txid"]
-        assert_equal(racer.getshieldedbalance(), {"available": Decimal("0.05"), "pending": 0, "notes": 1})
+        assert_equal(racer.getshieldedbalance(), {"available": Decimal("0.005"), "spendable": Decimal("0.005"), "pending": 0, "notes": 1})
         self.sync_mempools()
-        unheld = "Not enough shielded funds: 0.05 available, 1.00"
+        unheld = "Not enough shielded funds: 0.005 available, 1.00"
         assert_raises_rpc_error(-4, unheld, racer.sendshielded, {to: 1})
 
         results = []
 
         def bump():
             try:
-                results.append(self.wallet_proxy(other, "racer").bumpshieldedfee(txid))
+                results.append(self.wallet_proxy(other, "racer").bumpshieldedfee(txid, fee * 2))
             except JSONRPCException as e:
                 results.append(e.error)
 
@@ -268,7 +287,7 @@ class ZSideEdgesTest(SidechainTest):
         started = time.time()
         thread.start()
         # The bump holds the notes while it is proved: a payment that needs them says so.
-        held = "Not enough shielded funds: 0.05 available, part of it held by a payment being made; 1.00"
+        held = "Not enough shielded funds: 0.005 available, part of it held by a payment being made; 1.00"
         while True:
             try:
                 racer.sendshielded({to: 1})
@@ -290,7 +309,7 @@ class ZSideEdgesTest(SidechainTest):
         assert_equal(results, [{"code": -4, "message": "The transaction it replaces is no longer waiting for a block"}])
         assert_equal(racer.gettransaction(txid)["confirmations"], 1)
         assert "replaced_by_txid" not in racer.gettransaction(txid)
-        assert_equal(racer.getshieldedbalance(), {"available": Decimal("0.05"), "pending": 0, "notes": 1})
+        assert_equal(racer.getshieldedbalance(), {"available": Decimal("0.005"), "spendable": Decimal("0.005"), "pending": 0, "notes": 1})
         # Nothing held any more.
         assert_raises_rpc_error(-4, unheld, racer.sendshielded, {to: 1})
         other.unloadwallet("racer")
@@ -325,7 +344,11 @@ class ZSideEdgesTest(SidechainTest):
         assert_equal(side.getbestblockhash(), block)
         self.wait_until(lambda: side.getshieldedinfo()["index"]["synced"])
         assert_equal(side.getshieldedinfo(), with_block)
-        # The wallet spends every note, the block's too: the index finds them all.
+        # The wallet spends every note, the block's too (3 deep, as every note a payment spends): the
+        # index finds them all.
+        self.bmm(node=side, expect=False)
+        self.bmm(node=side, expect=False)
+        assert_equal(side.getshieldedbalance()["spendable"], side.getshieldedbalance()["available"])
         available = side.getshieldedbalance()["available"]
         notes = side.getshieldedbalance()["notes"]
         txid = side.sendshielded({side.getshieldedaddress(True): available - Decimal("0.01")})["txid"]
@@ -348,6 +371,7 @@ class ZSideEdgesTest(SidechainTest):
         other.createwallet("moved")
         moved = other.get_wallet_rpc("moved")
         old_address = moved.getshieldedaddress()
+        self.deepen()
         side.sendshielded({old_address: Decimal("0.3")}, "to the account of the other chain")
         self.mine_txs()
         assert_equal(moved.getshieldedbalance()["available"], Decimal("0.3"))
@@ -369,10 +393,12 @@ class ZSideEdgesTest(SidechainTest):
         assert_raises_rpc_error(-4, "set up for another chain", moved.sendshielded, {old_address: Decimal("0.1")})
         # The default shielding goes to the new account.
         # (Paid out of the first wallet's shielded account: its transparent coins are left as they are.)
+        self.deepen()
         side.unshieldcoins(1, moved.getnewaddress())
         self.mine_txs()
         moved.shieldcoins(Decimal("0.5"))
         self.mine_txs()
+        self.deepen()
         assert_equal(moved.getshieldedbalance()["available"], Decimal("0.8"))
         # Its note is spent (its keys made again for its chain): the coins are recovered.
         res = moved.unshieldcoins("all")

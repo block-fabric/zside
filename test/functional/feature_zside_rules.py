@@ -63,6 +63,11 @@ class ZSideRulesTest(SidechainTest):
             self.sync_mempools()
         return self.bmm(node=node)
 
+    def deepen(self):
+        """Two blocks more: the notes of the last block are 3 deep, as a payment spends them (ANCHOR_CONFIRMATIONS)."""
+        self.mine_txs()
+        self.mine_txs()
+
     def run_sidechain_test(self):
         main = self.main
         side, other = self.nodes
@@ -80,6 +85,7 @@ class ZSideRulesTest(SidechainTest):
         side.shieldcoins(5)
         other.shieldcoins(2)
         self.mine_txs()
+        self.deepen()
         assert_equal(side.getshieldedbalance()["available"], 5)
         assert_equal(other.getshieldedbalance()["available"], 2)
 
@@ -109,9 +115,11 @@ class ZSideRulesTest(SidechainTest):
         assert_equal(len(many), 40)
         assert_raises_rpc_error(-4, "Too many recipients, or notes to spend, for one transaction the network relays", side.sendshielded, many)
         assert_raises_rpc_error(-4, "Not enough shielded funds: 5.00 available", side.sendshielded, {address: 6})
-        # Melt/cast: no negative spread; a step id that is a number.
-        assert_raises_rpc_error(-4, "spread must not be negative", side.meltcoins, -1)
-        assert_raises_rpc_error(-4, "spread must not be negative", side.castcoins, Decimal("0.01"), -1)
+        # Melt/cast: a spread from 0 to 100000 (no overflow of the heights, audit 7 E-ZS4); a step id that is a number.
+        assert_raises_rpc_error(-4, "spread must be between 0 and 100000", side.meltcoins, -1)
+        assert_raises_rpc_error(-4, "spread must be between 0 and 100000", side.castcoins, Decimal("0.01"), -1)
+        assert_raises_rpc_error(-4, "spread must be between 0 and 100000", side.meltcoins, 100001)
+        assert_raises_rpc_error(-4, "spread must be between 0 and 100000", side.castcoins, Decimal("0.01"), 2147483647)
         assert_raises_rpc_error(-8, 'id must be a step number or "all"', side.cancelmeltcast, "first")
         assert_equal(side.cancelmeltcast("all"), 0)
         assert_equal(side.listmeltcast(), [])
@@ -131,11 +139,18 @@ class ZSideRulesTest(SidechainTest):
         self.log.info("Paid, but not in a block yet: not spendable, and said so")
         other.createwallet("fresh")
         fresh = other.get_wallet_rpc("fresh")
+        self.deepen()
         side.sendshielded({fresh.getshieldedaddress(): Decimal("0.2")})
         self.sync_mempools()
-        assert_raises_rpc_error(-4, "Not enough shielded funds in blocks yet: 0.00 available, 0.20 waiting for a block", fresh.sendshielded, {address: Decimal("0.1")})
+        assert_raises_rpc_error(-4, "Not enough shielded funds deep enough yet: 0.00 can be spent (notes 3 blocks deep), 0.00 in the last blocks, 0.20 waiting for a block", fresh.sendshielded, {address: Decimal("0.1")})
         self.mine_txs()
-        # In a block: it goes.
+        # In a block, not 3 deep: not yet (its anchor would name the block, audit 7 E-ZS1).
+        assert_equal(fresh.getshieldedbalance(), {"available": Decimal("0.2"), "spendable": 0, "pending": 0, "notes": 1})
+        assert_raises_rpc_error(-4, "Not enough shielded funds deep enough yet: 0.00 can be spent (notes 3 blocks deep), 0.20 in the last blocks, 0.00 waiting for a block", fresh.sendshielded, {address: Decimal("0.1")})
+        self.mine_txs()
+        assert_raises_rpc_error(-4, "deep enough yet", fresh.sendshielded, {address: Decimal("0.1")})
+        self.mine_txs()
+        # 3 deep: it goes.
         fresh.sendshielded({address: Decimal("0.1")})
         self.mine_txs()
         other.unloadwallet("fresh")
@@ -275,9 +290,12 @@ class ZSideRulesTest(SidechainTest):
         self.log.info("A valid spend whose anchor a reorg took away: out of the mempool, and refused in a block")
         other.createwallet("anchored")
         anchored = other.get_wallet_rpc("anchored")
+        self.deepen()
         side.sendshielded({anchored.getshieldedaddress(): Decimal("0.3")})
         block = self.mine_txs()
-        # Its only note, one block deep: the spend is anchored at the tree that block left.
+        self.deepen()
+        tip = side.getbestblockhash()
+        # Its only note, three blocks deep: the spend is anchored at the tree that block left (2 under the tip).
         spend = anchored.sendshielded({side.getshieldedaddress(): Decimal("0.1")})["txid"]
         spend_hex = anchored.gettransaction(spend)["hex"]
         self.sync_mempools()
@@ -286,7 +304,7 @@ class ZSideRulesTest(SidechainTest):
         assert_raises_rpc_error(-25, "TestBlockValidity failed: bad-zs-anchor", template, [spend_hex])
         assert_equal(side.testmempoolaccept([spend_hex])[0]["reject-reason"], "bad-zs-anchor")
         side.reconsiderblock(block)
-        assert_equal(side.getbestblockhash(), block)
+        assert_equal(side.getbestblockhash(), tip)
         side.sendrawtransaction(spend_hex)
         self.mine_txs()
         assert_equal(anchored.gettransaction(spend)["confirmations"], 1)
@@ -301,6 +319,7 @@ class ZSideRulesTest(SidechainTest):
         side.backupwallet(backup)
         other.restorewallet("copy", backup)
         copy = other.get_wallet_rpc("copy")
+        self.deepen()
         txid = side.sendshielded({to: Decimal("0.1")})["txid"]
         self.sync_mempools()
         self.disconnect_nodes(0, 1)
@@ -331,8 +350,10 @@ class ZSideRulesTest(SidechainTest):
         other.createwallet("dust")
         dust = other.get_wallet_rpc("dust")
         for _ in range(3):
+            self.deepen()
             side.sendshielded({dust.getshieldedaddress(True): Decimal("0.001") for _ in range(14)})
         self.mine_txs()
+        self.deepen()
         assert_equal(dust.getshieldedbalance()["notes"], 42)
         assert_raises_rpc_error(-4, "too many for one transaction the network relays", dust.sendshielded, {side.getshieldedaddress(): Decimal("0.04")})
         # Less goes, in one transaction of as many notes as it takes (each note pays its own action, of about 3 kB).

@@ -6,6 +6,7 @@
 
 #include <chainparams.h>
 #include <interfaces/chain.h>
+#include <policy/feerate.h>
 #include <random.h>
 #include <util/moneystr.h>
 #include <util/time.h>
@@ -17,9 +18,16 @@
 #include <wallet/walletdb.h>
 
 #include <algorithm>
+#include <limits>
+#include <set>
 
 namespace wallet {
 namespace meltcast {
+CAmount CastFee()
+{
+    return CFeeRate{CAST_FEE_RATE}.GetFee(BundleSize(ActionCount(2, 2)) + 120);
+}
+
 int CastPeriod()
 {
     return Params().GetChainType() == ChainType::REGTEST ? 12 : 144;
@@ -81,11 +89,6 @@ CAmount MeltFee(const CWallet& wallet)
     return GetMinimumFee(GetMinimumFeeRate(wallet, CCoinControl{}), BundleSize(ActionCount(0, 1)) + 160);
 }
 
-/** The fee a cast of one bill pays, about: a bundle of two actions and a transparent output. */
-CAmount CastFee(const CWallet& wallet)
-{
-    return GetMinimumFee(GetMinimumFeeRate(wallet, CCoinControl{}), BundleSize(ActionCount(2, 2)) + 120);
-}
 } // namespace
 
 CAmount CastReserved(const CWallet& wallet)
@@ -101,9 +104,15 @@ CAmount CastReserved(const CWallet& wallet)
 std::variant<std::vector<MeltCastJob>, std::string> ScheduleMelt(CWallet& wallet, int spread)
 {
     LOCK(wallet.cs_wallet);
-    if (spread < 0) return std::string{"spread must not be negative"};
+    if (spread < 0 || spread > MAX_SPREAD) return strprintf("spread must be between 0 and %d", MAX_SPREAD);
     if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
     const int height{wallet.GetLastBlockHeight()};
+    // The heights melts are planned at already: one melt a block at most, those of this plan
+    // included (drawn without replacement), so no two coins go in the same block.
+    std::set<int> taken;
+    for (const auto& [id, job] : wallet.m_shielded.jobs) {
+        if (job.kind == MeltCastJob::MELT && !job.Sent()) taken.insert(job.due);
+    }
     CCoinControl coin_control;
     coin_control.m_min_depth = 1;
     // A coin is worth melting if its fee is a small part of it.
@@ -111,14 +120,24 @@ std::variant<std::vector<MeltCastJob>, std::string> ScheduleMelt(CWallet& wallet
     FastRandomContext rng;
     std::vector<MeltCastJob> planned;
     // Coins locked already are left alone: those of a melt planned before among them.
+    std::vector<COutput> coins;
     for (const COutput& out : AvailableCoins(wallet, &coin_control).All()) {
-        if (out.txout.nValue < smallest) continue;
+        if (out.txout.nValue >= smallest) coins.push_back(out);
+    }
+    // The free heights over the next spread + 1 blocks, more if there are more coins than that.
+    std::vector<int> free_heights;
+    for (int64_t h{int64_t{height} + 1}; free_heights.size() < coins.size() || h <= int64_t{height} + 1 + spread; ++h) {
+        if (!taken.contains(static_cast<int>(h))) free_heights.push_back(static_cast<int>(h));
+    }
+    std::shuffle(free_heights.begin(), free_heights.end(), rng);
+    for (size_t i{0}; i < coins.size(); ++i) {
+        const COutput& out{coins[i]};
         MeltCastJob job;
         job.id = NextId(wallet);
         job.kind = MeltCastJob::MELT;
         job.coin = out.outpoint;
         job.amount = out.txout.nValue;
-        job.due = height + 1 + static_cast<int>(rng.randrange(spread + 1));
+        job.due = free_heights[i];
         job.created = GetTime();
         wallet.LockCoin(out.outpoint, /*persist=*/true);
         Keep(wallet, job);
@@ -131,17 +150,21 @@ std::variant<std::vector<MeltCastJob>, std::string> ScheduleMelt(CWallet& wallet
 std::variant<std::vector<MeltCastJob>, std::string> ScheduleCast(CWallet& wallet, CAmount amount, int spread)
 {
     LOCK(wallet.cs_wallet);
-    if (spread < 0) return std::string{"spread must not be negative"};
+    if (spread < 0 || spread > MAX_SPREAD) return strprintf("spread must be between 0 and %d", MAX_SPREAD);
     if (!wallet.m_shielded.fvk) return std::string{"The wallet has no shielded account yet"};
     const std::vector<int> bills{Bills(amount)};
     if (amount <= 0 || amount >= BillAmount(NUM_BILLS)) return strprintf("The amount must be between %s and %s", FormatMoney(BILL_UNIT), FormatMoney(BillAmount(NUM_BILLS) - 1));
     if (bills.empty()) return strprintf("The smallest bill is %s", FormatMoney(BILL_UNIT));
     const ShieldedBalance balance{GetShieldedBalance(wallet)};
-    const CAmount needed{amount / BILL_UNIT * BILL_UNIT + static_cast<CAmount>(bills.size()) * CastFee(wallet)};
+    const CAmount needed{amount / BILL_UNIT * BILL_UNIT + static_cast<CAmount>(bills.size()) * CastFee()};
     const CAmount free{balance.available + balance.pending - CastReserved(wallet)};
     if (needed > free) return strprintf("Not enough in the shielded account: %s with the fees, %s free (casts planned already hold back %s)", FormatMoney(needed), FormatMoney(free), FormatMoney(CastReserved(wallet)));
 
     const int height{wallet.GetLastBlockHeight()};
+    // A cast spends notes ANCHOR_CONFIRMATIONS deep only (E-ZS1): with not enough that deep yet (a
+    // melt just made, change of the last blocks), no bill goes before they can be.
+    const bool deep_enough{balance.spendable - CastReserved(wallet) >= needed};
+    const int64_t from{int64_t{height} + 1 + (deep_enough ? 0 : ANCHOR_CONFIRMATIONS)};
     FastRandomContext rng;
     std::vector<MeltCastJob> planned;
     for (const int bill : bills) {
@@ -150,7 +173,9 @@ std::variant<std::vector<MeltCastJob>, std::string> ScheduleCast(CWallet& wallet
         job.kind = MeltCastJob::CAST;
         job.amount = BillAmount(bill);
         job.bill = bill;
-        job.due = NextCastWindow(bill, height + 1 + static_cast<int>(rng.randrange(spread + 1)) * CastPeriod());
+        const int64_t start{from + static_cast<int64_t>(rng.randrange(spread + 1)) * CastPeriod()};
+        if (start > std::numeric_limits<int32_t>::max() - CastPeriod()) return std::string{"spread is too large"};
+        job.due = NextCastWindow(bill, static_cast<int>(start));
         job.created = GetTime();
         Keep(wallet, job);
         planned.push_back(job);
@@ -185,6 +210,9 @@ int RunMeltCast(CWallet& wallet, const std::function<bool()>& interrupted)
         for (const auto& [id, job] : wallet.m_shielded.jobs) {
             if (job.Sent() || height < job.due || job.tried == height) continue;
             if (job.kind == MeltCastJob::CAST && !InCastWindow(job.bill, height)) continue;
+            // One melt a block at most (one that could not go before may be due with another): the
+            // others wait for the next blocks.
+            if (job.kind == MeltCastJob::MELT && wallet.m_shielded.last_melt_height == height) continue;
             due.push_back(id);
         }
     }
@@ -204,6 +232,7 @@ int RunMeltCast(CWallet& wallet, const std::function<bool()>& interrupted)
             LOCK(wallet.cs_wallet);
             auto it{wallet.m_shielded.jobs.find(id)};
             if (it == wallet.m_shielded.jobs.end() || it->second.Sent()) continue;
+            if (it->second.kind == MeltCastJob::MELT && wallet.m_shielded.last_melt_height == height) continue;
             it->second.tried = height;
             job = it->second;
             if (wallet.IsLocked()) {
@@ -241,14 +270,18 @@ int RunMeltCast(CWallet& wallet, const std::function<bool()>& interrupted)
                 ShieldedRecipient recipient;
                 recipient.script = GetScriptForDestination(*dest);
                 recipient.amount = job.amount;
-                result = SendShielded(wallet, {recipient});
+                // The fee every wallet pays for a cast (CAST_FEE_RATE), not the wallet's own rate.
+                result = SendShielded(wallet, {recipient}, CastFee());
             }
         }
         LOCK(wallet.cs_wallet);
         const auto* tx{std::get_if<CTransactionRef>(&result)};
         if (tx) {
             // The coin is spent now: no need to keep it from other uses.
-            if (job.kind == MeltCastJob::MELT) wallet.UnlockCoin(job.coin);
+            if (job.kind == MeltCastJob::MELT) {
+                wallet.UnlockCoin(job.coin);
+                wallet.m_shielded.last_melt_height = height;
+            }
             ++made;
             wallet.WalletLogPrintf("%s %s at height %d: %s\n", job.kind == MeltCastJob::MELT ? "Melted" : "Cast", FormatMoney(job.amount), height, (*tx)->GetHash().GetHex());
         } else {

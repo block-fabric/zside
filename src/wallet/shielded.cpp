@@ -693,6 +693,7 @@ ShieldedBalance GetShieldedBalance(const CWallet& wallet)
         }
         ++balance.notes;
         (s.confirmations > 0 ? balance.available : balance.pending) += s.note->value;
+        if (s.confirmations >= ANCHOR_CONFIRMATIONS) balance.spendable += s.note->value;
     }
     return balance;
 }
@@ -863,18 +864,25 @@ namespace {
  *                          relay fee of its own size (BIP 125 rules 3 and 4), at least
  */
 Prepared PrepareSend(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fixed_fee, bool subtract_fee,
-                     const std::set<uint256>& spend_first, std::optional<Txid> replaces, std::optional<CAmount> replaced_fee = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+                     const std::set<uint256>& spend_first, std::optional<Txid> replaces, std::optional<CAmount> replaced_fee = std::nullopt,
+                     CAmount hold_back = 0, ShieldedEstimate* estimate = nullptr) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
-    if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
+    // An estimate (EstimateShielded) picks the notes and the fee alone: no keys needed, nothing built.
     const ShieldedAccount& account{wallet.m_shielded};
-    if (wallet.IsLocked()) return std::string{"The wallet is locked"};
-    // The keys of the account, of whichever descriptor of the wallet made them.
-    const auto sk{AccountSpendingKey(wallet, account.key_version, *account.fvk)};
-    // The key of version 1 too, for the notes paid to it (ShieldedAccount::legacy_fvk).
-    const auto legacy_sk{account.legacy_fvk ? AccountSpendingKey(wallet, KEY_ANY_CHAIN, *account.legacy_fvk) : std::nullopt};
-    if (!sk || (account.legacy_fvk && !legacy_sk)) {
-        return std::string{"No descriptor of the wallet holds the keys of its shielded account: import the one the account was made from to spend its notes"};
+    std::optional<ShieldedKey> sk, legacy_sk;
+    if (estimate) {
+        if (!account.fvk) return std::string{"The wallet has no shielded account yet"};
+    } else {
+        if (!SetupShieldedAccount(wallet)) return std::string{"The wallet is locked, or has no private keys"};
+        if (wallet.IsLocked()) return std::string{"The wallet is locked"};
+        // The keys of the account, of whichever descriptor of the wallet made them.
+        sk = AccountSpendingKey(wallet, account.key_version, *account.fvk);
+        // The key of version 1 too, for the notes paid to it (ShieldedAccount::legacy_fvk).
+        legacy_sk = account.legacy_fvk ? AccountSpendingKey(wallet, KEY_ANY_CHAIN, *account.legacy_fvk) : std::nullopt;
+        if (!sk || (account.legacy_fvk && !legacy_sk)) {
+            return std::string{"No descriptor of the wallet holds the keys of its shielded account: import the one the account was made from to spend its notes"};
+        }
     }
     const uint8_t* fvk{account.fvk->data()};
     // And those of retired accounts the wallet can make (derived again for the chain they were
@@ -884,7 +892,9 @@ Prepared PrepareSend(CWallet& wallet, const std::vector<ShieldedRecipient>& reci
         if (key.retired < 0) continue;
         if (auto rsk{WatchedSpendingKey(wallet, key)}) retired_sk.emplace(key.retired, std::move(*rsk));
     }
-    const auto can_spend{[&](const ShieldedNote& note) { return note.retired < 0 || retired_sk.contains(note.retired); }};
+    // (Estimating, a locked wallet cannot make those keys: the notes of a retired account are counted as
+    // its own, as an unlocked wallet that can make them would.)
+    const auto can_spend{[&](const ShieldedNote& note) { return note.retired < 0 || retired_sk.contains(note.retired) || (estimate && ShieldedNoteSpendable(account, note)); }};
     for (const ShieldedRecipient& r : recipients) {
         if (!r.shielded) continue;
         if (auto error{UnspendableOwnAddress(wallet, *r.shielded)}) return std::move(*error);
@@ -907,9 +917,17 @@ Prepared PrepareSend(CWallet& wallet, const std::vector<ShieldedRecipient>& reci
     // What the notes must cover: the amounts, and the fee unless it comes out of the amount.
     const auto needed{[&](CAmount fee) { return subtract_fee ? to_pay : to_pay + fee; }};
 
-    // The notes to spend: those it must first; then in blocks, not spent, those deep enough to be
-    // spent at an anchor a reorg of the last blocks leaves (ANCHOR_CONFIRMATIONS) first, largest first,
-    // until they pay for it all and the fee. Notes a payment being proved spends are left to it.
+    // A fee given is checked as the wallet checks its own (-maxtxfee): a typo is not paid.
+    if (fixed_fee && (!MoneyRange(*fixed_fee) || *fixed_fee > wallet.m_default_max_tx_fee)) {
+        return strprintf("The fee of %s is more than the wallet pays (-maxtxfee)", FormatMoney(*fixed_fee));
+    }
+
+    // The notes to spend: those it must first; then in blocks, not spent, ANCHOR_CONFIRMATIONS deep at
+    // least, largest first, until they pay for it all and the fee. Notes a payment being proved spends
+    // are left to it. Only notes that deep: the anchor is always the root of the block
+    // ANCHOR_CONFIRMATIONS - 1 under the tip, the same for every payment of that height. A spend of a
+    // note less deep would have to anchor at (or above) the note's own block, and the public anchor
+    // would name that block: a cast right after a melt would be linked to it (audit 7 E-ZS1).
     struct Candidate {
         const ShieldedNote* note;
         int confirmations;
@@ -919,19 +937,22 @@ Prepared PrepareSend(CWallet& wallet, const std::vector<ShieldedRecipient>& reci
         const bool in_flight{wallet.m_shielded.in_flight.contains(s.note->nullifier)};
         if (spend_first.contains(s.note->nullifier)) {
             if (s.confirmations <= 0) return std::string{"A note it spends is not in a block"};
+            if (s.confirmations < ANCHOR_CONFIRMATIONS) return strprintf("A note it spends is not %d blocks deep yet: try again in a few blocks", ANCHOR_CONFIRMATIONS);
             if (!can_spend(*s.note)) return std::string{"A note it spends is of a retired account whose keys the wallet cannot make"};
             if (in_flight) return std::string{"Another payment that spends its notes is being made"};
             spends.push_back({s.note, s.confirmations});
-        } else if (!s.spent_by && !in_flight && s.confirmations > 0 && s.note->value > 0 && can_spend(*s.note)) {
+        } else if (!s.spent_by && !in_flight && s.confirmations >= ANCHOR_CONFIRMATIONS && s.note->value > 0 && can_spend(*s.note)) {
             available.push_back({s.note, s.confirmations});
         }
     }
     if (spends.size() != spend_first.size()) return std::string{"The notes it spends are not all the wallet's"};
     std::sort(available.begin(), available.end(), [](const Candidate& a, const Candidate& b) {
-        const bool deep_a{a.confirmations >= ANCHOR_CONFIRMATIONS}, deep_b{b.confirmations >= ANCHOR_CONFIRMATIONS};
-        if (deep_a != deep_b) return deep_a;
         return a.note->value > b.note->value;
     });
+    // What it may spend: all it can, but what it must leave (casts planned).
+    CAmount can_pay{0};
+    for (const Candidate& c : spends) can_pay += c.note->value;
+    for (const Candidate& c : available) can_pay += c.note->value;
     const MinimumFeeRateResult fee_rate{GetMinimumFeeRate(wallet, CCoinControl{})};
     // Its size with so many notes (and change): its virtual size, without transparent inputs.
     const auto size_for{[&](size_t n_spends) {
@@ -979,26 +1000,40 @@ Prepared PrepareSend(CWallet& wallet, const std::vector<ShieldedRecipient>& reci
     }
     if (spent < needed(fee)) {
         const ShieldedBalance balance{GetShieldedBalance(wallet)};
-        if (balance.pending > 0 && balance.available < needed(fee)) {
-            return strprintf("Not enough shielded funds in blocks yet: %s available, %s waiting for a block; %s needed with the fee", FormatMoney(balance.available), FormatMoney(balance.pending), FormatMoney(needed(fee)));
+        if ((balance.pending > 0 || balance.available > balance.spendable) && balance.spendable < needed(fee)) {
+            return strprintf("Not enough shielded funds deep enough yet: %s can be spent (notes %d blocks deep), %s in the last blocks, %s waiting for a block; "
+                             "%s needed with the fee. Try again in a few blocks",
+                             FormatMoney(balance.spendable), ANCHOR_CONFIRMATIONS, FormatMoney(balance.available - balance.spendable), FormatMoney(balance.pending), FormatMoney(needed(fee)));
         }
         if (!wallet.m_shielded.in_flight.empty()) {
             return strprintf("Not enough shielded funds: %s available, part of it held by a payment being made; %s needed with the fee", FormatMoney(balance.available), FormatMoney(needed(fee)));
         }
         return strprintf("Not enough shielded funds: %s available, %s needed with the fee", FormatMoney(balance.available), FormatMoney(needed(fee)));
     }
+    if (hold_back > 0 && can_pay - hold_back < needed(fee)) {
+        return strprintf("Not enough shielded funds besides the casts planned: %s of the %s that can be spent is held for them; %s needed with the fee "
+                         "(cancelmeltcast frees it)", FormatMoney(std::min(hold_back, can_pay)), FormatMoney(can_pay), FormatMoney(needed(fee)));
+    }
     if (subtract_fee) {
         if (transparent[0].nValue <= fee) return strprintf("The amount does not pay the fee of %s", FormatMoney(fee));
         transparent[0].nValue -= fee;
     }
     const CAmount change{spent - needed(fee)};
+    if (estimate) {
+        estimate->fee = fee;
+        estimate->notes = spends.size();
+        estimate->amounts.clear();
+        for (const ShieldedRecipient& r : recipients) estimate->amounts.push_back(r.amount);
+        if (subtract_fee) estimate->amounts[0] = transparent[0].nValue;
+        // Nothing to build: no error, no payment.
+        return std::string{};
+    }
 
-    // Where the notes are in the tree, all against the same root: the tree as the block with
-    // ANCHOR_CONFIRMATIONS left it, or the block of the newest note if it has fewer. An anchor at the
-    // tip would go with a reorg of one block, and the spend with it, for nothing.
-    int depth{ANCHOR_CONFIRMATIONS};
-    for (const Candidate& c : spends) depth = std::min(depth, c.confirmations);
-    const int anchor_height{wallet.GetLastBlockHeight() - depth + 1};
+    // Where the notes are in the tree, all against the same root: the tree as the block
+    // ANCHOR_CONFIRMATIONS - 1 under the tip left it, whatever the notes (all at least that deep). An
+    // anchor at the tip would go with a reorg of one block, and the spend with it, for nothing; one at the
+    // block of a note would name it.
+    const int anchor_height{wallet.GetLastBlockHeight() - ANCHOR_CONFIRMATIONS + 1};
     std::vector<uint256> cmxs;
     for (const Candidate& c : spends) cmxs.push_back(c.note->cmx);
     auto witnesses{wallet.chain().getOrchardWitnesses(cmxs, anchor_height)};
@@ -1053,14 +1088,25 @@ Prepared PrepareSend(CWallet& wallet, const std::vector<ShieldedRecipient>& reci
 }
 } // namespace
 
-std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fixed_fee, bool subtract_fee)
+std::variant<CTransactionRef, std::string> SendShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fixed_fee, bool subtract_fee, CAmount hold_back)
 {
     // The index caught up with the tip first, the wallet's lock not held: a notification in the queue
     // may wait for that lock (getOrchardWitnesses does not wait, under it).
     AssertLockNotHeld(wallet.cs_wallet);
     wallet.chain().waitForOrchardIndex();
-    Prepared prepared{WITH_LOCK(wallet.cs_wallet, return PrepareSend(wallet, recipients, fixed_fee, subtract_fee, /*spend_first=*/{}, /*replaces=*/std::nullopt))};
+    Prepared prepared{WITH_LOCK(wallet.cs_wallet, return PrepareSend(wallet, recipients, fixed_fee, subtract_fee, /*spend_first=*/{}, /*replaces=*/std::nullopt, /*replaced_fee=*/std::nullopt, hold_back))};
     return ProveAndCommit(wallet, std::move(prepared));
+}
+
+std::variant<ShieldedEstimate, std::string> EstimateShielded(CWallet& wallet, const std::vector<ShieldedRecipient>& recipients, std::optional<CAmount> fee, bool subtract_fee, CAmount hold_back)
+{
+    LOCK(wallet.cs_wallet);
+    ShieldedEstimate estimate;
+    Prepared prepared{PrepareSend(wallet, recipients, fee, subtract_fee, /*spend_first=*/{}, /*replaces=*/std::nullopt, /*replaced_fee=*/std::nullopt, hold_back, &estimate)};
+    // An estimate builds nothing: PrepareSend returns an empty error once it is filled.
+    const std::string& error{std::get<std::string>(prepared)};
+    if (!error.empty()) return error;
+    return estimate;
 }
 
 namespace {
