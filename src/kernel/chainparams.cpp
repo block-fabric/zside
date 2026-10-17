@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <kernel/chainparams.h>
+#include <kernel/testnet_activation.h>
 
 #include <arith_uint256.h>
 
@@ -352,12 +353,12 @@ public:
         };
 
         // This chain is a sidechain of the Chains testnet.
-        MakeSidechain({.slot = 6, .genesis_message = "zSide testnet", .genesis_time = 1791513282,
+        MakeSidechain({.slot = 6, .genesis_message = "zSide testnet 17/Oct/2026: a fresh start", .genesis_time = 1792210200,
                        .message_start = {0x7a, 0x73, 0x64, 0x02}, .default_port = 19455, .bech32_hrp = "tzs"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
-        consensus.sidechain.main_activation_height = 1673; // the block that activated the slot on the restarted test network
+        consensus.sidechain.main_activation_height = TESTNET_MAIN_ACTIVATION_HEIGHT; // set once slot 6 activates on the reset test network (kernel/testnet_activation.h)
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;

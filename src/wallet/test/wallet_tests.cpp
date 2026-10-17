@@ -1713,9 +1713,12 @@ BOOST_FIXTURE_TEST_CASE(shielded_account_chain_records_on_load, TestingSetup)
 BOOST_AUTO_TEST_CASE(shielded_keys_of_the_test_network_before_its_reset)
 {
     // zSide: the first block of a sidechain, made again from its text and time: that of the test network
-    // now, and the one it had before its reset of 2026-10-08, whose keys a wallet kept across it has.
+    // now, and those it had before its resets of 2026-10-17 and 2026-10-08, whose keys a wallet kept
+    // across them has.
     const auto test{CreateChainParams(ArgsManager{}, ChainType::TESTNET)};
-    BOOST_CHECK(SidechainGenesisHash("zSide testnet", 1791513282) == test->GetConsensus().hashGenesisBlock);
+    BOOST_CHECK(SidechainGenesisHash("zSide testnet 17/Oct/2026: a fresh start", 1792210200) == test->GetConsensus().hashGenesisBlock);
+    BOOST_CHECK(test->GetConsensus().hashGenesisBlock == uint256{"0be9cbb6499ea48506d61776e274db39d52261ce3dc650dea16efa3833f7a0f1"});
+    BOOST_CHECK(SidechainGenesisHash("zSide testnet", 1791513282) == uint256{"63fb78794df4bbdf57442fd68d27d17e47a259a5c74b91f1dca01e9c22cad411"});
     BOOST_CHECK(SidechainGenesisHash("zSide testnet", 1791302400) == uint256{"44cf5414f37f1adda63098ed74fbb189fe7a8224bea6a521d407a88be4e129db"});
     const auto signet{CreateChainParams(ArgsManager{}, ChainType::SIGNET)};
     BOOST_CHECK(SidechainGenesisHash("zSide signet", 1791302400) == signet->GetConsensus().hashGenesisBlock);
