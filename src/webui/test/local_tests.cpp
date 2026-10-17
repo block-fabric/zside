@@ -64,6 +64,11 @@ BOOST_AUTO_TEST_CASE(viewing_key_waits_for_the_desktop)
 {
     // The page may not call the RPC method itself.
     BOOST_CHECK(!webui::local::RpcMethods().contains("exportshieldedviewingkey"));
+    // What pays or signs: never the page's to call, only through the host, which confirms it on the desktop (audit 7 #1).
+    for (const char* m : {"sendshielded", "shieldcoins", "unshieldcoins", "bumpshieldedfee", "meltcoins", "castcoins"}) {
+        BOOST_CHECK_MESSAGE(webui::local::ConfirmedRpcMethods().contains(m), m);
+        BOOST_CHECK_MESSAGE(!webui::local::RpcMethods().contains(m) && !webui::local::KeyedRpcMethods().contains(m), m);
+    }
 
     Answers answers;
     webui::Bridge bridge{answers.Fn(), [](std::function<void()> fn) { fn(); }};
@@ -82,7 +87,8 @@ BOOST_AUTO_TEST_CASE(viewing_key_waits_for_the_desktop)
             ++asked;
             shown = dialog.message;
             return yes.load();
-        });
+        },
+        /*keys=*/{});
 
     UniValue params{UniValue::VOBJ};
     params.pushKV("wallet", "savings\n‮evil");
