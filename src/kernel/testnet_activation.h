@@ -17,6 +17,6 @@
  * only then: a node started before keeps the record of the mainchain it began (from height 0, not from
  * the activation; harmless, but start new datadirs with the height set).
  */
-inline constexpr int TESTNET_MAIN_ACTIVATION_HEIGHT{0};
+inline constexpr int TESTNET_MAIN_ACTIVATION_HEIGHT{70};
 
 #endif // BITCOIN_KERNEL_TESTNET_ACTIVATION_H
