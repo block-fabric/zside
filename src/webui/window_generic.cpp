@@ -81,6 +81,9 @@ public:
     bool OpenExternal(const std::string&) override { return false; }
     void SetClipboard(const std::string&) override { LogWarning("webui: no clipboard on this platform yet"); }
     std::optional<std::string> GetClipboard() override { return std::nullopt; }
+    // TODO(macos port): the last key or click of the user in the window (NSEvent), for the clipboard.
+    std::optional<UserInput> LastUserInput() override { return std::nullopt; }
+    void NoteUserInput() override {}
     void Snapshot(const std::string&, std::function<void(bool ok)> done) override { done(false); }
     void Ask(const dialog::Request&, std::function<void(dialog::Answer)> done) override
     {

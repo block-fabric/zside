@@ -21,6 +21,10 @@ constexpr size_t MAX_MESSAGE{6000};
 constexpr size_t MAX_DETAILS{6000};
 constexpr size_t MAX_BUTTON{60};
 constexpr size_t MAX_LABEL{200};
+//! The facts of a dialog (Row): at most MAX_ROWS (dialog.h), their labels and values cut to so many characters.
+constexpr size_t MAX_ROW_LABEL{60};
+constexpr size_t MAX_ROW_VALUE{2000};
+constexpr size_t MAX_ERROR{400};
 //! The longest passphrase taken (bytes), as the page's own fields.
 constexpr size_t MAX_PASSPHRASE{1024};
 //! The largest theme of the user passed to the page (bytes of its JSON); the page checks it again.
@@ -77,10 +81,24 @@ std::string_view LevelName(Level level)
     return "warning";
 }
 
+std::string_view RowKindName(Row::Kind kind)
+{
+    switch (kind) {
+    case Row::Kind::TEXT: return "text";
+    case Row::Kind::ADDRESS: return "address";
+    case Row::Kind::AMOUNT: return "amount";
+    case Row::Kind::TOTAL: return "total";
+    case Row::Kind::HEADING: return "heading";
+    case Row::Kind::NOTE: return "note";
+    }
+    return "text";
+}
+
 std::string Shown(std::string_view text, size_t max_chars)
 {
     std::string out;
     size_t pos{0}, chars{0};
+    uint32_t previous{0};
     while (pos < text.size()) {
         if (chars >= max_chars) {
             out += "…";
@@ -97,11 +115,12 @@ std::string Shown(std::string_view text, size_t max_chars)
             out += '\n';
         } else if (c == '\t') {
             out += ' ';
-        } else if (guard::IsControlOrFormat(c)) {
+        } else if (guard::IsHidden(previous, c)) {
             out += strprintf("[U+%04X]", c);
         } else {
             guard::AppendUtf8(out, c);
         }
+        previous = c;
         ++chars;
     }
     return out;
@@ -118,8 +137,47 @@ UniValue PageData(const Request& request)
     out.pushKV("level", std::string{LevelName(request.level)});
     out.pushKV("passphrase", request.passphrase);
     out.pushKV("passphraseLabel", guard::OneLine(request.passphrase_label, MAX_LABEL));
+    out.pushKV("error", guard::OneLine(request.error, MAX_ERROR));
+    UniValue rows{UniValue::VARR};
+    for (const Row& row : request.rows) {
+        if (rows.size() >= MAX_ROWS) {
+            // Never a fact dropped without saying so.
+            UniValue more{UniValue::VOBJ};
+            more.pushKV("label", "");
+            more.pushKV("value", strprintf("… and %u more", request.rows.size() - MAX_ROWS));
+            more.pushKV("kind", std::string{RowKindName(Row::Kind::NOTE)});
+            rows.push_back(std::move(more));
+            break;
+        }
+        UniValue r{UniValue::VOBJ};
+        r.pushKV("label", guard::OneLine(row.label, MAX_ROW_LABEL));
+        // An address (any destination) on one line, whole: never cut, so never taken for another by its ends.
+        r.pushKV("value", row.kind == Row::Kind::ADDRESS ? Shown(guard::OneLine(row.value, MAX_ROW_VALUE), MAX_ROW_VALUE) : Shown(row.value, MAX_ROW_VALUE));
+        r.pushKV("kind", std::string{RowKindName(row.kind)});
+        rows.push_back(std::move(r));
+    }
+    out.pushKV("rows", std::move(rows));
     out.pushKV("look", request.look.isObject() ? request.look : UniValue{UniValue::VOBJ});
     return out;
+}
+
+std::string FallbackText(const UniValue& page)
+{
+    std::string text{page.find_value("message").isStr() ? page.find_value("message").get_str() : std::string{}};
+    const UniValue& rows{page.find_value("rows")};
+    if (rows.isArray() && !rows.empty()) {
+        text += "\n";
+        for (const UniValue& row : rows.getValues()) {
+            const std::string label{row.find_value("label").isStr() ? row.find_value("label").get_str() : std::string{}};
+            const std::string value{row.find_value("value").isStr() ? row.find_value("value").get_str() : std::string{}};
+            const std::string kind{row.find_value("kind").isStr() ? row.find_value("kind").get_str() : std::string{}};
+            if (kind == "heading") text += "\n" + label + (value.empty() ? "" : " " + value);
+            else text += "\n" + (label.empty() ? value : label + ": " + value);
+        }
+    }
+    if (page.find_value("details").isStr() && !page.find_value("details").get_str().empty()) text += "\n\n" + page.find_value("details").get_str();
+    if (page.find_value("error").isStr() && !page.find_value("error").get_str().empty()) text += "\n\n" + page.find_value("error").get_str();
+    return text;
 }
 
 UniValue Look(const UniValue& prefs, bool rtl, const std::string& language)
@@ -283,13 +341,18 @@ bool Pending::Push(Request request, Done done)
 
 std::optional<std::pair<Request, Pending::Done>> Pending::Next()
 {
-    if (m_queue.empty()) {
-        m_busy = false;
-        return std::nullopt;
+    while (!m_queue.empty()) {
+        auto next{std::move(m_queue.front())};
+        m_queue.pop_front();
+        // Whoever asked no longer waits: not shown (audit 7 #8), declined.
+        if (next.first.withdrawn && next.first.withdrawn->load()) {
+            if (next.second) next.second(Answer{});
+            continue;
+        }
+        return next;
     }
-    auto next{std::move(m_queue.front())};
-    m_queue.pop_front();
-    return next;
+    m_busy = false;
+    return std::nullopt;
 }
 
 } // namespace webui::dialog

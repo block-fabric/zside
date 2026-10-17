@@ -15,7 +15,7 @@
   {#if record.status === 'conflicted' || record.status === 'notaccepted'}
     <circle cx="9" cy="9" r={R} class="track" />
     <path d="M6 6l6 6M12 6l-6 6" class="mark" />
-  {:else if record.status === 'abandoned'}
+  {:else if record.status === 'abandoned' || record.status === 'dropped'}
     <circle cx="9" cy="9" r={R} class="track" />
     <path d="M4.5 13.5l9-9" class="mark" />
   {:else if record.status === 'confirmed'}

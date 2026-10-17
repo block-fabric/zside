@@ -113,8 +113,9 @@ function transport(calls: BridgeRequest[], chain: Record<string, { value: number
     switch (r.method) {
       case 'wallet.coins':
         return COINS;
-      case 'wallet.withKeys':
-        // Only single-key addresses sign (not the taproot one); the signature names what was signed.
+      case 'rpc.confirmed':
+        // All the signatures in one call of the host, which asks the user on the desktop first (audit 7 #1). Only
+        // single-key addresses sign (not the taproot one); the signature names what was signed.
         return (p.calls as { params: [string, string] }[]).map(({ params: [address, message] }) =>
           address === regtestP2tr ? { error: { code: -3, message: 'Address does not refer to key' } } : { result: sig(address, message) },
         );

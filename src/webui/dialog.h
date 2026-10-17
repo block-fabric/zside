@@ -8,12 +8,15 @@
 #include <support/allocators/secure.h>
 #include <univalue.h>
 
+#include <atomic>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 /**
  * The dialogs of the host: what the app asks the user itself, not the page (a command of the console, a web
@@ -51,6 +54,37 @@ inline constexpr int READY_TIMEOUT_MS{10000};
 //! How grave what is asked is: the colour of the icon and of the button that accepts.
 enum class Level { INFO, WARNING, DANGER };
 
+//! The most rows (Row) a dialog shows; more are cut. A confirmation never has more (confirm.cpp refuses it instead).
+constexpr size_t MAX_ROWS{80};
+
+/**
+ * A fact the dialog shows apart from its text, on a line of its own: what a spend pays and to whom, what a vote
+ * changes (audit 7 #1). The host decodes them from the transaction or the parameters itself; the page shows them as
+ * text (textContent), an address whole (wrapped, never cut), in the order given: a destination before its amount.
+ */
+struct Row {
+    enum class Kind {
+        //! A label and a value (a wallet, a network, a slot).
+        TEXT,
+        //! A destination: an address, a script, a deposit address, shown whole in a monospaced font.
+        ADDRESS,
+        //! An amount (of the recipient above it, a fee).
+        AMOUNT,
+        //! What is paid in all: shown heavier.
+        TOTAL,
+        //! A heading of the rows after it (one recipient of several).
+        HEADING,
+        //! A line of text across the rows (what the host could not know before, such as a fee chosen later).
+        NOTE,
+    };
+    std::string label;
+    std::string value;
+    Kind kind{Kind::TEXT};
+};
+
+//! The name of a kind of row, as the page reads it.
+std::string_view RowKindName(Row::Kind kind);
+
 /** A question of the host. */
 struct Request {
     std::string title;
@@ -62,9 +96,16 @@ struct Request {
     std::string accept;
     std::string cancel{"Cancel"};
     Level level{Level::WARNING};
+    //! The facts shown apart, in order (Row): decoded by the host.
+    std::vector<Row> rows;
     //! A passphrase field: the answer carries what was typed in it (only when accepted).
     bool passphrase{false};
     std::string passphrase_label;
+    //! An error shown at the field (the passphrase typed before was wrong).
+    std::string error;
+    //! Set when whoever asked no longer waits (the page cancelled its request): a question still waiting its turn is
+    //! not shown (Pending::Next). Null for one that cannot be withdrawn.
+    std::shared_ptr<std::atomic<bool>> withdrawn;
     //! The look of the app (Look).
     UniValue look{UniValue::VOBJ};
     //! The tests only (WEBUI_TEST_HOOKS): the themed window is not made, as when its web view cannot be (the fallback shows).
@@ -91,6 +132,12 @@ std::string Shown(std::string_view text, size_t max_chars);
 
 /** What the page shows ("hello"): every text through Shown (the title and the buttons on one line), the look. */
 UniValue PageData(const Request& request);
+
+/**
+ * The text of the dialog of the system (the fallback), from what the page would show (PageData): the message, the
+ * facts one a line ("label: value"), the details and the error.
+ */
+std::string FallbackText(const UniValue& page);
 
 /**
  * The look of the dialogs from the preferences of the app (of the network shown): the theme chosen (the page
@@ -175,7 +222,10 @@ public:
 
     /** A dialog asked: true when it is to be shown now (none shows), false when it waits its turn. */
     bool Push(Request request, Done done);
-    /** The one shown is answered: the next one, if there is one (it shows now), or nothing (none shows). */
+    /**
+     * The one shown is answered: the next one, if there is one (it shows now), or nothing (none shows). A question
+     * withdrawn meanwhile (Request::withdrawn) is skipped: its `done` gets a declined answer at once.
+     */
     std::optional<std::pair<Request, Done>> Next();
     bool Busy() const { return m_busy; }
     size_t Waiting() const { return m_queue.size(); }

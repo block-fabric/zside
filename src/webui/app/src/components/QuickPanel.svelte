@@ -89,7 +89,7 @@
     busy = true;
     try {
       const type = current.info?.defaultAddressType || 'bech32';
-      const a = await withUnlock(wallet, (passphrase) => api.newAddress(rLabel, type, passphrase));
+      const a = await withUnlock(wallet, () => api.newAddress(rLabel, type));
       if (a === null) {
         await inform(t('Receive'), t('Could not unlock wallet.'), 'error');
         return;

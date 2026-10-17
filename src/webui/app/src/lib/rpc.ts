@@ -84,13 +84,38 @@ export interface RpcMethods {
 
 export type Method = keyof RpcMethods;
 
+let confirmed: Promise<Set<string>> | null = null;
+
+/**
+ * The RPC methods that pay, sign or change what the node votes for (deposits, votes, acks, proposals, mining, signatures,
+ * and the chain's own): never in the page's policy, they go through the host, which decodes them and asks the user on the
+ * desktop first (rpc.confirmed, src/webui/confirm.h; audit 7 #1). Asked of the host once.
+ */
+export function confirmedMethods(): Promise<Set<string>> {
+  confirmed ??= request<{ confirmed?: unknown }>('host', 'rpc.confirmedMethods', {})
+    .then((r) => new Set(Array.isArray(r?.confirmed) ? r.confirmed.filter((m): m is string => typeof m === 'string') : []))
+    .catch(() => {
+      // Asked again next time (the host was not ready).
+      confirmed = null;
+      return new Set<string>();
+    });
+  return confirmed;
+}
+
 export const rpc = {
   /** Call a method the client knows the types of. */
   call<M extends Method>(method: M, params: RpcMethods[M]['params'], options?: CallOptions): Promise<RpcMethods[M]['result']> {
     return request<RpcMethods[M]['result']>('rpc', method, params as unknown[], options);
   },
-  /** Call any method (the console, methods of the chain the client has no types for). */
-  raw<T = unknown>(method: string, params: unknown[] | Record<string, unknown> = [], options?: CallOptions): Promise<T> {
+  /**
+   * Call any method (the console, methods of the chain the client has no types for). One that the host confirms on the
+   * desktop (confirmedMethods) goes to it: it answers BRIDGE_CANCELLED when the user said no.
+   */
+  async raw<T = unknown>(method: string, params: unknown[] | Record<string, unknown> = [], options?: CallOptions): Promise<T> {
+    if ((await confirmedMethods()).has(method)) {
+      const wallet = options?.wallet;
+      return request<T>('host', 'rpc.confirmed', wallet == null ? { method, params } : { method, params, wallet }, { signal: options?.signal });
+    }
     return request<T>('rpc', method, params, options);
   },
 };
@@ -234,8 +259,11 @@ export const host = {
   hashes: (text: string, hex: boolean) => request<Hashes>('host', 'tools.hashes', { text, hex }),
   merkle: (txids: string[]) => request<{ levels?: string[][]; error?: string }>('host', 'tools.merkle', { txids }),
   decode: (text: string) => request<Decoded>('host', 'tools.decode', { text }),
-  /** The latest blocks from the block index, newest first (0: all): [height, hash, time, transactions, difficulty]. */
-  explorerBlocks: (count: number) => request<[number, string, number, number, number][]>('host', 'explorer.blocks', { count }),
+  /**
+   * Blocks of the active chain from the block index, newest first: `count` (1 to 10 000) from the height `from` down (the tip
+   * by default): [height, hash, time, transactions, difficulty].
+   */
+  explorerBlocks: (count: number, from?: number) => request<[number, string, number, number, number][]>('host', 'explorer.blocks', from === undefined ? { count } : { count, from }),
   hashFile: (path: string) => request<{ sha256: string; size: number }>('host', 'timestamp.hashFile', { path }),
   searchStamp: (payload: string, from: string, count: number, options?: CallOptions) =>
     request<{ searched: number; next: string | null; found: Stamp[] }>('host', 'timestamp.search', { payload, from, count }, options),

@@ -82,8 +82,8 @@
     try {
       const api = walletApi(wallet);
       const current = ps.psbt;
-      const r = await withUnlock(wallet, (passphrase) => api.psbtSign(current, passphrase));
-      if (!r) status = { text: t('Cannot sign inputs while wallet is locked.'), level: 'warning' };
+      const r = await withUnlock(wallet, () => api.psbtSign(current));
+      if (!r) status = { text: t('Not signed: it was declined.'), level: 'warning' };
       else {
         ps = r;
         status = r.status;
@@ -99,7 +99,13 @@
     if (!ps) return;
     busy = true;
     try {
-      const r = await psbtApi.broadcast(ps.psbt);
+      // The desktop shows what it pays and asks first (audit 7 #1).
+      const shown = ps.psbt;
+      const r = await withUnlock(wallet ?? '', () => psbtApi.broadcast(shown, wallet ?? undefined));
+      if (!r) {
+        status = { text: t('Not broadcast: it was declined.'), level: 'warning' };
+        return;
+      }
       status = { text: t('Transaction broadcast successfully! Transaction ID: %1', r.txid), level: 'success' };
       ps = { ...ps, canBroadcast: false, canSign: false };
     } catch (e) {

@@ -502,8 +502,11 @@ void DesktopNotify(const std::string& title, const std::string& body, const std:
         if (rgba != icon) g_object_unref(rgba);
         g_object_unref(icon);
     }
+    // The body may be read as markup by the notification server (body-markup): written as text, so that a label or text
+    // of the chain in it cannot make a link, load an image or hide the rest (audit 7 #16). The summary is plain text.
+    gchar* escaped{g_markup_escape_text(body.c_str(), -1)};
     g_dbus_connection_call(bus, "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "Notify",
-                           g_variant_new("(susssasa{sv}i)", std::string{chain::NAME}.c_str(), 0u, "", title.c_str(), body.c_str(), &actions, &hints, -1),
+                           g_variant_new("(susssasa{sv}i)", std::string{chain::NAME}.c_str(), 0u, "", title.c_str(), escaped, &actions, &hints, -1),
                            nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr,
                            +[](GObject* source, GAsyncResult* result, gpointer) {
                                GError* call_error{nullptr};
@@ -515,6 +518,7 @@ void DesktopNotify(const std::string& title, const std::string& body, const std:
                                }
                            },
                            nullptr);
+    g_free(escaped);
     g_object_unref(bus);
 }
 

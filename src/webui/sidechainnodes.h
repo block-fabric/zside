@@ -56,6 +56,9 @@ public:
      */
     using ConfirmFn = std::function<bool(const std::string& title, const std::string& message, const std::string& accept)>;
 
+    /** The most "Mine one block" offers, for one block (0.01 coins), as bmm.request of a sidechain's app (audit 7 #2). */
+    static constexpr int64_t MAX_BMM_OFFER{1'000'000};
+
     /** A release of a sidechain built into this app: where to download it, and the SHA-256 of the archive. */
     struct Release {
         std::string stem;

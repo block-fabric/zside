@@ -142,7 +142,7 @@ describe('dialogs a page waits for', () => {
 });
 
 describe('the send page', () => {
-  it('prepares, confirms and sends, with the passphrase of a locked wallet', async () => {
+  it('prepares, shows a preview, and sends through the host, which asks on the desktop (never the page) for the passphrase', async () => {
     useWallet();
     const calls: BridgeRequest[] = [];
     setTransport(async (r) => {
@@ -156,7 +156,8 @@ describe('the send page', () => {
         case 'validateaddress':
           return { isvalid: true };
         case 'wallet.send.prepare':
-          if (!p.passphrase) throw { code: -13, message: 'This operation needs your wallet passphrase to unlock the wallet.' };
+          // Made, not signed: no passphrase (audit 7 #1).
+          if ('passphrase' in p) throw new Error('the page sent a passphrase');
           return { token: 't1', fee: 282, vsize: 141, total: 100_000_282, recipients: [{ address: regtestP2wpkh, label: 'Shop', amount: 100_000_000 }], privateKeysDisabled: false, externalSigner: false, txid: 'ab'.repeat(32) };
         case 'wallet.send.commit':
           return { complete: true, txid: 'ab'.repeat(32) };
@@ -174,16 +175,14 @@ describe('the send page', () => {
     await fireEvent.input(screen.getByLabelText('Amount'), { target: { value: '1' } });
     await waitFor(() => screen.getByText('Valid address'));
     await fireEvent.click(screen.getByRole('button', { name: /^Send$/ }));
-    // Locked: the passphrase first.
-    await waitFor(() => screen.getByLabelText('Passphrase'));
-    await fireEvent.input(screen.getByLabelText('Passphrase'), { target: { value: 'pw' } });
-    await fireEvent.submit(document.getElementById('passphrase-form')!);
-    // Then the confirmation, with the fee and the total.
+    // The preview of the page, with the fee and the total; the address first, then the amount, then the label. No
+    // passphrase is asked here: the desktop asks it with what the transaction pays (audit 7 #1, #4).
     await waitFor(() => screen.getByText('Do you want to create this transaction?'));
+    expect(screen.queryByLabelText('Passphrase')).toBeNull();
     expect(document.body.textContent).toContain('Transaction fee (0.141 kvB): 0.00000282 CHN');
     expect(document.body.textContent).toContain('Total Amount: 1.00000282 CHN');
-    expect(document.body.textContent).toContain(`1.00000000 CHN to 'Shop' (${regtestP2wpkh})`);
-    const prepare = calls.find((c) => c.method === 'wallet.send.prepare' && (c.params as Record<string, unknown>).passphrase);
+    expect(document.body.textContent).toContain(`To ${regtestP2wpkh}: 1.00000000 CHN (label \u201cShop\u201d)`);
+    const prepare = calls.find((c) => c.method === 'wallet.send.prepare');
     expect(prepare?.params).toMatchObject({ wallet: 'w', confTarget: 6, recipients: [{ address: regtestP2wpkh, label: 'Shop', amount: 100_000_000, subtractFee: false }] });
     await waitFor(() => expect((screen.getByRole('button', { name: /^Send$/, hidden: false }) as HTMLButtonElement).disabled).toBe(false), { timeout: 5000 });
     const confirmSend = [...document.querySelectorAll<HTMLButtonElement>('button[data-choice="send"]')][0];

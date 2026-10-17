@@ -29,6 +29,7 @@
 #include <validation.h>
 #include <webui/appconfig.h>
 #include <webui/bridge.h>
+#include <webui/confirm.h>
 #include <webui/events.h>
 #include <webui/guard.h>
 #include <webui/i18n.h>
@@ -74,6 +75,25 @@ int PruneMiBtoGB(int64_t mib) { return (mib * 1024 * 1024 + GB_BYTES - 1) / GB_B
 int MinPruneGB() { return static_cast<int>((MinPruneTarget(Params().GetConsensus()) + GB_BYTES - 1) / GB_BYTES); }
 
 std::thread::id g_ui_thread;
+
+//! The questions of the host (App::AskHost, audit 7 #8): at most so many wait at once, and a kind declined so many times
+//! within the window is refused for the rest of the session.
+constexpr int MAX_QUESTIONS_WAITING{4};
+constexpr size_t MAX_DECLINED{3};
+constexpr int64_t DECLINED_WINDOW_S{60};
+//! How long after it was chosen a file may be used (App::TakeChosenFile).
+constexpr int64_t CHOSEN_FILE_S{10 * 60};
+//! The clipboard (audit 7 #5): how soon after the user's key or click the page may write or read it (milliseconds; a
+//! write may follow a call to the node, such as a PSBT made), the reads in a minute at most, the largest text written.
+constexpr int64_t CLIPBOARD_WRITE_MS{5000};
+constexpr int64_t CLIPBOARD_READ_MS{2000};
+constexpr size_t MAX_CLIPBOARD_READS{10};
+constexpr size_t MAX_CLIPBOARD_BYTES{1'000'000};
+
+int64_t SteadySeconds()
+{
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 std::string NetworkLabel(const std::string& network)
 {
@@ -435,16 +455,15 @@ bool App::StartNode()
 {
     // The configuration: chains.conf and settings.json.
     auto settings_abort{[this](const bilingual_str& message, const std::vector<std::string>& details) {
-        UniValue dialog{UniValue::VOBJ};
-        dialog.pushKV("kind", "settingsError");
-        dialog.pushKV("title", CLIENT_NAME);
-        dialog.pushKV("message", message.original + ".");
-        dialog.pushKV("question", "Do you want to reset settings to default values, or to abort without making changes?");
-        UniValue list{UniValue::VARR};
-        for (const auto& d : details) list.push_back(d);
-        dialog.pushKV("details", std::move(list));
-        const UniValue answer{Ask(std::move(dialog), UniValue{"abort"})};
-        return !(answer.isStr() && answer.get_str() == "reset");
+        // Asked by the host, not the page (audit 7 #18): a reset wipes settings.json.
+        m_window->Post([this] { m_window->Show(false); });
+        Window::ConfirmDialog dialog;
+        dialog.title = strprintf("%s: the settings cannot be read", CLIENT_NAME);
+        dialog.message = message.original + ".\n\nDo you want to reset settings to default values, or to abort without making changes?";
+        dialog.details = util::Join(details, "\n");
+        dialog.accept = "Reset settings";
+        dialog.cancel = "Abort";
+        return !Confirm(dialog);
     }};
     if (auto error{common::InitConfig(m_args, settings_abort)}) {
         InitError(error->message, error->details);
@@ -522,13 +541,13 @@ bool App::StartNode()
         }
     }));
     m_node_handlers.push_back(m_node->handleQuestion([this](const bilingual_str& message, const std::string&, unsigned int style) {
-        UniValue dialog{UniValue::VOBJ};
-        dialog.pushKV("kind", "question");
-        dialog.pushKV("title", CLIENT_NAME);
-        dialog.pushKV("message", message.translated);
-        dialog.pushKV("style", static_cast<int64_t>(style));
-        const UniValue answer{Ask(std::move(dialog), UniValue{false})};
-        return answer.isBool() && answer.get_bool();
+        // A question of the node as it starts (rebuild the databases?): asked by the host, not the page (audit 7 #18).
+        Window::ConfirmDialog dialog;
+        dialog.title = strprintf("%s: a question of the node", CLIENT_NAME);
+        dialog.message = message.translated;
+        dialog.accept = "OK";
+        dialog.cancel = (style & CClientUIInterface::BTN_ABORT) ? "Abort" : "Cancel";
+        return Confirm(dialog);
     }));
 
     // Changes of the Settings page never applied (the app stopped first): taken back before the node
@@ -707,9 +726,20 @@ std::optional<std::string> App::Choose(const Window::FileDialog& dialog)
     if (!chosen) return std::nullopt;
     if (!dialog.folder) {
         LOCK(m_mutex);
-        (dialog.save ? m_writable : m_readable).insert(*chosen);
+        (dialog.save ? m_writable : m_readable)[*chosen] = SteadySeconds();
     }
     return chosen;
+}
+
+bool App::TakeChosenFile(const std::string& path, bool write)
+{
+    LOCK(m_mutex);
+    auto& grants{write ? m_writable : m_readable};
+    const auto it{grants.find(path)};
+    if (it == grants.end()) return false;
+    const bool fresh{SteadySeconds() - it->second <= CHOSEN_FILE_S};
+    grants.erase(it);
+    return fresh;
 }
 
 dialog::Request App::DialogRequest(const Window::ConfirmDialog& confirm)
@@ -719,7 +749,12 @@ dialog::Request App::DialogRequest(const Window::ConfirmDialog& confirm)
     request.message = confirm.message;
     request.details = confirm.details;
     request.accept = confirm.accept;
+    if (!confirm.cancel.empty()) request.cancel = confirm.cancel;
     request.level = confirm.level;
+    request.rows = confirm.rows;
+    request.passphrase = confirm.passphrase;
+    request.passphrase_label = confirm.passphrase_label;
+    request.error = confirm.error;
     std::string language;
     {
         LOCK(m_mutex);
@@ -727,41 +762,120 @@ dialog::Request App::DialogRequest(const Window::ConfirmDialog& confirm)
     }
     bool rtl{false};
     if (auto catalog{LoadCatalog(BuiltinAssets(), language)}) rtl = catalog->find_value("rtl").isTrue();
-    request.look = dialog::Look(NetworkPrefs(), rtl, language);
+    UniValue prefs{UniValue::VOBJ};
+    try {
+        prefs = NetworkPrefs();
+    } catch (const std::exception&) {
+        // Before the network is known (a question of the configuration): the default look.
+    }
+    request.look = dialog::Look(prefs, rtl, language);
     return request;
 }
 
+
 bool App::Confirm(const Window::ConfirmDialog& confirm)
 {
-    dialog::Request request{DialogRequest(confirm)};
-#ifdef WEBUI_TEST_HOOKS
+    return AskHost(confirm).accepted;
+}
+
+dialog::Answer App::AskHost(const Window::ConfirmDialog& confirm)
+{
+    const std::string kind{confirm.kind.empty() ? confirm.title : confirm.kind};
+    Window::ConfirmDialog shown{confirm};
     {
         LOCK(m_mutex);
-        if (!m_test_confirms.empty()) {
-            const TestConfirm answer{m_test_confirms.front()};
-            m_test_confirms.pop_front();
-            m_test_confirmed.push_back(confirm);
+        if (m_shutdown_requested) return {};
+        QuestionKind& k{m_question_kinds[kind]};
+        const int64_t now{SteadySeconds()};
+        while (!k.declined.empty() && k.declined.front() < now - DECLINED_WINDOW_S) k.declined.pop_front();
+        if (k.refused) {
+            LogInfo("webui: \"%s\" is not asked again: it was declined %u times in a row", guard::OneLine(kind, 80), MAX_DECLINED);
+            return {};
+        }
+        // One question of a kind at a time, and a few at once: a page that asks again and again waits for none of them.
+        if (k.waiting || m_questions_waiting >= MAX_QUESTIONS_WAITING) {
+            LogInfo("webui: \"%s\" is not asked: %s", guard::OneLine(kind, 80), k.waiting ? "the same question waits for an answer" : "too many questions wait for an answer");
+            return {};
+        }
+        k.waiting = true;
+        ++m_questions_waiting;
+        if (k.declined.size() + 1 >= MAX_DECLINED) {
+            shown.message = strprintf("This was asked and declined %u times in the last minute. Decline it once more and the app stops asking it until it starts again.\n\n%s",
+                                      k.declined.size(), shown.message);
+        }
+    }
+    ++m_host_questions;
+    // Answered: the kind may be asked again (or not, declined too often).
+    const auto answered{[&](bool accepted, bool counted) {
+        --m_host_questions;
+        LOCK(m_mutex);
+        QuestionKind& k{m_question_kinds[kind]};
+        k.waiting = false;
+        --m_questions_waiting;
+        if (!counted) return;
+        if (accepted) {
+            k.declined.clear();
+        } else {
+            k.declined.push_back(SteadySeconds());
+            if (k.declined.size() >= MAX_DECLINED) k.refused = true;
+        }
+    }};
+    dialog::Request request{DialogRequest(shown)};
+#ifdef WEBUI_TEST_HOOKS
+    {
+        std::optional<TestAnswer> answer;
+        bool unexpected{false};
+        {
+            LOCK(m_mutex);
+            if (!m_test_confirms.empty()) {
+                answer = m_test_confirms.front();
+                m_test_confirms.pop_front();
+                m_test_confirmed.push_back(shown);
+            } else if (m_test_confirm_always) {
+                answer = m_test_confirm_always;
+                m_test_confirmed.push_back(shown);
+            } else if (!m_test_script.empty()) {
+                // A test that did not expect the question: declined, and kept for test.confirmed (never a dialog
+                // on the desktop of whoever runs the tests).
+                m_test_confirmed.push_back(shown);
+                unexpected = true;
+            }
+        }
+        if (unexpected) {
+            answered(false, false);
+            return {};
+        }
+        if (answer) {
             // Answered here, or shown (in the dialog window, or in the dialog of the system as when that window cannot be made).
-            if (answer == TestConfirm::YES || answer == TestConfirm::NO) return answer == TestConfirm::YES;
-            request.test_fallback = answer == TestConfirm::FALLBACK;
-        } else if (!m_test_script.empty()) {
-            // A test that did not expect the question: declined, and kept for test.confirmed (never a dialog
-            // on the desktop of whoever runs the tests).
-            m_test_confirmed.push_back(confirm);
-            return false;
+            if (answer->kind == TestConfirm::YES || answer->kind == TestConfirm::NO) {
+                dialog::Answer out;
+                out.accepted = answer->kind == TestConfirm::YES;
+                if (out.accepted && shown.passphrase) out.passphrase.assign(answer->passphrase.begin(), answer->passphrase.end());
+                answered(out.accepted, false);
+                return out;
+            }
+            request.test_fallback = answer->kind == TestConfirm::FALLBACK;
         }
     }
 #endif
-    auto done{std::make_shared<std::promise<bool>>()};
-    m_window->Post([this, request = std::move(request), done] {
-        m_window->Ask(request, [done](dialog::Answer answer) { done->set_value(answer.accepted); });
+    request.withdrawn = std::make_shared<std::atomic<bool>>(false);
+    auto done{std::make_shared<std::promise<dialog::Answer>>()};
+    m_window->Post([this, request, done] {
+        m_window->Ask(request, [done](dialog::Answer answer) { done->set_value(std::move(answer)); });
     });
     auto future{done->get_future()};
     while (future.wait_for(200ms) != std::future_status::ready) {
-        LOCK(m_mutex);
-        if (m_shutdown_requested) return false;
+        // The page cancelled the request (or the app stops): the question is withdrawn if it still waits its turn.
+        const bool gone{Bridge::CurrentRequestDone() || WITH_LOCK(m_mutex, return m_shutdown_requested)};
+        if (gone) {
+            request.withdrawn->store(true);
+            answered(false, false);
+            return {};
+        }
     }
-    return future.get();
+    dialog::Answer answer{future.get()};
+    answered(answer.accepted, true);
+    return answer;
 }
 
 UniValue App::NetworkPrefs()
@@ -953,7 +1067,9 @@ void App::RegisterHostMethods()
         const std::string dir{ParamStr(params, "dir")};
         if (dir.empty()) throw HostError(BRIDGE_INVALID_REQUEST, "Choose a data directory");
         const UniValue prune{Param(params, "pruneGB")};
-        const int64_t prune_gb{prune.isNum() ? prune.getInt<int64_t>() : 0};
+        int64_t prune_gb{prune.isNum() ? prune.getInt<int64_t>() : 0};
+        // Bounded as options.set bounds pruneSize (audit 7 #17): never a size that overflows, nor one below the least of the chain.
+        if (prune_gb > 0) prune_gb = std::clamp<int64_t>(prune_gb, MinPruneGB(), NodeOptions::MAX_PRUNE_GB);
         {
             LOCK(m_mutex);
             if (m_phase != "intro") throw HostError("The intro is over");
@@ -1022,6 +1138,11 @@ void App::RegisterHostMethods()
         return prefs;
     });
 
+    // While a question of the host shows, the page neither hides nor moves the window under it (audit 7 #7): a dialog
+    // that comes back with the window would be under the user's pointer, armed.
+    const auto RefuseWhileQuestion{[this] {
+        if (HostQuestionOpen()) throw HostError(BRIDGE_CANCELLED, "A question of the app is open");
+    }};
     const auto need_node{[this]() -> interfaces::Node& {
         LOCK(m_mutex);
         if (!m_node_started || !m_node || m_phase != "ready") throw HostError(BRIDGE_NOT_READY, "The node is not running");
@@ -1040,6 +1161,10 @@ void App::RegisterHostMethods()
     b.RegisterHost("node.getSetting", [need_node](const UniValue& params) {
         interfaces::Node& node{need_node()};
         const std::string name{ParamStr(params, "name")};
+        // The settings of the Settings page only: never one that holds a secret, such as rpcpassword (audit 7 #15).
+        static const std::set<std::string> READABLE{"dbcache", "par", "prune", "spendzeroconfchange", "signer", "natpmp", "listen",
+                                                    "server", "proxy", "proxyrandomize", "onion", "onlynet", "lang", "maxuploadtarget"};
+        if (!READABLE.contains(name)) throw HostError(BRIDGE_INVALID_REQUEST, "This setting is not one the pages read");
         UniValue out{UniValue::VOBJ};
         out.pushKV("value", node.getPersistentSetting(name));
         out.pushKV("ignored", node.isSettingIgnored(name));
@@ -1054,27 +1179,32 @@ void App::RegisterHostMethods()
         UpdateTitle();
         return UniValue{true};
     });
-    b.RegisterHost("window.minimize", [this](const UniValue&) {
+    b.RegisterHost("window.minimize", [this, RefuseWhileQuestion](const UniValue&) {
+        RefuseWhileQuestion();
         m_window->Minimize();
         return UniValue{true};
     }, Bridge::Thread::UI);
     // The integrated title bar of the page (doc/webui-layouts.md): its buttons, its drags, its setting.
     b.RegisterHost("window.state", [this](const UniValue&) { return WindowState(); }, Bridge::Thread::UI);
     b.RegisterHost("window.isMaximized", [this](const UniValue&) { return UniValue{m_window->IsMaximized()}; }, Bridge::Thread::UI);
-    b.RegisterHost("window.toggleMaximize", [this](const UniValue&) {
+    b.RegisterHost("window.toggleMaximize", [this, RefuseWhileQuestion](const UniValue&) {
+        RefuseWhileQuestion();
         m_window->ToggleMaximize();
         return UniValue{true};
     }, Bridge::Thread::UI);
-    b.RegisterHost("window.close", [this](const UniValue&) {
+    b.RegisterHost("window.close", [this, RefuseWhileQuestion](const UniValue&) {
+        RefuseWhileQuestion();
         // As the close button of the system: minimized or to the tray if the user wants that, else the app stops.
         CloseRequested();
         return UniValue{true};
     }, Bridge::Thread::UI);
-    b.RegisterHost("window.startMove", [this](const UniValue&) {
+    b.RegisterHost("window.startMove", [this, RefuseWhileQuestion](const UniValue&) {
+        RefuseWhileQuestion();
         m_window->StartMove();
         return UniValue{true};
     }, Bridge::Thread::UI);
-    b.RegisterHost("window.startResize", [this](const UniValue& params) {
+    b.RegisterHost("window.startResize", [this, RefuseWhileQuestion](const UniValue& params) {
+        RefuseWhileQuestion();
         const auto edge{ParseWindowEdge(ParamStr(params, "edge"))};
         if (!edge) throw HostError(BRIDGE_INVALID_REQUEST, "edge: top, bottom, left, right, top-left, top-right, bottom-left or bottom-right");
         m_window->StartResize(*edge);
@@ -1111,10 +1241,7 @@ void App::RegisterHostMethods()
     }, Bridge::Thread::LONG);
     b.RegisterHost("file.read", [this](const UniValue& params) {
         const std::string path{ParamStr(params, "path")};
-        {
-            LOCK(m_mutex);
-            if (!m_readable.contains(path)) throw HostError(BRIDGE_INVALID_REQUEST, "Only a file chosen by the user can be read");
-        }
+        if (!TakeChosenFile(path, /*write=*/false)) throw HostError(BRIDGE_INVALID_REQUEST, "Only a file chosen by the user can be read, once, soon after");
         std::ifstream file{static_cast<const std::filesystem::path&>(fs::PathFromString(path)), std::ios::binary};
         if (!file) throw HostError(strprintf("Cannot open %s", path));
         file.seekg(0, std::ios::end);
@@ -1132,10 +1259,7 @@ void App::RegisterHostMethods()
     });
     b.RegisterHost("file.write", [this](const UniValue& params) {
         const std::string path{ParamStr(params, "path")};
-        {
-            LOCK(m_mutex);
-            if (!m_writable.contains(path)) throw HostError(BRIDGE_INVALID_REQUEST, "Only a file chosen by the user can be written");
-        }
+        if (!TakeChosenFile(path, /*write=*/true)) throw HostError(BRIDGE_INVALID_REQUEST, "Only a file chosen by the user can be written, once, soon after");
         std::string data;
         if (Param(params, "base64").isStr()) {
             auto bytes{DecodeBase64(Param(params, "base64").get_str())};
@@ -1149,19 +1273,42 @@ void App::RegisterHostMethods()
         return UniValue{path};
     });
 
+    // The clipboard, only right after the user asked for it (audit 7 #5): a key or a click of the user in the main window,
+    // as the platform saw it (never an event the page makes), at most one read and one write for each, reads rate-limited.
+    // A page cannot watch the clipboard from the tray, nor put an address of its own there while the user is elsewhere.
     b.RegisterHost("clipboard.write", [this](const UniValue& params) {
-        m_window->SetClipboard(ParamStr(params, "text"));
+        const std::string text{ParamStr(params, "text")};
+        if (text.size() > MAX_CLIPBOARD_BYTES) throw HostError(BRIDGE_INVALID_REQUEST, "The text is too long for the clipboard");
+        const auto input{m_window->LastUserInput()};
+        {
+            LOCK(m_mutex);
+            if (!input || input->age_ms > CLIPBOARD_WRITE_MS || input->serial == m_clipboard_write_gesture) {
+                throw HostError(BRIDGE_CANCELLED, "The clipboard is written only right after you ask for it, with a click or a key");
+            }
+            m_clipboard_write_gesture = input->serial;
+        }
+        m_window->SetClipboard(text);
         return UniValue{true};
     }, Bridge::Thread::UI);
     b.RegisterHost("clipboard.read", [this](const UniValue&) {
+        const auto input{m_window->LastUserInput()};
+        {
+            LOCK(m_mutex);
+            const int64_t now{SteadySeconds()};
+            while (!m_clipboard_reads.empty() && m_clipboard_reads.front() < now - 60) m_clipboard_reads.pop_front();
+            if (!input || input->age_ms > CLIPBOARD_READ_MS || input->serial == m_clipboard_read_gesture || m_clipboard_reads.size() >= MAX_CLIPBOARD_READS) {
+                throw HostError(BRIDGE_CANCELLED, "The clipboard is read only right after you ask for it, with a click or a key");
+            }
+            m_clipboard_read_gesture = input->serial;
+            m_clipboard_reads.push_back(now);
+        }
         const auto text{m_window->GetClipboard()};
         return text ? UniValue{*text} : UniValue{};
     }, Bridge::Thread::UI);
 
     // The node window and the tools of chains-qt.
     m_node_api = std::make_unique<NodeApi>(need_node, [this](const std::string& path) {
-        LOCK(m_mutex);
-        return m_readable.contains(path);
+        return TakeChosenFile(path, /*write=*/false);
     }, [this](const Window::ConfirmDialog& dialog) { return Confirm(dialog); });
     m_node_api->Register(b);
 
@@ -1195,7 +1342,14 @@ void App::RegisterHostMethods()
     m_sidechain_nodes->Register(b);
 #endif
     // The host methods of this chain's own pages (local.cpp).
-    local::RegisterHost(b, need_node, [this](const Window::ConfirmDialog& dialog) { return Confirm(dialog); });
+    // (Its calls with the keys of a wallet go through the wallet functions, made below: asked for when called.)
+    local::RegisterHost(b, need_node, [this](const Window::ConfirmDialog& dialog) { return Confirm(dialog); },
+                        [this](const std::string& wallet, Window::ConfirmDialog dialog, bool always, bool fee_unknown, const std::function<UniValue()>& run) -> UniValue {
+#ifdef ENABLE_WALLET
+                            if (m_wallet_api) return m_wallet_api->WithKeys(wallet, std::move(dialog), always, fee_unknown, run);
+#endif
+                            throw HostError(-18, "Wallets are disabled in this node (-disablewallet).");
+                        });
 
     // The options of the node (OptionsModel), in settings.json; the flag of a restart in the preferences.
     const auto options{[this, need_node]() {
@@ -1365,8 +1519,10 @@ void App::RegisterHostMethods()
 
     // Notifications of the desktop (Notificator) and the tray.
     b.RegisterHost("app.notify", [this](const UniValue& params) {
-        const std::string title{ParamStr(params, "title")};
-        const std::string body{Param(params, "body").isStr() ? Param(params, "body").get_str() : ""};
+        // One line of title and a short text, with what is not shown as itself written out (audit 7 #16; the desktop
+        // also gets the text escaped, never as markup).
+        const std::string title{guard::OneLine(ParamStr(params, "title"), 80)};
+        const std::string body{Param(params, "body").isStr() ? dialog::Shown(Param(params, "body").get_str(), 300) : ""};
         const std::string level{Param(params, "level").isStr() ? Param(params, "level").get_str() : "info"};
         {
             LOCK(m_mutex);
@@ -1391,11 +1547,23 @@ void App::RegisterHostMethods()
 #ifdef ENABLE_WALLET
     // The wallet functions (the wallet pages of chains-qt).
     m_wallet_api = std::make_unique<WalletApi>(need_node, [this](const std::string& path, bool write) {
-        LOCK(m_mutex);
-        return (write ? m_writable : m_readable).contains(path);
-    });
+        return TakeChosenFile(path, write);
+    }, [this](const Window::ConfirmDialog& dialog) { return AskHost(dialog); });
     m_wallet_api->Register(b);
 #endif
+
+    // The RPC methods of the pages that pay, sign or change what the node votes for: decoded and confirmed on the desktop
+    // first, the passphrase of a locked wallet typed there (confirm.h, audit 7 #1).
+    confirm::KeysFn keys;
+    confirm::FeeFn fee;
+#ifdef ENABLE_WALLET
+    keys = [this](const std::string& wallet, Window::ConfirmDialog dialog, bool always, bool fee_unknown, const std::function<UniValue()>& run) {
+        return m_wallet_api->WithKeys(wallet, std::move(dialog), always, fee_unknown, run);
+    };
+    fee = [this](const std::string& wallet, int64_t vsize) { return m_wallet_api->FeeFor(wallet, vsize); };
+#endif
+    m_confirmed_rpc = std::make_unique<confirm::ConfirmedRpc>(need_node, [this](const Window::ConfirmDialog& dialog) { return AskHost(dialog); }, keys, fee);
+    m_confirmed_rpc->Register(b);
 
 #ifdef WEBUI_TEST_HOOKS
     if (!m_test_script.empty()) {
@@ -1433,14 +1601,50 @@ void App::RegisterHostMethods()
             // The next confirmation of the host (App::Confirm): {yes} answers it here (true for accepted); {show: true}
             // shows it in the dialog window, {fallback: true} in the dialog of the system, as when that window cannot be
             // made; the test then answers it there (test.dialog).
+            // {yes: true, passphrase} types the passphrase in the field of a question that has one; {clear: true} drops the
+            // answers not used (a question that may or may not come).
+            if (Param(params, "clear").isTrue()) {
+                LOCK(m_mutex);
+                m_test_confirms.clear();
+                return UniValue{true};
+            }
+            // {always: true, passphrase?} answers yes to every question asked when none is queued (a page script that spends
+            // often, and reads what was asked with test.confirmed); {always: false} stops it.
+            if (Param(params, "always").isBool()) {
+                LOCK(m_mutex);
+                if (Param(params, "always").get_bool()) {
+                    m_test_confirm_always = TestAnswer{TestConfirm::YES, Param(params, "passphrase").isStr() ? Param(params, "passphrase").get_str() : std::string{}};
+                } else {
+                    m_test_confirm_always.reset();
+                }
+                return UniValue{true};
+            }
             const UniValue& yes{Param(params, "yes")};
             const bool show{Param(params, "show").isTrue()};
             const bool fallback{Param(params, "fallback").isTrue()};
             if (!yes.isBool() && !show && !fallback) throw HostError(BRIDGE_INVALID_REQUEST, "yes: true or false; or show: true; or fallback: true");
+            const UniValue& passphrase{Param(params, "passphrase")};
             LOCK(m_mutex);
-            m_test_confirms.push_back(fallback ? TestConfirm::FALLBACK : show ? TestConfirm::SHOW : yes.get_bool() ? TestConfirm::YES : TestConfirm::NO);
+            m_test_confirms.push_back({fallback ? TestConfirm::FALLBACK : show ? TestConfirm::SHOW : yes.get_bool() ? TestConfirm::YES : TestConfirm::NO,
+                                       passphrase.isStr() ? passphrase.get_str() : std::string{}});
             return UniValue{true};
         });
+        b.RegisterHost("test.questionLimits", [this](const UniValue&) {
+            // The limits of the questions start again (AskHost): the tests of the dialog window decline a question
+            // many times, on purpose; what they found is said first.
+            LOCK(m_mutex);
+            UniValue out{UniValue::VOBJ};
+            for (const auto& [kind, k] : m_question_kinds) {
+                if (k.refused) out.pushKV(kind, "refused");
+            }
+            m_question_kinds.clear();
+            return out;
+        });
+        b.RegisterHost("test.gesture", [this](const UniValue&) {
+            // As if the user pressed a key in the main window now (the clipboard takes calls right after one).
+            m_window->NoteUserInput();
+            return UniValue{true};
+        }, Bridge::Thread::UI);
         b.RegisterHost("test.dialog", [this](const UniValue& params) {
             // The dialog shown now (a confirmation the test let show): {action: "kind"}, {action: "eval", script},
             // {action: "snapshot", name} (in -webuitestshots), {action: "native", arg: "state", "accept" or "cancel"}.
@@ -1487,7 +1691,20 @@ void App::RegisterHostMethods()
                 UniValue entry{UniValue::VOBJ};
                 entry.pushKV("title", d.title);
                 entry.pushKV("message", d.message);
+                entry.pushKV("details", d.details);
+                entry.pushKV("accept", d.accept);
                 entry.pushKV("level", std::string{dialog::LevelName(d.level)});
+                entry.pushKV("passphrase", d.passphrase);
+                if (!d.error.empty()) entry.pushKV("error", d.error);
+                UniValue rows{UniValue::VARR};
+                for (const auto& row : d.rows) {
+                    UniValue r{UniValue::VOBJ};
+                    r.pushKV("label", row.label);
+                    r.pushKV("value", row.value);
+                    r.pushKV("kind", std::string{dialog::RowKindName(row.kind)});
+                    rows.push_back(std::move(r));
+                }
+                entry.pushKV("rows", std::move(rows));
                 out.push_back(std::move(entry));
             }
             return out;

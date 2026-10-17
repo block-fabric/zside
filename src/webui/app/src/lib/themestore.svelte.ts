@@ -1,7 +1,7 @@
 // The themes of the user (Settings → Advanced theme): kept with the preferences (prefs.customThemes),
 // saved at once (a library, not a setting waiting for Apply), shared as theme files through the file
 // chooser of the desktop (lib/files.ts: the page never names a path itself), or as text on the clipboard.
-import { baseColors, checkTheme, MAX_CUSTOM_THEMES, MAX_THEME_FILE, newCustomId, parseThemeFile, themeFileText, ThemeFileError, uniqueName, type CustomTheme, type CustomThemeId, type TokenName } from './customthemes';
+import { baseColors, checkTheme, legibleColors, MAX_CUSTOM_THEMES, MAX_THEME_FILE, newCustomId, parseThemeFile, themeFileText, ThemeFileError, uniqueName, type CustomTheme, type CustomThemeId, type TokenName } from './customthemes';
 import { base64ToBytes, chooseFile, FILTERS, readFile, safeFileName, writeText } from './files';
 import { t } from './i18n.svelte';
 import { host } from './rpc';
@@ -59,6 +59,15 @@ export function deleteTheme(id: CustomThemeId): void {
   if (draft.original.theme === id) draft.original.theme = theme.base;
   savePrefs(changes);
   if (look.preview?.id === id) look.preview = null;
+}
+
+/**
+ * The colours of a theme the page draws as its base, with why (audit 7 #10): a transparent text, or text, a warning or an
+ * error that cannot be read on its background. Said at import, and in the editor.
+ */
+export function unreadableNote(theme: Pick<CustomTheme, 'base' | 'colors'>): string {
+  const { replaced } = legibleColors(theme);
+  return replaced.length ? t('These colours are drawn as in the base look, because text or warnings would not be readable with them: %1', replaced.join(', ')) : '';
 }
 
 /** A theme from the text of a theme file: checked, then saved under a free name. Throws ThemeFileError. */

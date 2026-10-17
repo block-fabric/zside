@@ -4,7 +4,9 @@
   // found again in the last blocks. The file stays on this computer.
   import CopyButton from '../components/CopyButton.svelte';
   import Icon from '../components/Icon.svelte';
-  import { confirm, errorText, inform, walletRpc } from '../lib/dialogs.svelte';
+  import { confirm, errorText, inform, withUnlock } from '../lib/dialogs.svelte';
+  import { quickFeeChoice } from '../lib/quick.svelte';
+  import { walletApi } from '../lib/wallet';
   import { chooseFile, FILTERS } from '../lib/files';
   import { formatBytes, formatCount, formatTime } from '../lib/format';
   import { host, rpc, type Stamp } from '../lib/rpc';
@@ -54,7 +56,11 @@
     }
     if (!(await confirm(t('Timestamp File'), t('Publish the fingerprint of this file on the chain?')))) return;
     try {
-      const r = await walletRpc<{ txid?: string; complete: boolean }>(wallet, 'send', [[{ data: stampPayload(hash) }]]);
+      // A transaction with the fingerprint as data, made by the host; the desktop shows it, its fee and its total, and asks
+      // before it is signed and sent (audit 7 #1).
+      const api = walletApi(wallet);
+      const prepared = await api.prepare([], {}, quickFeeChoice(), stampPayload(hash));
+      const r = await withUnlock(wallet, () => api.commit(prepared.token));
       if (!r) return;
       if (!r.txid) {
         await inform(t('Timestamp File'), t('The wallet could not sign the transaction.'), 'warning');

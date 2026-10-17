@@ -4,7 +4,9 @@
 
 #include <webui/assets.h>
 #include <webui/dialog.h>
+#include <webui/guard.h>
 
+#include <tinyformat.h>
 #include <univalue.h>
 
 #include <boost/test/unit_test.hpp>
@@ -345,6 +347,83 @@ BOOST_AUTO_TEST_CASE(one_at_a_time)
     BOOST_CHECK(pending.Push(first, done("again")));
     BOOST_CHECK_EQUAL(answered.size(), 1U);
     BOOST_CHECK_EQUAL(answered[0], "second:yes");
+}
+
+BOOST_AUTO_TEST_CASE(withdrawn_questions_are_not_shown)
+{
+    // Audit 7 #8: a question whose request the page cancelled is not shown when its turn comes; it is declined.
+    dialog::Pending pending;
+    std::vector<std::string> answered;
+    const auto done{[&](const std::string& name) { return [&answered, name](dialog::Answer a) { answered.push_back(name + (a.accepted ? ":yes" : ":no")); }; }};
+    dialog::Request first{Sample()}, second{Sample()}, third{Sample()};
+    second.title = "second";
+    third.title = "third";
+    second.withdrawn = std::make_shared<std::atomic<bool>>(false);
+    BOOST_CHECK(pending.Push(first, done("first")));
+    BOOST_CHECK(!pending.Push(second, done("second")));
+    BOOST_CHECK(!pending.Push(third, done("third")));
+    second.withdrawn->store(true);
+    auto next{pending.Next()};
+    BOOST_REQUIRE(next);
+    BOOST_CHECK_EQUAL(next->first.title, "third");
+    BOOST_CHECK(answered == std::vector<std::string>{"second:no"});
+}
+
+BOOST_AUTO_TEST_CASE(rows_of_facts)
+{
+    // Audit 7 #1: the facts the host decoded, in order, as text: an address whole on one line, what is not shown as itself
+    // written out; a kind of row the page knows; the error of a wrong passphrase.
+    dialog::Request request{Sample()};
+    request.rows = {
+        {"Wallet", "w\xe2\x80\xae" "1", dialog::Row::Kind::TEXT},
+        {"Recipient 1 of 2", "", dialog::Row::Kind::HEADING},
+        {"Pay to", "rchn1q\nevil\xe2\x80\x8b", dialog::Row::Kind::ADDRESS},
+        {"Amount", "1.00000000 CHN", dialog::Row::Kind::AMOUNT},
+        {"Total", "1.00000141 CHN", dialog::Row::Kind::TOTAL},
+        {"", "A note\nof two lines", dialog::Row::Kind::NOTE},
+    };
+    request.error = "The passphrase was\nnot correct.";
+    request.passphrase = true;
+    const UniValue page{dialog::PageData(request)};
+    const UniValue& rows{page["rows"]};
+    BOOST_REQUIRE_EQUAL(rows.size(), 6U);
+    BOOST_CHECK_EQUAL(rows[0]["value"].get_str(), "w[U+202E]1");
+    BOOST_CHECK_EQUAL(rows[1]["kind"].get_str(), "heading");
+    BOOST_CHECK_EQUAL(rows[2]["kind"].get_str(), "address");
+    BOOST_CHECK_EQUAL(rows[2]["value"].get_str(), "rchn1q evil");
+    BOOST_CHECK_EQUAL(rows[3]["kind"].get_str(), "amount");
+    BOOST_CHECK_EQUAL(rows[4]["kind"].get_str(), "total");
+    BOOST_CHECK_EQUAL(rows[5]["value"].get_str(), "A note\nof two lines");
+    BOOST_CHECK_EQUAL(page["error"].get_str(), "The passphrase was not correct.");
+    // Never a fact dropped without a word: past the most shown, the count of the rest.
+    dialog::Request many{Sample()};
+    for (int i{0}; i < 100; ++i) many.rows.push_back({"Pay to", "rchn1q" + std::to_string(i), dialog::Row::Kind::ADDRESS});
+    const UniValue many_rows{dialog::PageData(many)["rows"]};
+    BOOST_CHECK_EQUAL(many_rows.size(), 81U);
+    BOOST_CHECK_EQUAL(many_rows[80]["value"].get_str(), "… and 20 more");
+    // The dialog of the system says them too, one a line.
+    const std::string text{dialog::FallbackText(page)};
+    BOOST_CHECK(text.find("Pay to: rchn1q evil") != std::string::npos);
+    BOOST_CHECK(text.find("Recipient 1 of 2") != std::string::npos);
+    BOOST_CHECK(text.find("Total: 1.00000141 CHN") != std::string::npos);
+    BOOST_CHECK(text.find("not correct") != std::string::npos);
+    BOOST_CHECK(text.find("Pay to: rchn1q evil") < text.find("Amount: 1.00000000 CHN"));
+}
+
+BOOST_AUTO_TEST_CASE(hidden_characters)
+{
+    // Audit 7 #11: the set of what is written out is the page's (revealBidi): every format character, the Hangul fillers,
+    // the combining grapheme joiner, the tags, and a variation selector after a character it is not for.
+    for (const uint32_t cp : {0x200BU, 0x2060U, 0xE0041U, 0x180EU, 0x034FU, 0x3164U, 0x115FU, 0x1160U, 0xFFA0U, 0x00ADU, 0x2028U}) {
+        std::string text{"a"};
+        guard::AppendUtf8(text, cp);
+        text += "b";
+        BOOST_CHECK_EQUAL(dialog::Shown(text, 100), strprintf("a[U+%04X]b", cp));
+        BOOST_CHECK_EQUAL(guard::OneLine(text, 100), "a b");
+    }
+    BOOST_CHECK_EQUAL(dialog::Shown("a\xef\xb8\x8f", 100), "a[U+FE0F]");
+    BOOST_CHECK_EQUAL(dialog::Shown("\xe2\x9d\xa4\xef\xb8\x8f", 100), "\xe2\x9d\xa4\xef\xb8\x8f");
+    BOOST_CHECK(!guard::IsHidden('a', 'b'));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

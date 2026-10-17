@@ -115,6 +115,9 @@ public:
     /** Whether text is the address of a proxy, without a port (ProxyAddressValidator), and without a user or password. */
     static bool ValidProxyAddress(const std::string& text);
 
+    /** The largest prune size taken, in GB (a petabyte): more is no size a disk has, and overflows the MiB of -prune (audit 7 #17). */
+    static constexpr int64_t MAX_PRUNE_GB{1'000'000};
+
     /**
      * A prune size of settings.json below the least of the chain (MinPruneTarget: 10000 MiB on a sidechain;
      * an older version offered 2 GB), raised to it, rounded up to whole GB, before the node starts, which

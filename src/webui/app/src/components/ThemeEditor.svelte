@@ -30,7 +30,7 @@
     type CustomThemeId,
     type TokenName,
   } from '../lib/customthemes';
-  import { copyTheme, deleteTheme, duplicateTheme, exportFile, importFile, importText, look, newTheme, saveTheme } from '../lib/themestore.svelte';
+  import { copyTheme, deleteTheme, duplicateTheme, exportFile, importFile, importText, look, newTheme, saveTheme, unreadableNote } from '../lib/themestore.svelte';
 
   /** The theme being edited (a copy: saved only on Save), and whether it is a new one. */
   let editing = $state<CustomTheme | null>(null);
@@ -210,7 +210,12 @@
     importError = '';
     try {
       const theme = await importFile();
-      if (theme) toast('success', t('Import Theme'), t('The theme "%1" is imported.', theme.name));
+      if (theme) {
+        toast('success', t('Import Theme'), t('The theme "%1" is imported.', theme.name));
+        // What the page draws as the base, and why (audit 7 #10).
+        const note = unreadableNote(theme);
+        if (note) toast('warning', t('Import Theme'), note);
+      }
     } catch (e) {
       importError = errorText(e);
     }
@@ -229,6 +234,8 @@
     try {
       const theme = importText(pasted);
       toast('success', t('Import Theme'), t('The theme "%1" is imported.', theme.name));
+      const note = unreadableNote(theme);
+      if (note) toast('warning', t('Import Theme'), note);
       pasted = '';
       pasteOpen = false;
     } catch (e) {

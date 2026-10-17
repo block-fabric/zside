@@ -318,6 +318,35 @@ BOOST_AUTO_TEST_CASE(cancel)
     BOOST_CHECK_EQUAL(bridge.Pending(), 0U);
 }
 
+BOOST_AUTO_TEST_CASE(a_host_method_sees_its_request_cancelled)
+{
+    // Audit 7 #8: a host method that waits for the user (App::AskHost) sees the page cancel its request, and withdraws its
+    // question. Outside a request, nothing is cancelled.
+    BOOST_CHECK(!webui::Bridge::CurrentRequestDone());
+    Replies replies;
+    UiQueue ui;
+    webui::Bridge bridge{replies.Fn(), ui.Fn(), 1};
+    Gate gate;
+    std::atomic<int> before{-1}, after{-1};
+    bridge.RegisterHost("ask", [&](const UniValue&) {
+        before = webui::Bridge::CurrentRequestDone() ? 1 : 0;
+        gate.Wait();
+        after = webui::Bridge::CurrentRequestDone() ? 1 : 0;
+        return UniValue{true};
+    });
+    bridge.Handle("1", Request("host", "ask", UniValue{UniValue::VOBJ}, "q1"));
+    gate.UntilWaiting(1);
+    bridge.Handle("c1", R"([{"kind":"cancel","rid":"q1"}])");
+    BOOST_CHECK_EQUAL(ErrorCode(replies.Wait("1")), webui::BRIDGE_CANCELLED);
+    gate.Open();
+    for (int i{0}; i < 1000 && after < 0; ++i) std::this_thread::sleep_for(5ms);
+    // While it ran: not cancelled; once the page cancelled it: done (the answer of the method is dropped).
+    BOOST_CHECK_EQUAL(before.load(), 0);
+    BOOST_CHECK_EQUAL(after.load(), 1);
+    BOOST_CHECK_EQUAL(replies.Count("1"), 1U);
+    bridge.Stop();
+}
+
 BOOST_AUTO_TEST_CASE(request_gone_before_its_answer)
 {
     // The answer of a request goes out only after the request left the list of pending ones: when

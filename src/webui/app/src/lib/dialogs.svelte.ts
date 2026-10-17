@@ -1,8 +1,8 @@
 // Dialogs that a page waits for: a question with buttons (QMessageBox), a line of text
 // (QInputDialog), a passphrase (AskPassphraseDialog). One shows at a time; DialogHost.svelte draws it.
-import { BridgeError, request } from './bridge';
+import { BridgeError, ErrorCode, request } from './bridge';
 import { t } from './i18n.svelte';
-import { rpc } from './rpc';
+import { confirmedMethods, rpc } from './rpc';
 import { WalletError } from './wallet';
 
 export interface Choice {
@@ -117,31 +117,23 @@ export function askPassphrase(mode: PassphraseMode, options: { wallet?: string; 
   return push({ kind: 'passphrase', mode, title: titles[mode], ...options });
 }
 
+/** Whether the user said no in a dialog of the desktop (the host's own, App::AskHost): nothing to say then. */
+export function declined(e: unknown): boolean {
+  return BridgeError.from(e).code === ErrorCode.CANCELLED;
+}
+
 /**
- * Run a wallet function that may need the keys (WalletModel::requestUnlock): first without a
- * passphrase; if the wallet is locked, ask for it and run again with it, as often as it is wrong.
- * Resolves with null when the user cancels.
+ * Run a wallet function of the host that may pay, sign or need the keys. The host asks the user itself, in its own dialog
+ * (outside the page), what it does and, for a locked wallet, the passphrase (audit 7 #1): the page never asks for it, and
+ * never sees it. Resolves with null when the user said no there. (`fn` gets no passphrase: kept for the callers of old.)
  */
 export async function withUnlock<T>(wallet: string, fn: (passphrase?: string) => Promise<T>): Promise<T | null> {
+  void wallet;
   try {
     return await fn();
   } catch (e) {
-    if (BridgeError.from(e).code !== WalletError.UNLOCK_NEEDED) throw e;
-  }
-  let error: string | undefined;
-  for (;;) {
-    const answered = await askPassphrase('unlock', { wallet, error });
-    if (!answered) return null;
-    try {
-      return await fn(answered.passphrase);
-    } catch (e) {
-      const err = BridgeError.from(e);
-      if (err.code === WalletError.PASSPHRASE_INCORRECT) {
-        error = err.message;
-        continue;
-      }
-      throw e;
-    }
+    if (declined(e)) return null;
+    throw e;
   }
 }
 
@@ -150,34 +142,48 @@ export function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** The answer of one call of wallet.withKeys: its result, or its error. */
+/** The answer of one call of several (withKeys): its result, or its error. */
 export interface KeyedAnswer<T = unknown> {
   result?: T;
   error?: { code: number; message: string };
 }
 
 /**
- * Wallet RPC methods that need the keys (a deposit, a stamp, signing a PSBT, proofs of funds): the host
- * runs them with the keys of an encrypted wallet unlocked for these calls alone, and locks it again right
- * after (UnlockContext of chains-qt). If the wallet is locked, the passphrase is asked for first.
- * Resolves with the answer of each call, or null when the user cancels.
+ * Wallet RPC methods that pay, sign or need the keys, several at once (proofs of funds sign one message with each address):
+ * the host shows what they do in its own dialog, once, with the passphrase field of a locked wallet, and runs them with the
+ * keys unlocked for these calls alone (rpc.confirmed). Resolves with the answer of each call, or null when the user said no.
  */
-export function withKeys<T = unknown>(wallet: string, calls: { method: string; params: unknown[] | Record<string, unknown> }[]): Promise<KeyedAnswer<T>[] | null> {
-  return withUnlock(wallet, (passphrase) =>
-    request<KeyedAnswer<T>[]>('host', 'wallet.withKeys', passphrase ? { wallet, calls, passphrase } : { wallet, calls }),
-  );
+export async function withKeys<T = unknown>(wallet: string, calls: { method: string; params: unknown[] | Record<string, unknown> }[]): Promise<KeyedAnswer<T>[] | null> {
+  // The host shows every call of a question, never cut: so many at most in one (confirm.cpp refuses more).
+  const answers: KeyedAnswer<T>[] = [];
+  try {
+    for (let i = 0; i < calls.length; i += KEYED_BATCH) answers.push(...(await request<KeyedAnswer<T>[]>('host', 'rpc.confirmed', { wallet, calls: calls.slice(i, i + KEYED_BATCH) })));
+    return answers;
+  } catch (e) {
+    if (declined(e)) return null;
+    throw e;
+  }
 }
 
+/** The most calls in one question of the host (withKeys): every row of each fits in its dialog. */
+export const KEYED_BATCH = 20;
+
 /**
- * One wallet RPC method that may need the keys; its error is thrown. A wallet that needs no unlocking
- * runs it as it is; a locked one answers -13, and then the passphrase is asked for and the host runs it
- * with the keys unlocked for this call alone (withKeys). Resolves with null when the user cancels.
+ * One wallet RPC method; its error is thrown. One that pays or signs goes through the host, which asks the user on the
+ * desktop first (rpc.confirmed, rpc.ts confirmedMethods); one that only needs the keys runs as it is, and when the wallet is
+ * locked (-13) through the host, which asks for the passphrase in its own dialog. Resolves with null when the user said no.
  */
-export function walletRpc<T>(wallet: string, method: string, params: unknown[] | Record<string, unknown>): Promise<T | null> {
-  return withUnlock(wallet, async (passphrase) => {
-    if (!passphrase) return rpc.raw<T>(method, params, { wallet });
-    const [answer] = await request<KeyedAnswer<T>[]>('host', 'wallet.withKeys', { wallet, calls: [{ method, params }], passphrase });
-    if (answer.error) throw new BridgeError(answer.error.code, answer.error.message);
-    return answer.result as T;
-  });
+export async function walletRpc<T>(wallet: string, method: string, params: unknown[] | Record<string, unknown>): Promise<T | null> {
+  try {
+    if ((await confirmedMethods()).has(method)) return await request<T>('host', 'rpc.confirmed', { wallet, method, params });
+    try {
+      return await rpc.raw<T>(method, params, { wallet });
+    } catch (e) {
+      if (BridgeError.from(e).code !== WalletError.UNLOCK_NEEDED) throw e;
+      return await request<T>('host', 'rpc.confirmed', { wallet, method, params });
+    }
+  } catch (e) {
+    if (declined(e)) return null;
+    throw e;
+  }
 }

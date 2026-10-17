@@ -52,6 +52,11 @@ body.loading {
   height: auto;
 }
 
+/* With facts to read (a spend: addresses whole, amounts), wider: an address on one line where the screen allows. */
+.measuring .dialog.wide {
+  width: 42rem;
+}
+
 .dialog header {
   display: flex;
   align-items: center;
@@ -221,4 +226,88 @@ body.loading {
 
 :root[data-theme='matrix'] body {
   text-shadow: 0 0 6px rgb(0 255 65 / 25%);
+}
+
+/* The facts the host decoded (dialog.ts renderRows): a label and its value a line, a destination whole in a monospaced
+   font, the total heavier, a heading over the facts of one recipient. */
+.rows {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) 1fr;
+  column-gap: 0.9rem;
+  row-gap: 0.3rem;
+  margin: 0.75rem 0 0;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--text-muted);
+  border-radius: var(--radius-s);
+  background: var(--surface-2);
+}
+
+.rows .row {
+  display: contents;
+}
+
+.rows dt {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+}
+
+.rows dd {
+  margin: 0;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  unicode-bidi: isolate;
+}
+
+.rows .address dd {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.rows .amount dd,
+.rows .total dd {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.rows .total dt,
+.rows .total dd {
+  padding-top: 0.3rem;
+  border-top: 1px solid var(--text-muted);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.rows .row.heading,
+.rows .row.note {
+  display: block;
+}
+
+.rows .heading {
+  grid-column: 1 / -1;
+  margin-top: 0.35rem;
+  color: var(--text);
+  font-weight: 650;
+  unicode-bidi: isolate;
+}
+
+.rows .heading:first-child {
+  margin-top: 0;
+}
+
+.rows .note {
+  grid-column: 1 / -1;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  white-space: pre-wrap;
+  unicode-bidi: isolate;
+}
+
+.field .error {
+  color: var(--negative);
+  font-size: 0.92rem;
 }

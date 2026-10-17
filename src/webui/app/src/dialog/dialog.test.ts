@@ -47,6 +47,44 @@ describe('what the host sends', () => {
   });
 });
 
+describe('the facts the host decoded (audit 7 #1)', () => {
+  it('are read strictly and drawn one a line: a destination whole, before its amount', () => {
+    const d = data({
+      rows: [
+        { label: 'Wallet', value: 'w', kind: 'text' },
+        { label: 'Recipient 1 of 2', value: '', kind: 'heading' },
+        { label: 'Pay to', value: 'bcrt1q\u202eevil', kind: 'address' },
+        { label: 'Amount', value: '1.00000000 CHN', kind: 'amount' },
+        { label: 'Total', value: '1.00000141 CHN', kind: 'total' },
+        { label: '', value: 'A note', kind: 'note' },
+        { label: 'x', value: 'y', kind: 'html' },
+        'junk',
+      ] as unknown as DialogData['rows'],
+    });
+    expect(d.rows).toHaveLength(7);
+    expect(d.rows[6].kind).toBe('text');
+    const r = render(document, d);
+    document.body.append(r.root);
+    const rows = r.root.querySelector('#dialog-rows')!;
+    expect(rows.tagName).toBe('DL');
+    const address = rows.querySelector('.row.address dd')!;
+    expect(address.textContent).toBe('bcrt1q[U+202E]evil');
+    expect(address.getAttribute('dir')).toBe('ltr');
+    expect(address.getAttribute('translate')).toBe('no');
+    // In the order given: the destination, then its amount, then the total.
+    const kinds = [...rows.children].map((c) => (c as HTMLElement).className);
+    expect(kinds).toEqual(['row text', 'row heading', 'row address', 'row amount', 'row total', 'row note', 'row text']);
+    expect(rows.querySelector('script, b, i')).toBeNull();
+  });
+
+  it('shows the error of a wrong passphrase at the field', () => {
+    const r = render(document, data({ passphrase: true, passphraseLabel: 'Passphrase of the wallet "w"', error: 'The passphrase was not correct.' }));
+    document.body.append(r.root);
+    expect(r.root.querySelector('#dialog-error')!.textContent).toBe('The passphrase was not correct.');
+    expect(r.field!.getAttribute('aria-invalid')).toBe('true');
+  });
+});
+
 describe('the dialog as drawn', () => {
   it('puts every text in as text, never as HTML', () => {
     const r = render(document, data({ title: '<img src=x onerror=alert(1)>', message: '<b>bold</b>\n\n<script>alert(2)</script>', details: '</pre><i>x</i>', accept: '<u>Run</u>' }));
@@ -254,6 +292,49 @@ describe('the keys and the buttons', () => {
     expect(answers).toEqual([{ accept: true }]);
     expect(control.answered()).toBe(true);
     expect(r.accept.disabled && r.cancel.disabled).toBe(true);
+  });
+
+  it('a press of the pointer that started before the dialog was armed never accepts (audit 7 #7)', () => {
+    const { r, answers, control } = open();
+    // Pressed at once, released after the delay: not taken.
+    now = 100;
+    r.accept.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    now = ARM_MS + 50;
+    r.accept.click();
+    expect(answers).toEqual([]);
+    // A press of its own after the delay: taken.
+    r.accept.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    r.accept.click();
+    expect(answers).toEqual([{ accept: true }]);
+    expect(control.answered()).toBe(true);
+  });
+
+  it('a key held down, repeated by the keyboard, is never taken', () => {
+    const { r, answers } = open();
+    r.accept.focus();
+    now = ARM_MS + 50;
+    r.accept.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', repeat: true, bubbles: true, cancelable: true }));
+    expect(answers).toEqual([]);
+    key(r.accept, 'Enter');
+    expect(answers).toEqual([{ accept: true }]);
+  });
+
+  it('hidden or without the focus it waits; shown again, the delay starts again', () => {
+    const { r, answers, control } = open();
+    now = ARM_MS + 50;
+    control.disarm();
+    r.accept.click();
+    expect(answers).toEqual([]);
+    control.arm(now);
+    r.accept.click();
+    expect(answers).toEqual([]);
+    now += ARM_MS + 1;
+    r.accept.click();
+    expect(answers).toEqual([{ accept: true }]);
+  });
+
+  it('waits a second, as the dialogs of Firefox', () => {
+    expect(ARM_MS).toBeGreaterThanOrEqual(1000);
   });
 
   it('keeps Tab in the dialog', () => {

@@ -44,7 +44,7 @@ export async function bumpFee(wallet: string, txid: string): Promise<string | nu
   }
   if (answer.choice !== 'yes') return null;
   try {
-    const result = await withUnlock(wallet, (passphrase) => api.bumpCommit(bump.token, passphrase));
+    const result = await withUnlock(wallet, () => api.bumpCommit(bump.token));
     if (!result) return null;
     toast('success', t('Fee increased'), t('New transaction %1…', result.txid.slice(0, 16)));
     refreshRecords(true);

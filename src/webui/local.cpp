@@ -33,24 +33,16 @@ std::map<std::string, Bridge::Thread> RpcMethods()
         // the desktop confirms first (audit port-2 #3).
         // A viewing key watched in a wallet without keys: the blocks are scanned again, which takes long.
         {"importshieldedviewingkey", Bridge::Thread::LONG},
-        // Payments out of the pool and into it: each proves a bundle (Halo 2, seconds), on the long lane
-        // so that the quick calls of the pages never wait behind a proof.
-        {"sendshielded", Bridge::Thread::LONG},
-        {"shieldcoins", Bridge::Thread::LONG},
-        {"unshieldcoins", Bridge::Thread::LONG},
-        {"bumpshieldedfee", Bridge::Thread::LONG},
-        // Melt & cast: plans the wallet carries out as the blocks come.
-        {"meltcoins", Bridge::Thread::WORKER},
-        {"castcoins", Bridge::Thread::WORKER},
+        // Payments out of the pool and into it, and the plans of melt & cast: confirmed on the desktop
+        // (ConfirmedRpcMethods, below; on the long lane, as each proves a bundle). Cancelling a plan spends nothing.
         {"cancelmeltcast", Bridge::Thread::WORKER},
     };
 }
 
 std::set<std::string> KeyedRpcMethods()
 {
-    // Each spends with the keys of the account (or locks the coins it plans to melt); getshieldedaddress sets
-    // the account up from the keys the first time.
-    return {"sendshielded", "shieldcoins", "unshieldcoins", "bumpshieldedfee", "meltcoins", "getshieldedaddress"};
+    // getshieldedaddress sets the account up from the keys the first time (the passphrase asked by the host).
+    return {"getshieldedaddress"};
 }
 
 Window::ConfirmDialog ViewingKeyConfirmation(const std::string& wallet)
@@ -66,8 +58,24 @@ Window::ConfirmDialog ViewingKeyConfirmation(const std::string& wallet)
     return dialog;
 }
 
-void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm)
+std::map<std::string, confirm::Method> ConfirmedRpcMethods()
 {
+    // What the pages do that pays or signs: never the page's to call by itself. The host shows each call on the desktop, its
+    // destinations whole first, then its amounts, then the rest of its parameters, with the passphrase of a locked wallet
+    // typed there, and runs it with the keys unlocked for it alone (confirm.h, audit 7 #1).
+    return {
+        {"sendshielded", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Send privately", "Send", "The wallet pays from its shielded account to the address shown.", {"amounts", "address"}, {"fee"}), /*fee_unknown=*/true}},
+        {"shieldcoins", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Shield coins", "Shield", "The wallet moves coins into its shielded account.", {"address"}, {"amount", "amounts"}), /*fee_unknown=*/true}},
+        {"unshieldcoins", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Unshield coins", "Unshield", "The wallet moves coins out of its shielded account to the address shown.", {"address"}, {"amount"}), /*fee_unknown=*/true}},
+        {"bumpshieldedfee", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Increase the fee", "Increase the fee", "The wallet replaces a shielded transaction with one that pays a higher fee.", {}, {"fee"}), /*fee_unknown=*/true}},
+        {"meltcoins", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Melt coins", "Melt", "The wallet plans to shield these coins, each whole, at blocks it chooses.", {}, {"amount"}), /*fee_unknown=*/true}},
+        {"castcoins", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Cast coins", "Cast", "The wallet plans to pay out of its shielded account in bills, at the windows it chooses.", {}, {"amount"}), /*fee_unknown=*/true}},
+    };
+}
+
+void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm, confirm::KeysFn keys)
+{
+    (void)keys;
     // zside.viewingkey.export {wallet}: the viewing key of the account of a wallet, after the user said yes on
     // the desktop (outside the page); a no answers BRIDGE_CANCELLED and the node is not asked.
     bridge.RegisterHost("zside.viewingkey.export", [node, confirm](const UniValue& params) -> UniValue {

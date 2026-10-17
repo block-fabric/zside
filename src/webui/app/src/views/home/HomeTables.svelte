@@ -132,6 +132,8 @@
         return { label: 'Conflicted', tone: 'bad' };
       case 'abandoned':
         return { label: 'Abandoned', tone: 'bad' };
+      case 'dropped':
+        return { label: 'Dropped \u2014 not sent', tone: 'bad' };
       case 'notaccepted':
         return { label: 'Not accepted', tone: 'bad' };
       case 'confirming':

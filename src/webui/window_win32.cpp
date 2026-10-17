@@ -522,6 +522,29 @@ public:
         CloseClipboard();
     }
 
+    std::optional<UserInput> LastUserInput() override
+    {
+        // The last input of the user to the desktop (GetLastInputInfo), while a window of this app is the one in front: what
+        // the user typed or clicked went to the app (the web view's input is the browser process's, not seen here).
+        std::optional<UserInput> out;
+        LASTINPUTINFO info{};
+        info.cbSize = sizeof(info);
+        DWORD pid{0};
+        if (const HWND front{GetForegroundWindow()}) GetWindowThreadProcessId(front, &pid);
+        if (pid == GetCurrentProcessId() && GetLastInputInfo(&info)) out = UserInput{info.dwTime, static_cast<int64_t>(static_cast<DWORD>(GetTickCount() - info.dwTime))};
+        if (m_test_input_serial) {
+            const UserInput test{(uint64_t{1} << 32) + m_test_input_serial, static_cast<int64_t>(GetTickCount64() - m_test_input_time)};
+            if (!out || test.age_ms < out->age_ms) out = test;
+        }
+        return out;
+    }
+
+    void NoteUserInput() override
+    {
+        ++m_test_input_serial;
+        m_test_input_time = GetTickCount64();
+    }
+
     std::optional<std::string> GetClipboard() override
     {
         if (!OpenClipboard(m_hwnd)) return std::nullopt;
@@ -860,6 +883,12 @@ private:
             return 0;
         case WM_ACTIVATE:
             if (current && LOWORD(wp) != WA_INACTIVE && m_themed->controller) m_themed->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+            // The button that accepts takes clicks and keys a moment after the dialog is in front, again after each time
+            // it was not (audit 7 #7: a dialog brought back with its owner is not armed under the pointer).
+            if (current) ArmThemed(LOWORD(wp) != WA_INACTIVE);
+            break;
+        case WM_SHOWWINDOW:
+            if (current && !wp) ArmThemed(false);
             break;
         case WM_MOVE:
         case WM_MOVING:
@@ -871,6 +900,13 @@ private:
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    /** Tell the page of the dialog window that it is in front (the delay of its button starts), or not (it waits). */
+    void ArmThemed(bool on)
+    {
+        if (!m_themed || !m_themed->view || !m_themed->session->Shown() || m_themed->session->Answered()) return;
+        m_themed->view->eval(on ? "window.__chainsDialogArm && window.__chainsDialogArm(true)" : "window.__chainsDialogArm && window.__chainsDialogArm(false)");
     }
 
     void ResizeDialogWidget()
@@ -967,14 +1003,18 @@ private:
             LogWarning("webui: no dialog window for a passphrase: declined");
             return Finish(done, {});
         }
-        std::string message{page.find_value("message").get_str()};
-        if (!page.find_value("details").get_str().empty()) message += "\n\n" + page.find_value("details").get_str();
+        const std::string message{dialog::FallbackText(page)};
         m_native = true;
         m_native_title = page.find_value("title").get_str();
         m_native_message = message;
         SetScheme(dialog::SchemeOf(request.look));
         const std::wstring text{widen_string(message + "\n\n" + page.find_value("accept").get_str() + "?")};
+        // OK is taken a moment after the message box is in front, and again after each time it was not (audit 7 #7), as the
+        // button of the dialog window: a hook of this thread sees each activation of the box.
+        g_box_hook = SetWindowsHookExW(WH_CBT, BoxHook, nullptr, GetCurrentThreadId());
         const int answer{MessageBoxW(m_hwnd, text.c_str(), widen_string(m_native_title).c_str(), MB_OKCANCEL | (request.level == dialog::Level::INFO ? MB_ICONINFORMATION : MB_ICONWARNING) | MB_DEFBUTTON2 | MB_TASKMODAL)};
+        if (g_box_hook) UnhookWindowsHookEx(g_box_hook);
+        g_box_hook = nullptr;
         m_native = false;
         SetScheme(dialog::Scheme::DESKTOP);
         dialog::Answer out;
@@ -1494,6 +1534,32 @@ private:
     bool m_native{false};
     std::string m_native_title;
     std::string m_native_message;
+    //! The inputs of the user the tests make up (NoteUserInput): how many, and the last one's time.
+    uint64_t m_test_input_serial{0};
+    uint64_t m_test_input_time{0};
+
+    //! The hook of the message box shown now (OpenNative), and its delay.
+    static inline thread_local HHOOK g_box_hook{nullptr};
+    static constexpr UINT NATIVE_ARM_MS{1000};
+    static constexpr UINT_PTR BOX_ARM_TIMER{0xC4A1};
+    static LRESULT CALLBACK BoxHook(int code, WPARAM wp, LPARAM lp)
+    {
+        if (code == HCBT_ACTIVATE) {
+            const HWND box{reinterpret_cast<HWND>(wp)};
+            wchar_t name[16]{};
+            GetClassNameW(box, name, 16);
+            if (wcscmp(name, L"#32770") == 0) {
+                if (const HWND ok{GetDlgItem(box, IDOK)}) {
+                    EnableWindow(ok, FALSE);
+                    SetTimer(box, BOX_ARM_TIMER, NATIVE_ARM_MS, +[](HWND hwnd, UINT, UINT_PTR id, DWORD) {
+                        KillTimer(hwnd, id);
+                        if (const HWND button{GetDlgItem(hwnd, IDOK)}) EnableWindow(button, TRUE);
+                    });
+                }
+            }
+        }
+        return CallNextHookEx(nullptr, code, wp, lp);
+    }
 };
 
 } // namespace

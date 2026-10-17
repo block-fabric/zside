@@ -36,6 +36,7 @@
 #include <serialize.h>
 #include <streams.h>
 #include <support/allocators/secure.h>
+#include <support/cleanse.h>
 #include <tinyformat.h>
 #include <util/fees.h>
 #include <util/moneystr.h>
@@ -45,10 +46,13 @@
 #include <util/translation.h>
 #include <wallet/coincontrol.h>
 #include <wallet/receive.h>
+#include <wallet/spend.h>
 #include <wallet/types.h>
 #include <wallet/wallet.h>
 #include <wallet/walletutil.h>
 #include <webui/bridge.h>
+#include <webui/confirm.h>
+#include <webui/guard.h>
 #include <webui/rpcpolicy.h>
 
 #include <algorithm>
@@ -240,41 +244,20 @@ CCoinControl MakeCoinControl(const UniValue& params)
     return cc;
 }
 
-/**
- * Keys of an encrypted wallet for the length of a call (WalletModel::UnlockContext): unlocked with
- * the passphrase of the call, locked again at the end. Without a passphrase a locked wallet is an error
- * the page answers by asking for it.
- */
-class UnlockScope
+/** A name of a wallet the page gives (audit 7 #14): one of the wallets folder, never a path out of it. */
+std::string WalletName(const std::string& name)
 {
-public:
-    UnlockScope(interfaces::Wallet& wallet, const UniValue& params) : m_wallet(wallet)
-    {
-        // Wallets without private keys may look "encrypted" after an old bug: they need no unlocking.
-        if (wallet.privateKeysDisabled() || !wallet.isCrypted() || !wallet.isLocked()) return;
-        static const std::string KEY{"passphrase"};
-        const UniValue& pass{Param(params, KEY)};
-        if (!pass.isStr() || pass.get_str().empty()) throw HostError(WalletApi::UNLOCK_NEEDED, "This operation needs your wallet passphrase to unlock the wallet.");
-        if (!wallet.unlock(Secure(pass.get_str()))) {
-            throw HostError(WalletApi::PASSPHRASE_INCORRECT, pass.get_str().find('\0') == std::string::npos ?
-                "The passphrase entered for the wallet decryption was incorrect." :
-                "The passphrase entered for the wallet decryption is incorrect. It contains a null character (ie - a zero byte). "
-                "If the passphrase was set with a version of this software prior to 25.0, please try again with only the characters "
-                "up to — but not including — the first null character. If this is successful, please set a new passphrase to avoid this issue in the future.");
-        }
-        m_relock = true;
+    if (name.empty()) throw HostError(BRIDGE_INVALID_REQUEST, "Enter a name for the wallet");
+    if (name.size() > 200 || name == "." || name == ".." || name.find_first_of("/\\:") != std::string::npos || name.front() == ' ' || name.back() == ' ') {
+        throw HostError(BRIDGE_INVALID_REQUEST, "A wallet name is a name, not a path: no '/', '\\', ':', and not \".\" or \"..\".");
     }
-    ~UnlockScope()
-    {
-        if (m_relock) m_wallet.lock();
+    size_t pos{0};
+    while (pos < name.size()) {
+        const auto cp{guard::NextCodePoint(name, pos)};
+        if (!cp || guard::IsControlOrFormat(*cp)) throw HostError(BRIDGE_INVALID_REQUEST, "A wallet name has no control or invisible characters.");
     }
-    UnlockScope(const UnlockScope&) = delete;
-    UnlockScope& operator=(const UnlockScope&) = delete;
-
-private:
-    interfaces::Wallet& m_wallet;
-    bool m_relock{false};
-};
+    return name;
+}
 
 // --- Transactions, as TransactionRecord and TransactionTableModel ---
 
@@ -825,12 +808,115 @@ UniValue PsbtState(interfaces::Wallet* wallet, const PartiallySignedTransaction&
     return out;
 }
 
+/** A label of the page as a dialog of the host shows it: one line, cut (audit 7 #4). */
+std::string ShownLabel(const std::string& label)
+{
+    return guard::OneLine(label, 100);
+}
+
+/** The rows of what an output pays: its destination first, whole; then its amount; then the label the page gave it. */
+void OutputRows(std::vector<dialog::Row>& rows, interfaces::Wallet* wallet, const CTxOut& out, const std::string& label, const std::string& to = "Pay to")
+{
+    CTxDestination dest;
+    if (out.scriptPubKey.IsUnspendable()) {
+        rows.push_back(confirm::Destination("Data", ScriptToAsmStr(out.scriptPubKey)));
+        if (out.nValue > 0) rows.push_back(confirm::Amount("Amount (burned)", out.nValue));
+        return;
+    }
+    const bool mine{wallet && wallet->txoutIsMine(out)};
+    if (ExtractDestination(out.scriptPubKey, dest)) {
+        rows.push_back(confirm::Destination(mine ? "Back to this wallet" : to, EncodeDestination(dest)));
+    } else {
+        rows.push_back(confirm::Destination(mine ? "Back to this wallet (script)" : to + " (script)", HexStr(out.scriptPubKey)));
+    }
+    rows.push_back(confirm::Amount("Amount", out.nValue));
+    if (!label.empty()) rows.push_back(confirm::Text("Label", "\u201c" + ShownLabel(label) + "\u201d"));
+}
+
+/**
+ * The rows of a transaction the wallet made, from the transaction itself: each output (destination first, then amount, then
+ * label), the fee, the total it pays. Only an output the wallet owns is its change, shown apart and not counted as paid: the
+ * output the wallet put the change in (change_pos) to an address that is not the wallet's (a change address the page gave)
+ * is a payment like any other, shown and counted (a hidden payment otherwise).
+ */
+std::vector<dialog::Row> PaymentRows(interfaces::Wallet& wallet, const CTransaction& tx, std::optional<unsigned int> change_pos, CAmount fee, const std::map<std::string, std::string>& labels)
+{
+    std::vector<dialog::Row> rows{confirm::WalletRows(wallet.getWalletName())};
+    std::vector<size_t> paid;
+    std::optional<size_t> change;
+    for (size_t i{0}; i < tx.vout.size(); ++i) {
+        if (change_pos && i == *change_pos && wallet.txoutIsMine(tx.vout[i])) change = i;
+        else paid.push_back(i);
+    }
+    CAmount sum{0};
+    for (size_t n{0}; n < paid.size(); ++n) {
+        const CTxOut& out{tx.vout[paid[n]]};
+        if (paid.size() > 1) rows.push_back(confirm::Heading(strprintf("Recipient %u of %u", n + 1, paid.size())));
+        CTxDestination dest;
+        const auto label{ExtractDestination(out.scriptPubKey, dest) ? labels.find(EncodeDestination(dest)) : labels.end()};
+        OutputRows(rows, &wallet, out, label == labels.end() ? std::string{} : label->second);
+        sum += out.nValue;
+    }
+    rows.push_back(confirm::Amount("Network fee", fee));
+    rows.push_back(confirm::Total("Total", sum + fee));
+    if (change) {
+        // The change, back to an address of this wallet: said, apart from what is paid.
+        CTxDestination dest;
+        rows.push_back(confirm::Destination("Change back to this wallet", ExtractDestination(tx.vout[*change].scriptPubKey, dest) ? EncodeDestination(dest) : HexStr(tx.vout[*change].scriptPubKey)));
+        rows.push_back(confirm::Amount("Change", tx.vout[*change].nValue));
+    }
+    return rows;
+}
+
+/** The rows of a PSBT: what it spends of this wallet, each output (destination first), the fee when known, the id. */
+std::vector<dialog::Row> PsbtRows(interfaces::Wallet* wallet, const PartiallySignedTransaction& psbtx)
+{
+    std::vector<dialog::Row> rows{wallet ? confirm::WalletRows(wallet->getWalletName()) : std::vector<dialog::Row>{confirm::Text("Network", confirm::NetworkName())}};
+    CAmount mine_in{0};
+    size_t mine_n{0}, unknown{0};
+    for (const PSBTInput& input : psbtx.inputs) {
+        CTxOut utxo;
+        if (!input.GetUTXO(utxo)) {
+            ++unknown;
+            continue;
+        }
+        if (wallet && wallet->txoutIsMine(utxo)) {
+            mine_in += utxo.nValue;
+            ++mine_n;
+        }
+    }
+    if (wallet) {
+        if (mine_n) rows.push_back({"Spends of this wallet", strprintf("%s (%u of %u inputs)", confirm::Coins(mine_in), mine_n, psbtx.inputs.size()), dialog::Row::Kind::AMOUNT});
+        else rows.push_back(confirm::Note("None of its inputs is a coin of this wallet that it knows."));
+    }
+    if (unknown) rows.push_back(confirm::Note(strprintf("%u of its inputs do not say what they spend.", unknown)));
+    CAmount sum{0};
+    for (size_t n{0}; n < psbtx.outputs.size(); ++n) {
+        const PSBTOutput& o{psbtx.outputs[n]};
+        if (psbtx.outputs.size() > 1) rows.push_back(confirm::Heading(strprintf("Output %u of %u", n + 1, psbtx.outputs.size())));
+        OutputRows(rows, wallet, CTxOut(o.amount, o.script), {});
+        sum += o.amount;
+    }
+    const node::PSBTAnalysis analysis{node::AnalyzePSBT(psbtx)};
+    if (analysis.fee) {
+        rows.push_back(confirm::Amount("Network fee", *analysis.fee));
+        rows.push_back(confirm::Total("Total", sum + *analysis.fee));
+    } else {
+        rows.push_back(confirm::Total("Outputs in all", sum));
+        rows.push_back(confirm::Note("The fee cannot be told: not every input says what it spends."));
+    }
+    if (const auto tx{psbtx.GetUnsignedTx()}) rows.push_back(confirm::Destination("Transaction", tx->GetHash().GetHex()));
+    return rows;
+}
+
 } // namespace
 
 struct WalletApi::Prepared {
     std::string wallet;
+    //! Made, not signed: it is signed once the user accepted it on the desktop (wallet.send.commit).
     CTransactionRef tx;
     CAmount fee{0};
+    std::optional<unsigned int> change_pos;
     struct Recipient {
         std::string address;
         std::string label;
@@ -844,6 +930,8 @@ struct WalletApi::Bump {
     std::string wallet;
     Txid txid;
     CMutableTransaction mtx;
+    CAmount old_fee{0};
+    CAmount new_fee{0};
 };
 
 std::string WalletApi::ChosenFile(const UniValue& params, bool write) const
@@ -867,7 +955,66 @@ interfaces::WalletLoader& WalletApi::Loader() const
     return node.walletLoader();
 }
 
-WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node)), m_may_use_file(std::move(may_use_file))
+dialog::Answer WalletApi::Ask(const Window::ConfirmDialog& dialog) const
+{
+    // Without a way to ask (a test that gives none), nothing is accepted.
+    return m_ask ? m_ask(dialog) : dialog::Answer{};
+}
+
+std::unique_ptr<interfaces::Wallet> WalletApi::WalletNamed(const std::string& name) const
+{
+    for (auto& w : Loader().getWallets()) {
+        if (w->getWalletName() == name) return std::move(w);
+    }
+    throw HostError(-18, strprintf("Requested wallet does not exist or is not loaded: %s", name));
+}
+
+UniValue WalletApi::WithKeys(const std::string& wallet_name, Window::ConfirmDialog dialog, bool always, bool fee_unknown, const std::function<UniValue()>& run)
+{
+    auto w{WalletNamed(wallet_name)};
+    if (fee_unknown) {
+        dialog.rows.push_back(confirm::Note(strprintf("Plus the network fee the wallet sets when it makes the transaction: at most %s.", confirm::Coins(w->getDefaultMaxTxFee()))));
+    }
+    // Wallets without private keys may look "encrypted" after an old bug: they need no unlocking.
+    const bool locked{!w->privateKeysDisabled() && w->isCrypted() && w->isLocked()};
+    if (!locked) {
+        if (always && !Ask(dialog).accepted) throw HostError(BRIDGE_CANCELLED, strprintf("%s: declined.", dialog.title));
+        return run();
+    }
+    // The passphrase is typed in the same dialog of the host, never in the page (audit 7 #1).
+    dialog.passphrase = true;
+    dialog.passphrase_label = strprintf("Passphrase of the wallet \"%s\"", guard::OneLine(wallet_name, 64));
+    for (int attempt{0}; attempt < PASSPHRASE_TRIES; ++attempt) {
+        dialog::Answer answer{Ask(dialog)};
+        if (!answer.accepted) throw HostError(BRIDGE_CANCELLED, strprintf("%s: declined.", dialog.title));
+        if (!w->isLocked()) return run();
+        if (w->unlock(answer.passphrase)) {
+            // Locked again as soon as the call is done, whatever happens in it.
+            struct Relock {
+                interfaces::Wallet& wallet;
+                ~Relock() { wallet.lock(); }
+            } relock{*w};
+            return run();
+        }
+        dialog.error = answer.passphrase.find('\0') == SecureString::npos ?
+            "The passphrase entered for the wallet decryption was incorrect. Try again." :
+            "The passphrase entered for the wallet decryption is incorrect. It contains a null character (ie - a zero byte). If the passphrase was set with a "
+            "version of this software prior to 25.0, please try again with only the characters up to — but not including — the first null character.";
+    }
+    throw HostError(PASSPHRASE_INCORRECT, "The passphrase entered for the wallet decryption was incorrect.");
+}
+
+std::optional<CAmount> WalletApi::FeeFor(const std::string& wallet_name, int64_t vsize)
+{
+    try {
+        auto w{WalletNamed(wallet_name)};
+        return w->getMinimumFee(static_cast<unsigned int>(std::clamp<int64_t>(vsize, 1, 1'000'000)), CCoinControl{}, /*returned_target=*/nullptr, /*reason=*/nullptr);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+WalletApi::WalletApi(NodeFn node, FileFn may_use_file, guard::AskFn ask) : m_node(std::move(node)), m_may_use_file(std::move(may_use_file)), m_ask(std::move(ask))
 {
     // Find a loaded wallet by its name (the RPC methods of the page name wallets the same way).
     auto get_wallet{[this](const UniValue& params) -> std::unique_ptr<interfaces::Wallet> {
@@ -927,8 +1074,7 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         return out;
     });
     Add("wallets.create", [this](const UniValue& params) {
-        const std::string name{Str(params, "name")};
-        if (name.empty()) throw HostError(BRIDGE_INVALID_REQUEST, "Enter a name for the wallet");
+        const std::string name{WalletName(Str(params, "name"))};
         uint64_t flags{wallet::WALLET_FLAG_DESCRIPTORS};
         if (Bool(params, "disablePrivateKeys")) flags |= wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS;
         if (Bool(params, "blank")) flags |= wallet::WALLET_FLAG_BLANK_WALLET;
@@ -942,9 +1088,17 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         out.pushKV("warnings", Warnings(warnings));
         return out;
     });
-    Add("wallets.open", [this](const UniValue& params) {
+    // A wallet of the wallets folder, by a name it lists: never a path the page makes up (audit 7 #14).
+    auto listed_name{[this](const UniValue& params) {
+        const std::string name{Str(params, "name")};
+        for (const auto& [listed, format] : Loader().listWalletDir()) {
+            if (listed == name) return name;
+        }
+        throw HostError(BRIDGE_INVALID_REQUEST, strprintf("There is no wallet \"%s\" in the wallets folder.", guard::OneLine(name, 64)));
+    }};
+    Add("wallets.open", [this, listed_name](const UniValue& params) {
         std::vector<bilingual_str> warnings;
-        auto w{Loader().loadWallet(Str(params, "name"), warnings)};
+        auto w{Loader().loadWallet(listed_name(params), warnings)};
         if (!w) throw HostError(util::ErrorString(w).translated);
         UniValue out{UniValue::VOBJ};
         out.pushKV("name", (*w)->getWalletName());
@@ -963,8 +1117,7 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         throw HostError(-18, strprintf("Requested wallet does not exist or is not loaded: %s", name));
     });
     Add("wallets.restore", [this](const UniValue& params) {
-        const std::string name{Str(params, "name")};
-        if (name.empty()) throw HostError(BRIDGE_INVALID_REQUEST, "Wallet name cannot be empty");
+        const std::string name{WalletName(Str(params, "name"))};
         std::vector<bilingual_str> warnings;
         auto w{Loader().restoreWallet(fs::PathFromString(ChosenFile(params, /*write=*/false)), name, warnings, /*load_after_restore=*/true)};
         if (!w) throw HostError(util::ErrorString(w).translated);
@@ -984,12 +1137,11 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         out.pushKV("loaded", load && res->wallet != nullptr);
         return out;
     }};
-    Add("wallets.migrate", [migrate](const UniValue& params) {
-        return migrate(Str(params, "name"), SecretParam(params, "passphrase", /*required=*/false), Bool(params, "load", true));
+    Add("wallets.migrate", [migrate, listed_name](const UniValue& params) {
+        return migrate(listed_name(params), SecretParam(params, "passphrase", /*required=*/false), Bool(params, "load", true));
     });
     Add("wallets.restoreMigrate", [this, migrate](const UniValue& params) {
-        const std::string name{Str(params, "name")};
-        if (name.empty()) throw HostError(BRIDGE_INVALID_REQUEST, "Wallet name cannot be empty");
+        const std::string name{WalletName(Str(params, "name"))};
         std::vector<bilingual_str> warnings;
         auto restored{Loader().restoreWallet(fs::PathFromString(ChosenFile(params, /*write=*/false)), name, warnings, /*load_after_restore=*/false)};
         if (!restored) throw HostError(util::ErrorString(restored).translated);
@@ -1058,15 +1210,50 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         }
         return UniValue{true};
     });
-    Add("wallet.unlock", [get_wallet](const UniValue& params) {
+    Add("wallet.unlock", [this, get_wallet](const UniValue& params) {
+        // Unlocked for a while (walletpassphrase), with the passphrase typed in the dialog of the host: the page never sees it
+        // (audit 7 #1). Whatever is spent meanwhile is still confirmed on the desktop.
         auto w{get_wallet(params)};
-        const SecureString pass{SecretParam(params, "passphrase")};
-        if (!w->unlock(pass)) {
-            throw HostError(WalletApi::PASSPHRASE_INCORRECT, pass.find('\0') == std::string::npos ?
-                "The passphrase entered for the wallet decryption was incorrect." :
-                "The passphrase entered for the wallet decryption is incorrect. It contains a null character (ie - a zero byte).");
+        const int64_t seconds{Int(params, "seconds")};
+        if (seconds < 1 || seconds > 100'000'000) throw HostError(BRIDGE_INVALID_REQUEST, "seconds: from 1 to 100000000");
+        if (!w->isCrypted()) throw HostError("This wallet is not encrypted");
+        Window::ConfirmDialog dialog;
+        dialog.title = "Unlock the wallet for a while";
+        dialog.message = "The keys of the wallet stay unlocked for this long, or until it is locked again. Payments, signatures and the like are "
+                         "still asked here first.\n\nUnlock it only if you asked for it.";
+        dialog.accept = "Unlock";
+        dialog.kind = "unlock";
+        dialog.rows = confirm::WalletRows(w->getWalletName());
+        dialog.rows.push_back(confirm::Text("For", seconds % 60 == 0 ? strprintf("%d minute%s", seconds / 60, seconds == 60 ? "" : "s") : strprintf("%d seconds", seconds)));
+        dialog.passphrase = true;
+        dialog.passphrase_label = strprintf("Passphrase of the wallet \"%s\"", guard::OneLine(w->getWalletName(), 64));
+        const std::string uri{WalletUri(w->getWalletName())};
+        for (int attempt{0}; attempt < PASSPHRASE_TRIES; ++attempt) {
+            dialog::Answer answer{Ask(dialog)};
+            if (!answer.accepted) throw HostError(BRIDGE_CANCELLED, "The wallet was not unlocked: it was declined.");
+            UniValue args{UniValue::VARR};
+            args.push_back(std::string{answer.passphrase.begin(), answer.passphrase.end()});
+            args.push_back(seconds);
+            // Not left in freed memory.
+            const auto wipe{[&] {
+                std::string& text{const_cast<std::string&>(args[0].get_str())};
+                memory_cleanse(text.data(), text.size());
+            }};
+            try {
+                m_node().executeRpc("walletpassphrase", args, uri);
+                wipe();
+                return UniValue{true};
+            } catch (const UniValue& error) {
+                wipe();
+                const UniValue& code{error.find_value("code")};
+                if (!code.isNum() || code.getInt<int>() != PASSPHRASE_INCORRECT) {
+                    const UniValue& message{error.find_value("message")};
+                    throw HostError(message.isStr() ? message.get_str() : error.write());
+                }
+                dialog.error = "The passphrase entered for the wallet decryption was incorrect. Try again.";
+            }
         }
-        return UniValue{true};
+        throw HostError(PASSPHRASE_INCORRECT, "The passphrase entered for the wallet decryption was incorrect.");
     });
     Add("wallet.lock", [get_wallet](const UniValue& params) {
         return UniValue{get_wallet(params)->lock()};
@@ -1235,6 +1422,8 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         if (!w->createBumpTransaction(bump->txid, coin_control, errors, old_fee, new_fee, bump->mtx)) {
             throw HostError(strprintf("Increasing transaction fee failed (%s)", errors.empty() ? "" : errors[0].translated));
         }
+        bump->old_fee = old_fee;
+        bump->new_fee = new_fee;
         const std::string token{NewToken()};
         {
             LOCK(m_mutex);
@@ -1255,23 +1444,39 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         if (erase) m_bumps.erase(it);
         return bump;
     }};
-    Add("wallet.bump.commit", [get_wallet, take_bump](const UniValue& params) {
+    Add("wallet.bump.commit", [this, get_wallet, take_bump](const UniValue& params) {
         auto bump{take_bump(params, false)};
         auto w{get_wallet(params)};
         if (w->getWalletName() != bump->wallet) throw HostError(BRIDGE_INVALID_REQUEST, "The fee bump is of another wallet");
         if (w->privateKeysDisabled() && !w->hasExternalSigner()) throw HostError("This wallet cannot sign: create an unsigned transaction instead");
-        UnlockScope unlock{*w, params};
         bump = take_bump(params, true);
-        CMutableTransaction mtx{bump->mtx};
-        if (!w->signBumpTransaction(mtx)) throw HostError("Can't sign transaction.");
-        std::vector<bilingual_str> errors;
-        Txid new_txid;
-        if (!w->commitBumpTransaction(bump->txid, std::move(mtx), errors, new_txid)) {
-            throw HostError(strprintf("Could not commit transaction (%s)", errors.empty() ? "" : errors[0].translated));
+        // What the replacement pays, from itself, and the fees before and after: confirmed on the desktop (audit 7 #1).
+        Window::ConfirmDialog dialog;
+        dialog.title = "Increase the fee";
+        dialog.message = "The wallet replaces the transaction with one that pays a higher fee, to the same recipients.\n\nAccept only if you asked for it.";
+        dialog.accept = "Increase the fee";
+        dialog.kind = "bump";
+        const CTransaction replacement{bump->mtx};
+        // The output of the wallet's own (its change) is not a payment.
+        std::optional<unsigned int> change;
+        for (unsigned int i{0}; i < replacement.vout.size(); ++i) {
+            if (w->txoutIsMine(replacement.vout[i])) change = i;
         }
-        UniValue out{UniValue::VOBJ};
-        out.pushKV("txid", new_txid.GetHex());
-        return out;
+        dialog.rows = PaymentRows(*w, replacement, change, bump->new_fee, LabelsOf(*w));
+        dialog.rows.insert(dialog.rows.begin() + 2, confirm::Destination("Replaces", bump->txid.GetHex()));
+        dialog.rows.insert(dialog.rows.begin() + 3, confirm::Amount("Fee before", bump->old_fee));
+        return WithKeys(w->getWalletName(), dialog, /*always=*/true, /*fee_unknown=*/false, [&] {
+            CMutableTransaction mtx{bump->mtx};
+            if (!w->signBumpTransaction(mtx)) throw HostError("Can't sign transaction.");
+            std::vector<bilingual_str> errors;
+            Txid new_txid;
+            if (!w->commitBumpTransaction(bump->txid, std::move(mtx), errors, new_txid)) {
+                throw HostError(strprintf("Could not commit transaction (%s)", errors.empty() ? "" : errors[0].translated));
+            }
+            UniValue out{UniValue::VOBJ};
+            out.pushKV("txid", new_txid.GetHex());
+            return out;
+        });
     });
     Add("wallet.bump.psbt", [get_wallet, take_bump](const UniValue& params) {
         auto bump{take_bump(params, true)};
@@ -1314,14 +1519,15 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
     Add("wallet.addressBook.add", [get_wallet, duplicate_warning](const UniValue& params) {
         auto w{get_wallet(params)};
         const std::string address{Str(params, "address")};
-        const std::string label{OptStr(params, "label")};
+        // One line (audit 7 #4): a label never holds line breaks to push the address out of sight.
+        const std::string label{ShownLabel(OptStr(params, "label"))};
         if (!IsValidDestinationString(address)) throw HostError(WalletApi::SEND_REFUSED, strprintf("The entered address \"%s\" is not a valid %s address.", address, CLIENT_NAME));
         const CTxDestination dest{DecodeDestination(address)};
         if (w->getAddress(dest, /*name=*/nullptr, /*purpose=*/nullptr)) throw HostError(WalletApi::SEND_REFUSED, duplicate_warning(*w, address, true));
         w->setAddressBook(dest, label, AddressPurpose::SEND);
         return UniValue{address};
     });
-    Add("wallet.addressBook.edit", [get_wallet, duplicate_warning](const UniValue& params) {
+    Add("wallet.addressBook.edit", [this, get_wallet, duplicate_warning](const UniValue& params) {
         auto w{get_wallet(params)};
         const std::string address{Str(params, "address")};
         const CTxDestination cur{DecodeDestination(address)};
@@ -1330,7 +1536,7 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         if (!w->getAddress(cur, &old_label, &purpose)) throw HostError("This address is not in the address book");
         if (purpose == AddressPurpose::REFUND) throw HostError("This address cannot be edited");
         const bool sending{purpose == AddressPurpose::SEND};
-        const std::string label{OptStr(params, "label", old_label)};
+        const std::string label{Param(params, "label").isStr() ? ShownLabel(OptStr(params, "label")) : old_label};
         const std::string new_address{OptStr(params, "newAddress", address)};
         UniValue out{UniValue::VOBJ};
         if (new_address != address) {
@@ -1339,6 +1545,19 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
             const CTxDestination dest{DecodeDestination(new_address)};
             if (std::get_if<CNoDestination>(&dest)) throw HostError(WalletApi::SEND_REFUSED, strprintf("The entered address \"%s\" is not a valid %s address.", new_address, CLIENT_NAME));
             if (w->getAddress(dest, nullptr, nullptr)) throw HostError(WalletApi::SEND_REFUSED, duplicate_warning(*w, new_address, true));
+            // The label stays, the address behind it changes: what the user pays to by that name from now on. On the user's
+            // word given to the desktop, old and new address whole (audit 7 #6).
+            Window::ConfirmDialog dialog;
+            dialog.title = "Change the address of a label";
+            dialog.message = "Payments to this label go to the new address from now on.\n\nAccept only if you asked for this change.";
+            dialog.accept = "Change the address";
+            dialog.kind = "addressbook";
+            dialog.level = dialog::Level::DANGER;
+            dialog.rows = confirm::WalletRows(w->getWalletName());
+            dialog.rows.push_back(confirm::Text("Label", "\u201c" + ShownLabel(label) + "\u201d"));
+            dialog.rows.push_back(confirm::Destination("Old address", address));
+            dialog.rows.push_back(confirm::Destination("New address", new_address));
+            if (!Ask(dialog).accepted) throw HostError(BRIDGE_CANCELLED, "The address was not changed: it was declined.");
             w->delAddressBook(cur);
             w->setAddressBook(dest, label, purpose);
             out.pushKV("address", new_address);
@@ -1363,9 +1582,9 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         if (purpose != AddressPurpose::SEND) throw HostError("Only sending addresses can be deleted");
         return UniValue{w->delAddressBook(dest)};
     });
-    Add("wallet.newAddress", [get_wallet](const UniValue& params) {
+    Add("wallet.newAddress", [this, get_wallet](const UniValue& params) {
         auto w{get_wallet(params)};
-        const std::string label{OptStr(params, "label")};
+        const std::string label{ShownLabel(OptStr(params, "label"))};
         OutputType type{w->getDefaultAddressType()};
         if (const std::string t{OptStr(params, "type")}; !t.empty()) {
             const auto parsed{ParseOutputType(t)};
@@ -1374,9 +1593,18 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         }
         // As AddressTableModel::addRow for a receiving address: unlock only when the keys are needed.
         if (auto dest{w->getNewDestination(type, label)}) return UniValue{EncodeDestination(*dest)};
-        UnlockScope unlock{*w, params};
-        if (auto dest{w->getNewDestination(type, label)}) return UniValue{EncodeDestination(*dest)};
-        throw HostError(strprintf("Could not generate new %s address", FormatOutputType(type)));
+        // The keys are needed to make more: the passphrase is asked in the dialog of the host (never by the page).
+        Window::ConfirmDialog dialog;
+        dialog.title = "Unlock the wallet";
+        dialog.message = "The wallet needs its keys to make new addresses. Nothing is spent.";
+        dialog.accept = "Unlock";
+        dialog.kind = "keys:newaddress";
+        dialog.level = dialog::Level::INFO;
+        dialog.rows = confirm::WalletRows(w->getWalletName());
+        return WithKeys(w->getWalletName(), dialog, /*always=*/false, /*fee_unknown=*/false, [&]() -> UniValue {
+            if (auto dest{w->getNewDestination(type, label)}) return UniValue{EncodeDestination(*dest)};
+            throw HostError(strprintf("Could not generate new %s address", FormatOutputType(type)));
+        });
     });
     Add("wallet.displayAddress", [get_wallet](const UniValue& params) {
         auto w{get_wallet(params)};
@@ -1632,40 +1860,58 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         std::set<std::string> addresses;
         CAmount total{0};
         bool subtract{false};
+        size_t data_outputs{0};
         for (const UniValue& r : list.getValues()) {
+            if (Param(r, "data").isStr()) {
+                // Data in the chain (a timestamp): an OP_RETURN output of no value, shown as such on the desktop.
+                const auto bytes{TryParseHex<unsigned char>(Str(r, "data"))};
+                if (!bytes || bytes->empty() || bytes->size() > 80) throw HostError(WalletApi::SEND_REFUSED, "data: the hexadecimal bytes of the data, at most 80");
+                if (++data_outputs > 1) throw HostError(WalletApi::SEND_REFUSED, "One output of data at most");
+                vecSend.push_back(wallet::CRecipient{CNoDestination{CScript() << OP_RETURN << *bytes}, 0, false});
+                continue;
+            }
             Prepared::Recipient rcp;
             rcp.address = Str(r, "address");
-            rcp.label = OptStr(r, "label");
-            rcp.message = OptStr(r, "message");
+            // One line each (audit 7 #4): a label or a message never pushes what is paid out of sight.
+            rcp.label = ShownLabel(OptStr(r, "label"));
+            rcp.message = guard::OneLine(OptStr(r, "message"), 300);
             rcp.amount = OptInt(r, "amount").value_or(0);
             const bool sub{Bool(r, "subtractFee")};
             if (!IsValidDestinationString(rcp.address)) throw HostError(WalletApi::SEND_REFUSED, "The recipient address is not valid. Please recheck.");
             if (rcp.amount <= 0) throw HostError(WalletApi::SEND_REFUSED, "The amount to pay must be larger than 0.");
+            // Every amount, and their sum, within the coins there can be (audit 7 #19).
+            if (!MoneyRange(rcp.amount) || !MoneyRange(total + rcp.amount)) throw HostError(WalletApi::SEND_REFUSED, "The amount exceeds your balance.");
             if (sub) subtract = true;
             addresses.insert(rcp.address);
             vecSend.push_back(wallet::CRecipient{DecodeDestination(rcp.address), rcp.amount, sub});
             total += rcp.amount;
             prepared->recipients.push_back(rcp);
         }
+        if (prepared->recipients.empty() && data_outputs == 0) throw HostError(BRIDGE_INVALID_REQUEST, "recipients: at least one");
         if (addresses.size() != prepared->recipients.size()) throw HostError(WalletApi::SEND_REFUSED, "Duplicate address found: addresses should only be used once each.");
 
         CCoinControl cc{MakeCoinControl(params)};
+        // A change address of the page must be the wallet's own: the change would be a payment to someone else otherwise.
+        if (!std::get_if<CNoDestination>(&cc.destChange) && !w->isSpendable(cc.destChange)) {
+            throw HostError(WalletApi::SEND_REFUSED, "The custom change address is not an address of this wallet.");
+        }
         // Future: a checkbox to choose this (as the Qt GUI says).
         cc.m_allow_other_inputs = !cc.HasSelected();
         const CAmount balance{cc.HasSelected() ? w->getAvailableBalance(cc) : w->getBalances().balance};
         if (total > balance) throw HostError(WalletApi::SEND_REFUSED, "The amount exceeds your balance.");
 
-        // The keys sign the transaction now: the wallet is unlocked for that, and locked again after.
-        UnlockScope unlock{*w, params};
-        const bool sign{!w->privateKeysDisabled()};
+        // Made, not signed: the keys sign it once the user accepted it on the desktop (wallet.send.commit), with the
+        // passphrase typed there. The page never gives one.
         CAmount fee;
         try {
-            auto res{w->createTransaction(vecSend, cc, sign, /*change_pos=*/std::nullopt)};
+            auto res{w->createTransaction(vecSend, cc, /*sign=*/false, /*change_pos=*/std::nullopt)};
             if (!res) throw HostError(WalletApi::SEND_REFUSED, strprintf("Transaction creation failed! %s", util::ErrorString(res).translated));
             prepared->tx = res->tx;
+            prepared->change_pos = res->change_pos;
             fee = res->fee;
             if (subtract && prepared->tx) {
-                // WalletModelTransaction::reassignAmounts: the amounts the outputs got, the fee taken off.
+                // WalletModelTransaction::reassignAmounts: the amounts the outputs got, the fee taken off (the outputs of
+                // the recipients are in their order, around the change; an output of data follows them).
                 const int change_pos{res->change_pos ? static_cast<int>(*res->change_pos) : -1};
                 int i{0};
                 for (auto& rcp : prepared->recipients) {
@@ -1693,7 +1939,14 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         UniValue out{UniValue::VOBJ};
         out.pushKV("token", token);
         out.pushKV("fee", fee);
-        out.pushKV("vsize", GetVirtualTransactionSize(*prepared->tx));
+        // The size once signed (the transaction is not signed yet): what the fee was set for.
+        int64_t vsize{GetVirtualTransactionSize(*prepared->tx)};
+        if (wallet::CWallet* cw{w->wallet()}) {
+            LOCK(cw->cs_wallet);
+            const wallet::TxSize signed_size{wallet::CalculateMaximumSignedTxSize(*prepared->tx, cw, &cc)};
+            if (signed_size.vsize > 0) vsize = signed_size.vsize;
+        }
+        out.pushKV("vsize", vsize);
         CAmount amounts{0};
         UniValue rcps{UniValue::VARR};
         for (const auto& rcp : prepared->recipients) {
@@ -1719,57 +1972,72 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         if (erase) m_prepared.erase(it);
         return prepared;
     }};
-    Add("wallet.send.commit", [get_wallet, take_prepared](const UniValue& params) {
+    Add("wallet.send.commit", [this, get_wallet, take_prepared](const UniValue& params) {
         auto prepared{take_prepared(params, true)};
         auto w{get_wallet(params)};
         if (w->getWalletName() != prepared->wallet) throw HostError(BRIDGE_INVALID_REQUEST, "The transaction is of another wallet");
         if (w->privateKeysDisabled() && !w->hasExternalSigner()) throw HostError("This wallet cannot sign: create an unsigned transaction instead");
-        CTransactionRef tx{prepared->tx};
-        UniValue out{UniValue::VOBJ};
-        if (w->hasExternalSigner()) {
-            // SendCoinsDialog::signWithExternalSigner: fill without signing first, then sign on the device.
+        // What the transaction pays, read from it (not from what the page asked): each destination whole, then its amount
+        // and the label the page gave it, the fee, the total; confirmed on the desktop (audit 7 #1).
+        std::map<std::string, std::string> labels;
+        for (const auto& rcp : prepared->recipients) labels.emplace(rcp.address, rcp.label);
+        Window::ConfirmDialog dialog;
+        dialog.title = w->hasExternalSigner() ? "Send coins: sign on the device" : "Send coins";
+        dialog.message = "Check each address in full: the coins cannot be taken back once sent.\n\nSend only if you asked for this payment.";
+        dialog.accept = w->hasExternalSigner() ? "Sign on the device" : "Send";
+        dialog.kind = "send";
+        dialog.rows = PaymentRows(*w, *prepared->tx, prepared->change_pos, prepared->fee, labels);
+        return WithKeys(w->getWalletName(), dialog, /*always=*/true, /*fee_unknown=*/false, [&] {
+            CTransactionRef tx{prepared->tx};
+            UniValue out{UniValue::VOBJ};
             CMutableTransaction mtx{*tx};
-            PartiallySignedTransaction psbtx{mtx};
-            bool complete{false};
-            if (w->fillPSBT({.sign = false, .bip32_derivs = true}, nullptr, psbtx, complete)) throw HostError("Transaction creation failed!");
-            std::optional<common::PSBTError> err;
-            try {
-                err = w->fillPSBT({.sign = true, .bip32_derivs = true}, nullptr, psbtx, complete);
-            } catch (const std::runtime_error& e) {
-                throw HostError(strprintf("Sign failed: %s", e.what()));
-            }
-            if (err == common::PSBTError::EXTERNAL_SIGNER_NOT_FOUND) throw HostError("External signer not found");
-            if (err == common::PSBTError::EXTERNAL_SIGNER_FAILED) throw HostError("External signer failure");
-            if (err) throw HostError("Transaction creation failed!");
-            // fillPSBT does not always properly finalize.
-            complete = FinalizeAndExtractPSBT(psbtx, mtx);
-            if (!complete) {
-                // More signatures are needed (a multisig wallet): the PSBT goes to the user.
-                out.pushKV("complete", false);
-                out.pushKV("psbt", EncodePsbt(psbtx));
-                return out;
+            if (w->hasExternalSigner()) {
+                // SendCoinsDialog::signWithExternalSigner: fill without signing first, then sign on the device.
+                PartiallySignedTransaction psbtx{mtx};
+                bool complete{false};
+                if (w->fillPSBT({.sign = false, .bip32_derivs = true}, nullptr, psbtx, complete)) throw HostError("Transaction creation failed!");
+                std::optional<common::PSBTError> err;
+                try {
+                    err = w->fillPSBT({.sign = true, .bip32_derivs = true}, nullptr, psbtx, complete);
+                } catch (const std::runtime_error& e) {
+                    throw HostError(strprintf("Sign failed: %s", e.what()));
+                }
+                if (err == common::PSBTError::EXTERNAL_SIGNER_NOT_FOUND) throw HostError("External signer not found");
+                if (err == common::PSBTError::EXTERNAL_SIGNER_FAILED) throw HostError("External signer failure");
+                if (err) throw HostError("Transaction creation failed!");
+                // fillPSBT does not always properly finalize.
+                complete = FinalizeAndExtractPSBT(psbtx, mtx);
+                if (!complete) {
+                    // More signatures are needed (a multisig wallet): the PSBT goes to the user.
+                    out.pushKV("complete", false);
+                    out.pushKV("psbt", EncodePsbt(psbtx));
+                    return out;
+                }
+            } else if (!w->signBumpTransaction(mtx)) {
+                // The keys of the wallet sign each of its inputs.
+                throw HostError("Can't sign transaction.");
             }
             tx = MakeTransactionRef(mtx);
-        }
-        std::vector<std::string> messages;
-        for (const auto& rcp : prepared->recipients) {
-            // Message from a payment URI (chains:...?message=example).
-            if (!rcp.message.empty()) messages.push_back(rcp.message);
-        }
-        w->commitTransaction(tx, messages);
-        // Addresses sent to go in the address book, with their label (WalletModel::sendCoins).
-        for (const auto& rcp : prepared->recipients) {
-            const CTxDestination dest{DecodeDestination(rcp.address)};
-            std::string name;
-            if (!w->getAddress(dest, &name, /*purpose=*/nullptr)) {
-                w->setAddressBook(dest, rcp.label, AddressPurpose::SEND);
-            } else if (name != rcp.label) {
-                w->setAddressBook(dest, rcp.label, {});
+            std::vector<std::string> messages;
+            for (const auto& rcp : prepared->recipients) {
+                // Message from a payment URI (chains:...?message=example).
+                if (!rcp.message.empty()) messages.push_back(rcp.message);
             }
-        }
-        out.pushKV("complete", true);
-        out.pushKV("txid", tx->GetHash().GetHex());
-        return out;
+            w->commitTransaction(tx, messages);
+            // Addresses sent to go in the address book, with their label (WalletModel::sendCoins).
+            for (const auto& rcp : prepared->recipients) {
+                const CTxDestination dest{DecodeDestination(rcp.address)};
+                std::string name;
+                if (!w->getAddress(dest, &name, /*purpose=*/nullptr)) {
+                    w->setAddressBook(dest, rcp.label, AddressPurpose::SEND);
+                } else if (name != rcp.label) {
+                    w->setAddressBook(dest, rcp.label, {});
+                }
+            }
+            out.pushKV("complete", true);
+            out.pushKV("txid", tx->GetHash().GetHex());
+            return out;
+        });
     });
     Add("wallet.send.psbt", [get_wallet, take_prepared](const UniValue& params) {
         auto prepared{take_prepared(params, true)};
@@ -1789,41 +2057,11 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         return UniValue{m_prepared.erase(Str(params, "token")) > 0};
     });
 
-    // --- Wallet RPC methods that need the keys (deposits, stamps, multisig, proofs of funds) ---
-
-    Add("wallet.withKeys", [this, get_wallet](const UniValue& params) {
-        // The keys are unlocked in this process for these calls alone and locked again right after
-        // (UnlockScope, as WalletModel::UnlockContext): never left unlocked for a while, whatever the page does.
-        auto w{get_wallet(params)};
-        const UniValue calls{Param(params, "calls")};
-        if (!calls.isArray() || calls.empty() || calls.size() > 10000) throw HostError(BRIDGE_INVALID_REQUEST, "calls: a list of {method, params}");
-        for (const UniValue& call : calls.getValues()) {
-            if (!KeyedWalletRpc(Str(call, "method"))) throw HostError(BRIDGE_METHOD_NOT_FOUND, strprintf("%s does not run with the keys of the wallet", Str(call, "method")));
-            const UniValue p{Param(call, "params")};
-            if (!p.isNull() && !p.isArray() && !p.isObject()) throw HostError(BRIDGE_INVALID_REQUEST, "params: an array or an object");
-        }
-        UnlockScope unlock{*w, params};
-        const std::string uri{WalletUri(w->getWalletName())};
-        UniValue out{UniValue::VARR};
-        for (const UniValue& call : calls.getValues()) {
-            const UniValue p{Param(call, "params")};
-            UniValue answer{UniValue::VOBJ};
-            try {
-                answer.pushKV("result", m_node().executeRpc(Str(call, "method"), p.isNull() ? UniValue{UniValue::VARR} : p, uri));
-            } catch (const UniValue& error) {
-                const bool known{error.isObject() && error.find_value("code").isNum() && error.find_value("message").isStr()};
-                answer.pushKV("error", ErrorObject(known ? error.find_value("code").getInt<int>() : BRIDGE_HOST_ERROR, known ? error.find_value("message").get_str() : error.write()));
-            } catch (const std::exception& e) {
-                answer.pushKV("error", ErrorObject(BRIDGE_HOST_ERROR, e.what()));
-            }
-            out.push_back(std::move(answer));
-        }
-        return out;
-    });
+    // (Wallet RPC methods that pay, sign or need the keys: rpc.confirmed, confirm.cpp, through WithKeys.)
 
     // --- Messages (SignVerifyMessageDialog) ---
 
-    Add("wallet.signMessage", [get_wallet](const UniValue& params) {
+    Add("wallet.signMessage", [this, get_wallet](const UniValue& params) {
         auto w{get_wallet(params)};
         const CTxDestination destination{DecodeDestination(Str(params, "address"))};
         if (!IsValidDestination(destination)) throw HostError(-5, "The entered address is invalid. Please check the address and try again.");
@@ -1835,16 +2073,28 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
             pkhash = PKHash{uint160{*witness}};
         }
         if (!pkhash) throw HostError(-3, "The entered address does not refer to a single key. Messages can be signed with P2PKH and P2WPKH addresses. Please check the address and try again.");
-        UnlockScope unlock{*w, params};
-        std::string signature;
-        switch (w->signMessage(Str(params, "message"), *pkhash, signature)) {
-        case SigningResult::OK: break;
-        case SigningResult::PRIVATE_KEY_NOT_AVAILABLE: throw HostError(-4, "Private key for the entered address is not available.");
-        case SigningResult::SIGNING_FAILED: throw HostError("Message signing failed.");
-        }
-        UniValue out{UniValue::VOBJ};
-        out.pushKV("signature", signature);
-        return out;
+        // The message and the address, as the host has them: confirmed on the desktop (audit 7 #1).
+        const std::string message{Str(params, "message")};
+        Window::ConfirmDialog dialog;
+        dialog.title = "Sign a message";
+        dialog.message = "The wallet signs this message with the key of this address. Whoever gets the signature can show it as proof that the "
+                         "holder of the address wrote the message.\n\nSign it only if you asked for it.";
+        dialog.accept = "Sign";
+        dialog.kind = "sign";
+        dialog.rows = confirm::WalletRows(w->getWalletName());
+        dialog.rows.push_back(confirm::Destination("Address", EncodeDestination(destination)));
+        dialog.rows.push_back(confirm::Text("Message", message));
+        return WithKeys(w->getWalletName(), dialog, /*always=*/true, /*fee_unknown=*/false, [&] {
+            std::string signature;
+            switch (w->signMessage(message, *pkhash, signature)) {
+            case SigningResult::OK: break;
+            case SigningResult::PRIVATE_KEY_NOT_AVAILABLE: throw HostError(-4, "Private key for the entered address is not available.");
+            case SigningResult::SIGNING_FAILED: throw HostError("Message signing failed.");
+            }
+            UniValue out{UniValue::VOBJ};
+            out.pushKV("signature", signature);
+            return out;
+        });
     });
     Add("message.verify", [](const UniValue& params) {
         const auto result{MessageVerify(Str(params, "address"), Str(params, "signature"), Str(params, "message"))};
@@ -1908,14 +2158,35 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         out.pushKV("canSign", can_sign);
         return out;
     });
-    Add("wallet.psbt.sign", [get_wallet](const UniValue& params) {
+    Add("wallet.psbt.sign", [this, get_wallet](const UniValue& params) {
         PartiallySignedTransaction psbtx{DecodePsbtParam(params)};
         auto w{get_wallet(params)};
-        UnlockScope unlock{*w, params};
-        bool complete;
-        size_t n_signed;
-        const auto err{w->fillPSBT({.sign = true, .bip32_derivs = true}, &n_signed, psbtx, complete)};
-        if (err) throw HostError(strprintf("Failed to sign transaction: %s", common::PSBTErrorString(*err).translated));
+        // What the PSBT spends of this wallet and pays, decoded here: confirmed on the desktop before the keys sign it (audit 7 #1).
+        Window::ConfirmDialog dialog;
+        dialog.title = "Sign a partially signed transaction";
+        dialog.message = "The wallet signs the inputs of this transaction that are its own. Once it has every signature it needs, whoever has it "
+                         "can broadcast it.\n\nSign it only if you asked for it.";
+        dialog.accept = "Sign";
+        dialog.kind = "psbt";
+        dialog.rows = PsbtRows(w.get(), psbtx);
+        const bool finalize{Bool(params, "finalize", true)};
+        bool complete{false};
+        size_t n_signed{0};
+        // The signatures of each input before: an input signed without being finalized (a multisig) counts as signed too.
+        const auto signatures{[](const PSBTInput& input) { return input.partial_sigs.size() + input.m_tap_script_sigs.size() + (input.m_tap_key_sig.empty() ? 0 : 1); }};
+        std::vector<size_t> before;
+        for (const PSBTInput& input : psbtx.inputs) before.push_back(signatures(input));
+        WithKeys(w->getWalletName(), dialog, /*always=*/true, /*fee_unknown=*/false, [&] {
+            const auto err{w->fillPSBT({.sign = true, .finalize = finalize, .bip32_derivs = true}, &n_signed, psbtx, complete)};
+            if (err) throw HostError(strprintf("Failed to sign transaction: %s", common::PSBTErrorString(*err).translated));
+            return UniValue{};
+        });
+        if (!finalize) {
+            n_signed = 0;
+            for (size_t i{0}; i < psbtx.inputs.size() && i < before.size(); ++i) {
+                if (signatures(psbtx.inputs[i]) > before[i]) ++n_signed;
+            }
+        }
         UniValue out{PsbtState(w.get(), psbtx, complete)};
         UniValue status{UniValue::VOBJ};
         if (!complete && n_signed < 1) {
@@ -1933,11 +2204,20 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         out.pushKV("canSign", !complete && n_signed > 0);
         return out;
     });
-    Add("psbt.broadcast", [this](const UniValue& params) {
+    Add("psbt.broadcast", [this, find_wallet](const UniValue& params) {
         PartiallySignedTransaction psbtx{DecodePsbtParam(params)};
         CMutableTransaction mtx;
         if (!FinalizeAndExtractPSBT(psbtx, mtx)) throw HostError("Unknown error processing transaction.");
         const CTransactionRef tx{MakeTransactionRef(mtx)};
+        // What it pays, decoded here: confirmed on the desktop before it goes to the network (audit 7 #1).
+        auto w{find_wallet(params)};
+        Window::ConfirmDialog dialog;
+        dialog.title = "Broadcast a transaction";
+        dialog.message = "The transaction goes to the network and cannot be taken back.\n\nBroadcast it only if you asked for it.";
+        dialog.accept = "Broadcast";
+        dialog.kind = "broadcast";
+        dialog.rows = PsbtRows(w.get(), psbtx);
+        if (!Ask(dialog).accepted) throw HostError(BRIDGE_CANCELLED, "The transaction was not broadcast: it was declined.");
         std::string err_string;
         const node::TransactionError error{m_node().broadcastTransaction(tx, node::DEFAULT_MAX_RAW_TX_FEE_RATE.GetFeePerK(), err_string)};
         if (error != node::TransactionError::OK) {
@@ -1986,11 +2266,12 @@ UniValue WalletApi::Call(const std::string& method, const UniValue& params)
 
 void WalletApi::Register(Bridge& bridge)
 {
-    // Loading, restoring, migrating and backing up a wallet can take minutes (a rescan, a large file):
-    // apart from the quick calls of the pages.
+    // Loading, restoring, migrating and backing up a wallet can take minutes (a rescan, a large file), and what asks the
+    // user on the desktop waits for the answer: apart from the quick calls of the pages.
     static const std::set<std::string> SLOW{"wallets.create", "wallets.open", "wallets.restore", "wallets.migrate", "wallets.restoreMigrate",
-                                            "wallet.backup", "wallet.exportWatchOnly", "wallet.encrypt", "wallet.withKeys", "wallets.signers",
-                                            "wallet.displayAddress", "wallet.send.commit"};
+                                            "wallet.backup", "wallet.exportWatchOnly", "wallet.encrypt", "wallets.signers",
+                                            "wallet.displayAddress", "wallet.send.commit", "wallet.bump.commit", "wallet.signMessage",
+                                            "wallet.psbt.sign", "psbt.broadcast", "wallet.unlock", "wallet.newAddress", "wallet.addressBook.edit"};
     for (const auto& [name, fn] : m_methods) {
         bridge.RegisterHost(name, [this, name](const UniValue& params) { return Call(name, params); }, SLOW.contains(name) ? Bridge::Thread::LONG : Bridge::Thread::WORKER);
     }

@@ -8,7 +8,7 @@
   import { formatHashRate } from '../lib/hashrate';
   import { nav } from '../lib/nav.svelte';
   import { tick } from 'svelte';
-  import { errorText, inform } from '../lib/dialogs.svelte';
+  import { declined, errorText, inform } from '../lib/dialogs.svelte';
   import { formatCount, niceTimeOffset } from '../lib/format';
   import { rpc } from '../lib/rpc';
   import { prefs, savePrefs, wallets, walletsEnabled } from '../lib/state.svelte';
@@ -75,10 +75,11 @@
     if (!address.trim() && !(await newAddress())) return;
     busy = true;
     try {
+      // Confirmed on the desktop (rpc.confirmed): a no there starts nothing.
       await rpc.raw('setgenerate', [true, address.trim(), threads]);
       savePrefs({ miningAddress: address.trim(), miningThreads: threads });
     } catch (e) {
-      await inform(t('Solo Mine'), errorText(e), 'warning');
+      if (!declined(e)) await inform(t('Solo Mine'), errorText(e), 'warning');
     } finally {
       busy = false;
       refresh();

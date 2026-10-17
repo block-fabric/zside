@@ -40,6 +40,9 @@ class NodeEvents;
 class OptionsJournal;
 class SingleInstance;
 class WalletApi;
+namespace confirm {
+class ConfirmedRpc;
+} // namespace confirm
 
 /** The options of the app on top of the ones of the node (the GUI options of chains-qt, and the debug ones of chains-app). */
 void SetupUIArgs(ArgsManager& args);
@@ -99,10 +102,24 @@ private:
      */
     std::optional<std::string> Choose(const Window::FileDialog& dialog) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
+     * Whether the page may use a file now: one the user chose (to read, or with `write` to save) in the last minutes, for
+     * this one use (audit 7 #13: a backup saved once cannot be overwritten hours later). The grant goes with the use.
+     */
+    bool TakeChosenFile(const std::string& path, bool write) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
      * Ask the user in the dialog window of the host (Window::Ask: in the look of the app, never of the page), not on a
      * thread of the UI; false when cancelled or quitting.
      */
     bool Confirm(const Window::ConfirmDialog& dialog) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * The same, with the answer itself (the passphrase of a field: Window::ConfirmDialog::passphrase). The questions are
+     * bounded (audit 7 #8): one of a kind at a time, a few at once, a kind declined again and again in a short time is
+     * refused for the rest of the session (the dialog says so before), and a question whose request the page cancelled
+     * is withdrawn (declined) while it waits its turn.
+     */
+    dialog::Answer AskHost(const Window::ConfirmDialog& dialog) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Whether a question of the host shows or waits now: the page may not move, minimize or close the window meanwhile (audit 7 #7). */
+    bool HostQuestionOpen() const { return m_host_questions.load() > 0; }
     /** A confirmation as the dialog window shows it: its text, and the look of the app now (the preferences of the network shown). */
     dialog::Request DialogRequest(const Window::ConfirmDialog& confirm) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
@@ -144,6 +161,8 @@ private:
     std::unique_ptr<WalletApi> m_wallet_api;
     //! The node window and the tools (console, peers, bans, deposit addresses, hashes, stamps).
     std::unique_ptr<NodeApi> m_node_api;
+    //! The RPC methods that pay, sign or change the votes of the node, confirmed on the desktop (confirm.h).
+    std::unique_ptr<confirm::ConfirmedRpc> m_confirmed_rpc;
     //! The nodes of sidechains run from here.
     std::unique_ptr<SidechainNodes> m_sidechain_nodes;
     std::unique_ptr<SidechainApi> m_sidechain_api;
@@ -174,18 +193,42 @@ private:
     int64_t m_next_dialog GUARDED_BY(m_mutex){1};
     bool m_node_started GUARDED_BY(m_mutex){false};
     std::optional<int> m_exit_code GUARDED_BY(m_mutex);
-    //! Files the user chose in a file chooser: the only ones the page may read, or write.
-    std::set<std::string> m_readable GUARDED_BY(m_mutex);
-    std::set<std::string> m_writable GUARDED_BY(m_mutex);
+    //! Files the user chose in a file chooser, with when: the only ones the page may read, or write, once each, soon after
+    //! (TakeChosenFile, audit 7 #13).
+    std::map<std::string, int64_t> m_readable GUARDED_BY(m_mutex);
+    std::map<std::string, int64_t> m_writable GUARDED_BY(m_mutex);
     //! Answers of the file choosers given by the tests (-webuitestscript), in place of the user.
     std::deque<UniValue> m_test_files GUARDED_BY(m_mutex);
     //! Answers of the confirmations of the host given by the tests (-webuitestscript), and what they asked: an answer
     //! given here, or the dialog shown (the dialog window, or the dialog of the system), for the test to answer there.
     enum class TestConfirm { YES, NO, SHOW, FALLBACK };
-    std::deque<TestConfirm> m_test_confirms GUARDED_BY(m_mutex);
+    struct TestAnswer {
+        TestConfirm kind;
+        //! The passphrase typed in the field of a question that has one (YES).
+        std::string passphrase;
+    };
+    std::deque<TestAnswer> m_test_confirms GUARDED_BY(m_mutex);
+    //! The answer of every question asked when none is queued (test.confirmAnswer {always}): none, a no for each.
+    std::optional<TestAnswer> m_test_confirm_always GUARDED_BY(m_mutex);
     std::vector<Window::ConfirmDialog> m_test_confirmed GUARDED_BY(m_mutex);
     //! The notifications sent to the desktop, for the tests.
     std::vector<UniValue> m_notifications GUARDED_BY(m_mutex);
+    //! The questions of the host by kind (AskHost): whether one waits, the times it was declined lately, and whether it
+    //! is refused for the rest of the session.
+    struct QuestionKind {
+        bool waiting{false};
+        std::deque<int64_t> declined;
+        bool refused{false};
+    };
+    std::map<std::string, QuestionKind> m_question_kinds GUARDED_BY(m_mutex);
+    int m_questions_waiting GUARDED_BY(m_mutex){0};
+    //! Questions of the host that show or wait (HostQuestionOpen).
+    std::atomic<int> m_host_questions{0};
+    //! The last real input of the user in the main window, as the platform saw it (Window::LastUserInput), and the one a
+    //! read of the clipboard was given for: one read per gesture (audit 7 #5).
+    uint64_t m_clipboard_read_gesture GUARDED_BY(m_mutex){0};
+    uint64_t m_clipboard_write_gesture GUARDED_BY(m_mutex){0};
+    std::deque<int64_t> m_clipboard_reads GUARDED_BY(m_mutex);
 };
 
 } // namespace webui

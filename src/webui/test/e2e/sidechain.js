@@ -180,9 +180,17 @@
     await waitFor('the address checked', () => !text('.peg').includes('This is an address of'));
     await sleep(500);
     $('#withdraw-button').click();
+    // Withdrawn on the desktop's word: the address on the mainchain whole, the amount, the fee for its miners (audit 7 #1).
+    await host('test.confirmAnswer', { yes: true });
     await answerDialog('Confirm the withdrawal', 'Withdraw');
     await waitFor('the withdrawal in a block', async () => (await rpc('listwithdrawals')).length === 1, 120000);
     await check('the withdrawal waits for a bundle', true);
+    const withdrawAsked = (await confirmed()).at(-1);
+    const payRow = withdrawAsked && withdrawAsked.rows ? withdrawAsked.rows.find((r) => r.label === `Pay on ${MAIN}`) : null;
+    await check('the withdrawal is confirmed on the desktop, the address of the mainchain whole before the amount',
+      withdrawAsked && withdrawAsked.title === `Withdraw to ${MAIN}` && payRow && payRow.value === payTo &&
+        withdrawAsked.rows.findIndex((r) => r.label === `Pay on ${MAIN}`) < withdrawAsked.rows.findIndex((r) => r.label === 'Amount'),
+      JSON.stringify(withdrawAsked));
     await waitFor('the withdrawal in the list', () => $$('table[aria-label="Withdrawals not paid yet"] tbody tr').length === 1, 30000);
     await shot('sc-peg-withdraw');
     await log(`WITHDRAWN ${payTo} 1`);

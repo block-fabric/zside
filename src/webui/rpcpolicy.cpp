@@ -5,6 +5,7 @@
 #include <webui/rpcpolicy.h>
 
 #include <webui/chainconfig.h>
+#include <webui/confirm.h>
 #include <webui/local.h>
 
 #include <map>
@@ -41,33 +42,27 @@ const std::map<std::string, Bridge::Thread>& Methods()
         {"uptime", WORKER},
 #if WEBUI_SIDECHAIN
         // A sidechain (the Peg and Merged mining pages, the dashboard): the mainchain it follows, its
-        // withdrawals and bundles, blind merged mining.
-        {"createwithdrawal", WORKER},
+        // withdrawals and bundles, blind merged mining. A withdrawal and its refund are confirmed on the desktop
+        // (rpc.confirmed, confirm.cpp: audit 7 #1).
         {"getbmminfo", WORKER},
         {"getdepositaddress", WORKER},
         {"getmainchaininfo", WORKER},
         {"getwithdrawalbundle", WORKER},
         {"listwithdrawals", WORKER},
-        {"refundwithdrawal", WORKER},
         {"syncmainchain", LONG},
         // (setbmm and requestbmmblock spend the wallet of the mainchain node: host methods bmm.set and
         // bmm.request, confirmed on the desktop; sidechainapi.cpp.)
 #else
-        // Mining with the processor (the Mine page).
+        // Mining with the processor (the Mine page): turning it on is confirmed (rpc.confirmed, confirm.cpp).
         {"getgenerate", WORKER},
-        {"setgenerate", WORKER},
-        // Drivechains (the Sidechains page).
-        {"acksidechain", WORKER},
-        {"createsidechainproposal", WORKER},
+        // Drivechains (the Sidechains page): what they read. Deposits, votes, acks and proposals are confirmed on the
+        // desktop first (rpc.confirmed, confirm.cpp: audit 7 #1).
         {"getdrivechaininfo", WORKER},
         {"getsidechainevents", WORKER},
         {"listactivesidechains", WORKER},
         {"listsidechaindeposits", WORKER},
         {"listsidechainproposals", WORKER},
         {"listwithdrawalbundles", WORKER},
-        {"removesidechainproposal", WORKER},
-        {"setdefaultwithdrawalvote", WORKER},
-        {"setwithdrawalvote", WORKER},
 #endif
         // Addresses, scripts and PSBTs (multisig lounge, proof of funds, crypto tools).
         {"createpsbt", WORKER},
@@ -76,11 +71,10 @@ const std::map<std::string, Bridge::Thread>& Methods()
         {"finalizepsbt", WORKER},
         {"getdescriptorinfo", WORKER},
         {"scantxoutset", LONG},
-        {"sendrawtransaction", WORKER},
         {"utxoupdatepsbt", WORKER},
         {"validateaddress", WORKER},
         {"verifymessage", WORKER},
-        // Wallets: what the pages read, and the unlock "for a while" the user asks for.
+        // Wallets: what the pages read. Unlocking is the host's (wallet.unlock: the passphrase typed in its dialog).
         {"getaddressinfo", WORKER},
         {"getbalances", WORKER},
         {"getnewaddress", WORKER},
@@ -88,18 +82,15 @@ const std::map<std::string, Bridge::Thread>& Methods()
         {"listunspent", WORKER},
         {"listwallets", WORKER},
         {"walletlock", WORKER},
-        {"walletpassphrase", WORKER},
-        // What needs the keys: run as is by a wallet that needs no unlocking (a locked one answers -13,
-        // and the page asks for the passphrase and goes through wallet.withKeys).
-#if !WEBUI_SIDECHAIN
-        {"createsidechaindeposit", WORKER},
-#endif
-        {"send", WORKER},
-        {"signmessage", WORKER},
-        {"walletprocesspsbt", WORKER},
+        // Nothing that spends or signs: payments, signatures of messages and of PSBTs, and broadcasts go through the host
+        // (walletapi.cpp, confirm.cpp), which shows what they do in its own dialog first (audit 7 #1).
     };
-    // The methods of this chain's own pages (local.cpp).
-    for (const auto& [name, thread] : local::RpcMethods()) methods.emplace(name, thread);
+    // The methods of this chain's own pages (local.cpp), but for those the host confirms (local::ConfirmedRpcMethods):
+    // never the page's to call by itself.
+    const auto& confirmed{confirm::Methods()};
+    for (const auto& [name, thread] : local::RpcMethods()) {
+        if (!confirmed.contains(name)) methods.emplace(name, thread);
+    }
     return methods;
     }()};
     return methods;
@@ -122,16 +113,13 @@ std::vector<std::string> PageRpcMethods()
 
 bool KeyedWalletRpc(const std::string& method)
 {
+    // The kit's own methods of the page need no keys: what does goes through the host (confirm.cpp). The chain's own pages
+    // may read with them (local::KeyedRpcMethods): those of them in the policy.
     static const std::set<std::string> methods{[] {
-        std::set<std::string> m{"send", "signmessage", "walletprocesspsbt",
-#if WEBUI_SIDECHAIN
-                                "createwithdrawal", "refundwithdrawal",
-#else
-                                "createsidechaindeposit",
-#endif
-        };
-        // The keyed methods of this chain's own pages (local.cpp).
-        m.merge(local::KeyedRpcMethods());
+        std::set<std::string> m;
+        for (const std::string& name : local::KeyedRpcMethods()) {
+            if (PageRpcPolicy(name)) m.insert(name);
+        }
         return m;
     }()};
     return methods.contains(method);

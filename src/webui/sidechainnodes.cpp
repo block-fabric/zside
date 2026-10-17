@@ -12,6 +12,8 @@
 #include <logging.h>
 #include <tinyformat.h>
 #include <util/chaintype.h>
+#include <policy/feerate.h>
+#include <util/moneystr.h>
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <support/cleanse.h>
@@ -522,7 +524,19 @@ UniValue SidechainNodes::Call(const std::string& method, const UniValue& params)
     }
     if (method == "sidechainNodes.mineOnce") {
         const Sidechain s{chosen()};
-        const std::string amount{TrimString(ParamStr(params, "amount"))};
+        // The offer is paid by a wallet of this node: parsed and capped here, and confirmed on the desktop, as bmm.request
+        // of a sidechain's app (audit 7 #2).
+        const auto offer{ParseMoney(TrimString(ParamStr(params, "amount")))};
+        if (!offer || *offer <= 0) throw HostError(BRIDGE_INVALID_REQUEST, "The offer is a positive number of coins, like 0.0001.");
+        if (*offer > MAX_BMM_OFFER) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("The offer is at most %s for a block.", FormatMoney(MAX_BMM_OFFER)));
+        const std::string amount{FormatMoney(*offer)};
+        if (!m_confirm(strprintf("Mine one block of %s", s.name),
+                       strprintf("Offer: %s %s, for one block of %s\n\nThe wallet of this node that the node of %s was started with pays this to the "
+                                 "miner of the next block of this chain, if it commits to a block of %s.\n\nAccept only if you asked for it.",
+                                 amount, CURRENCY_UNIT, s.name, s.name, s.name),
+                       "Offer")) {
+            return Said({strprintf("%s: no block was asked for: it was declined.", s.name)});
+        }
         const auto [address, address_error] = Cli(s, {"getnewaddress", "mining"});
         if (!address) return Said({strprintf("%s: %s (the sidechain node needs a wallet: turn automatic mining on once, or open its wallet)", s.name, address_error)});
         const auto [result, error] = Cli(s, {"requestbmmblock", Text(*address), amount});
@@ -539,6 +553,15 @@ UniValue SidechainNodes::Call(const std::string& method, const UniValue& params)
         if (!on.get_bool()) {
             const auto [result, error] = Cli(s, {"setbmm", "false"});
             return Said({strprintf("%s: %s", s.name, result ? std::string{"mining turned off"} : error)});
+        }
+        // Merged mining spends a wallet of this node for every block it asks for: confirmed on the desktop (audit 7 #2).
+        if (!m_confirm(strprintf("Turn merged mining of %s on", s.name),
+                       strprintf("Offer: 99%% of the fees of each block of %s\n\nThe wallet of this node that the node of %s was started with pays "
+                                 "this to the miners of this chain for each block of %s they commit to, from now on, until mining is turned off.\n\n"
+                                 "Accept only if you asked for it.",
+                                 s.name, s.name, s.name),
+                       "Mine")) {
+            return Said({strprintf("%s: mining was not turned on: it was declined.", s.name)});
         }
         // The fees of the blocks go to a wallet of the sidechain node; it gets one if it has none.
         const auto [wallets, error] = Cli(s, {"listwallets"});

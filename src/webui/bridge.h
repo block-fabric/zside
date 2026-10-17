@@ -155,6 +155,13 @@ public:
     /** Number of requests waiting or running. */
     size_t Pending() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
+    /**
+     * Whether the request the calling thread runs (a host method, on the thread the bridge runs it on) was answered
+     * already: the page cancelled it, or the app stops. A host method that waits for the user (App::Confirm) withdraws
+     * its question then (audit 7 #8). False on a thread that runs no request.
+     */
+    static bool CurrentRequestDone();
+
 private:
     struct Request {
         std::string call_id;

@@ -298,6 +298,28 @@ void Bridge::Handle(const std::string& call_id, const std::string& args_json)
     CleanseSecrets(args);
 }
 
+namespace {
+//! The request the thread runs now (Bridge::CurrentRequestDone): set while its work runs.
+thread_local const std::atomic<bool>* g_running_answered{nullptr};
+
+class RunningRequest
+{
+public:
+    explicit RunningRequest(const std::atomic<bool>& answered) : m_previous{g_running_answered} { g_running_answered = &answered; }
+    ~RunningRequest() { g_running_answered = m_previous; }
+    RunningRequest(const RunningRequest&) = delete;
+    RunningRequest& operator=(const RunningRequest&) = delete;
+
+private:
+    const std::atomic<bool>* m_previous;
+};
+} // namespace
+
+bool Bridge::CurrentRequestDone()
+{
+    return g_running_answered && g_running_answered->load();
+}
+
 void Bridge::Run(const std::shared_ptr<Request>& request, const UniValue& body)
 {
     const bool test_rpc{body.find_value("kind").get_str() == "testrpc"};
@@ -369,6 +391,7 @@ void Bridge::Run(const std::shared_ptr<Request>& request, const UniValue& body)
         }
         thread = host.thread;
         work = [this, request, host, params, method] {
+            const RunningRequest running{request->answered};
             try {
                 const UniValue result{host.fn(*params)};
                 Reply(*request, 0, result.write());

@@ -80,6 +80,9 @@
       if (theme === 'midnight') {
         const before = (await rpc('listsidechaindeposits', [2])).length;
         const move = await waitFor('the Move button', () => [...document.querySelectorAll('.move button')].find((b) => b.textContent.trim().startsWith('Move 1.25')));
+        // The fee is said before the coins move (audit 7 #20c); the desktop asks, the deposit decoded (audit 7 #1).
+        await waitFor('the fee of the deposit', () => /Fee\s*about/.test(text('.move .summary')), 10000);
+        await E2E.host('test.confirmAnswer', { yes: true });
         move.click();
         await waitFor('the coins on their way', () => text('.move').includes('are on their way to'), 20000);
         await rpc('generatetoaddress', [1, mining]);

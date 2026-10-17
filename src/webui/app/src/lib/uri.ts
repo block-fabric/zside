@@ -1,5 +1,6 @@
 // Payment URIs (BIP 21) of this chain: <scheme>:<address>?amount=1.5&label=...&message=... (the scheme of chain.json)
 // As GUIUtil::parseBitcoinURI and formatBitcoinURI of chains-qt.
+import { oneLine } from './format';
 import { parseAmount, satsToCoins } from './units';
 import { CHAIN } from '../chain/config';
 
@@ -49,8 +50,10 @@ export function parsePaymentUri(uri: string): UriResult {
       // A parameter the wallet must understand, and does not.
       const required = key.startsWith('req-');
       const name = required ? key.slice(4) : key;
-      if (name === 'label') request.label = value;
-      else if (name === 'message') request.message = value;
+      // A label and a message are one line each, what is not shown as itself written out, cut (audit 7 #4: line breaks in a
+      // label once pushed the address it was put before out of sight in the confirmation).
+      if (name === 'label') request.label = oneLine(value, 100);
+      else if (name === 'message') request.message = oneLine(value, 300);
       else if (name === 'amount') {
         if (value) {
           const amount = parseAmount(value, 'CHN');

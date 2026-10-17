@@ -10,6 +10,7 @@
 // a file ever reaches a style sheet.
 import THEMES_CSS from '../styles/themes.css?raw';
 import { themeTokens } from './contrast';
+import { isHidden } from './format';
 import { t } from './i18n.svelte';
 import { applyTheme, DEFAULT_THEME, isDark, isTheme, THEMES, toggledTheme, type FontChoice, type ThemeId } from './themes';
 
@@ -188,6 +189,9 @@ export function parseColor(value: unknown): Rgba | null {
   if (n.some((x) => x === null)) return null;
   const [x, y, z] = n as { v: number; pct: boolean }[];
   if (fn[1].startsWith('rgb')) {
+    // Numbers and percentages are not mixed: the engine of the web view refuses rgb(0, 100%, 0), and a colour it refuses
+    // is not drawn at all (audit 7 #9). What is checked is what is drawn.
+    if (x.pct !== y.pct || y.pct !== z.pct) return null;
     const ch = (c: { v: number; pct: boolean }) => (c.pct ? (c.v <= 100 ? Math.round((c.v / 100) * 255) : -1) : c.v <= 255 ? Math.round(c.v) : -1);
     const rgb = [ch(x), ch(y), ch(z)];
     if (rgb.some((c) => c < 0)) return null;
@@ -268,14 +272,22 @@ export function chevronFor(color: string): string | null {
 
 // --- Names ---
 
-// Control characters, and the marks that reorder text (a name could otherwise show reversed or hide a part).
-// eslint-disable-next-line no-control-regex
-const BAD_NAME = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/;
+/** Whether a name has a character that is not shown as itself: a control, a mark that reorders text, an invisible one
+ * (a name could otherwise show reversed, hide a part, or look like another's): the set of revealBidi (audit 7 #11). */
+function badName(name: string): boolean {
+  let previous = 0;
+  for (const ch of name) {
+    const cp = ch.codePointAt(0)!;
+    if (isHidden(previous, cp)) return true;
+    previous = cp;
+  }
+  return false;
+}
 
 /** A name cleaned of spaces at its ends; an error message when it is not acceptable. */
 export function checkName(name: unknown): { name: string } | { error: string } {
   if (typeof name !== 'string') return { error: t('The theme has no name.') };
-  if (BAD_NAME.test(name)) return { error: t('The name of the theme has characters that cannot be shown.') };
+  if (badName(name)) return { error: t('The name of the theme has characters that cannot be shown.') };
   const clean = name.trim().replace(/ +/g, ' ');
   if (!clean) return { error: t('The theme has no name.') };
   if ([...clean].length > MAX_THEME_NAME) return { error: t('The name of the theme is longer than %1 characters.', MAX_THEME_NAME) };
@@ -421,10 +433,85 @@ export function toggledChoice(choice: string, prefersDark: boolean, lastDark: Th
   return toggledTheme('light', prefersDark, lastDark && isTheme(lastDark) ? lastDark : null);
 }
 
+/** The colours of text, and of marks drawn as text (links, states, the focus ring): never transparent (audit 7 #10). */
+export const TEXT_TOKENS: readonly TokenName[] = ['text', 'text-muted', 'text-faint', 'link', 'accent-fg', 'on-accent', 'positive', 'negative', 'warning', 'focus'];
+
+/**
+ * Every pair of a text colour and the background the page draws it on that must stay legible (at least 4.5:1, WCAG AA):
+ * the text, the warnings, the errors and the fees of the page's own confirmations among them (audit 7 #10).
+ */
+export const PAGE_TEXT_PAIRS: readonly (readonly [TokenName, TokenName])[] = [
+  ['text', 'bg'],
+  ['text', 'surface'],
+  ['text', 'surface-2'],
+  ['text', 'raised'],
+  ['text-muted', 'bg'],
+  ['text-muted', 'surface'],
+  ['link', 'surface'],
+  ['on-accent', 'accent'],
+  ['negative', 'bg'],
+  ['negative', 'surface'],
+  ['negative', 'danger-soft'],
+  ['warning', 'bg'],
+  ['warning', 'surface'],
+  ['warning', 'warning-soft'],
+  ['positive', 'surface'],
+];
+/** And what is not quite text (captions, marks, the focus ring): at least 3:1. */
+export const PAGE_UI_PAIRS: readonly (readonly [TokenName, TokenName])[] = [
+  ['text-faint', 'bg'],
+  ['text-faint', 'surface'],
+  ['accent-fg', 'surface'],
+  ['focus', 'surface'],
+];
+
+/**
+ * The colours of a theme of the user the page draws: each as the hex of what was parsed (what is checked is what is drawn,
+ * audit 7 #9), a text colour only when opaque, and every pair of PAGE_TEXT_PAIRS and PAGE_UI_PAIRS legible: a colour of the
+ * user in a pair that is not gives way to the base's (both of the pair). Never a pair worse than the base's. `replaced`:
+ * the colours of the user left out.
+ */
+export function legibleColors(theme: Pick<CustomTheme, 'base' | 'colors'>): { colors: Partial<Record<TokenName, string>>; replaced: TokenName[] } {
+  const base = baseColors(theme.base);
+  const own: Partial<Record<TokenName, string>> = {};
+  const replaced = new Set<TokenName>();
+  for (const token of TOKENS) {
+    const v = theme.colors[token];
+    if (v === undefined) continue;
+    const c = parseColor(v);
+    if (!c || (TEXT_TOKENS.includes(token) && c.a < 1)) {
+      replaced.add(token);
+      continue;
+    }
+    own[token] = toHex(c);
+  }
+  const color = (t: TokenName) => own[t] ?? base[t];
+  const failing = () => [
+    ...PAGE_TEXT_PAIRS.filter(([fg, bg]) => (contrastOf(color(fg), color(bg)) ?? 0) < 4.5),
+    ...PAGE_UI_PAIRS.filter(([fg, bg]) => (contrastOf(color(fg), color(bg)) ?? 0) < 3),
+  ];
+  for (let pass = 0; pass < 4; pass++) {
+    const bad = failing();
+    let changed = false;
+    for (const [fg, bg] of bad) {
+      for (const t of [fg, bg]) {
+        if (own[t] !== undefined) {
+          delete own[t];
+          replaced.add(t);
+          changed = true;
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  return { colors: own, replaced: TOKENS.filter((t) => replaced.has(t)) };
+}
+
 /**
  * Put a look on the document. A theme of the user (or the one being edited, `preview`) is drawn as its
  * base look, then each of its colours is set on its known token with style.setProperty: no text of the
- * theme is ever read as CSS.
+ * theme is ever read as CSS. Only the colours legibleColors keeps: what hides text, a warning or a fee
+ * is drawn as the base.
  */
 export function applyLook(doc: Document, choice: string, customs: readonly CustomTheme[], preview: CustomTheme | null, fontAdjust: number, prefersDark: boolean, font: FontChoice = '', moneyFont: 'embedded' | 'system' = 'embedded'): void {
   const custom = preview ?? findCustom(choice, customs);
@@ -435,11 +522,12 @@ export function applyLook(doc: Document, choice: string, customs: readonly Custo
   root.style.removeProperty('--chevron');
   if (!custom) return;
   root.dataset.themeChoice = 'custom';
+  const { colors } = legibleColors(custom);
   for (const token of TOKENS) {
-    const v = custom.colors[token];
-    if (v !== undefined && isColor(v)) root.style.setProperty(`--${token}`, v.trim());
+    const v = colors[token];
+    if (v !== undefined) root.style.setProperty(`--${token}`, v);
   }
-  const muted = custom.colors['text-muted'];
+  const muted = colors['text-muted'];
   const chevron = muted ? chevronFor(muted) : null;
   if (chevron) root.style.setProperty('--chevron', chevron);
   root.style.colorScheme = isDarkColor(effectiveColors(custom).bg) ? 'dark' : 'light';

@@ -194,11 +194,13 @@ describe('the wallet client', () => {
       }
       return null;
     });
-    const p = await walletApi('w').prepare([{ address: 'rchn1qx', label: 'X', amount: 150_000_000n, subtractFee: false }], { selected: [{ txid: 'aa', vout: 1 }] }, { confTarget: 6, feeRate: 1000 }, 'pw');
+    const p = await walletApi('w').prepare([{ address: 'rchn1qx', label: 'X', amount: 150_000_000n, subtractFee: false }], { selected: [{ txid: 'aa', vout: 1 }] }, { confTarget: 6, feeRate: 1000 }, 'cafe');
     expect(p.fee).toBe(141n);
     expect(p.recipients[0].amount).toBe(150_000_000n);
     expect(seen[0]).toMatchObject({ kind: 'host', method: 'wallet.send.prepare' });
-    expect(seen[0].params).toMatchObject({ wallet: 'w', passphrase: 'pw', confTarget: 6, feeRate: 1000, selected: [{ txid: 'aa', vout: 1 }], recipients: [{ address: 'rchn1qx', amount: 150_000_000 }] });
+    // No passphrase: the transaction is made, not signed; the host asks for it when it is sent (audit 7 #1). An output of data last.
+    expect(seen[0].params).toMatchObject({ wallet: 'w', confTarget: 6, feeRate: 1000, selected: [{ txid: 'aa', vout: 1 }], recipients: [{ address: 'rchn1qx', amount: 150_000_000 }, { data: 'cafe' }] });
+    expect('passphrase' in (seen[0].params as Record<string, unknown>)).toBe(false);
   });
 });
 
@@ -212,34 +214,30 @@ describe('unlocking on demand', () => {
     await expect(withUnlock('w', async () => Promise.reject({ code: -6, message: 'refused' }))).rejects.toMatchObject({ code: -6 });
   });
 
-  it('works with the errors of the bridge', async () => {
-    let calls = 0;
+  it('never asks for the passphrase in the page: the host asks it in its own dialog (audit 7 #1)', async () => {
+    const sent: Record<string, unknown>[] = [];
     setTransport(async (r) => {
-      calls++;
-      const pass = (r.params as Record<string, unknown>).passphrase;
-      if (!pass) throw { code: -13, message: 'This operation needs your wallet passphrase to unlock the wallet.' };
-      if (pass !== 'right') throw { code: -14, message: 'The passphrase entered for the wallet decryption was incorrect.' };
+      sent.push(r.params as Record<string, unknown>);
       return { signature: 'sig' };
     });
-    const pending = withUnlock('w', (passphrase) => walletApi('w').signMessage('rchn1q', 'hi', passphrase));
-    await vi_waitFor(() => dialogs.queue.length === 1);
-    expect(dialogs.queue[0]).toMatchObject({ kind: 'passphrase', mode: 'unlock', wallet: 'w' });
-    answer(dialogs.queue[0].id, { passphrase: 'wrong' });
-    await vi_waitFor(() => dialogs.queue.length === 1 && 'error' in dialogs.queue[0] && !!dialogs.queue[0].error);
-    expect(dialogs.queue[0]).toMatchObject({ error: 'The passphrase entered for the wallet decryption was incorrect.' });
-    answer(dialogs.queue[0].id, { passphrase: 'right' });
-    await expect(pending).resolves.toEqual({ signature: 'sig' });
-    expect(calls).toBe(3);
+    await expect(withUnlock('w', () => walletApi('w').signMessage('rchn1q', 'hi'))).resolves.toEqual({ signature: 'sig' });
+    expect(dialogs.queue).toHaveLength(0);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({ wallet: 'w', address: 'rchn1q', message: 'hi' });
+    expect('passphrase' in sent[0]).toBe(false);
   });
 
-  it('gives null when the user cancels', async () => {
+  it('gives null when the user says no on the desktop, and an error of the host as it is', async () => {
+    setTransport(async () => {
+      throw { code: -32800, message: 'Sign a message: declined.' };
+    });
+    await expect(withUnlock('w', () => walletApi('w').signMessage('a', 'b'))).resolves.toBeNull();
+    expect(dialogs.queue).toHaveLength(0);
     setTransport(async () => {
       throw { code: -13, message: 'locked' };
     });
-    const pending = withUnlock('w', (passphrase) => walletApi('w').signMessage('a', 'b', passphrase));
-    await vi_waitFor(() => dialogs.queue.length === 1);
-    answer(dialogs.queue[0].id, null);
-    await expect(pending).resolves.toBeNull();
+    await expect(withUnlock('w', () => walletApi('w').signMessage('a', 'b'))).rejects.toMatchObject({ code: -13 });
+    expect(dialogs.queue).toHaveLength(0);
   });
 
   it('asks for passphrases of every kind', async () => {

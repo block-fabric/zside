@@ -89,7 +89,8 @@
   ];
   let list = $state<'blocks' | 'mempool'>('blocks');
   let query = $state('');
-  let blocks = $state<BlockRow[]>([]);
+  // Replaced whole, never changed in place: not made deep reactive (50 000 rows would be 50 000 proxies; audit 7 #12).
+  let blocks = $state.raw<BlockRow[]>([]);
   let mempool = $state<MempoolRow[]>([]);
   let mempoolTotal = $state(0);
   let selectedBlock = $state<string | null>(null);
@@ -131,19 +132,71 @@
     return row;
   }
 
-  // The list: from the block index in one call (rpc.explorerBlocks), up to every block of the chain; the
-  // size and weight of a block (read with the block) for the rows a page shows and the boxes of the ribbon.
+  // The list: from the block index (host.explorerBlocks), in parts of at most EXPLORER_PART rows from a height down, up
+  // to every block of the chain; on a new tip only the new rows are read (audit 7 #12: the whole chain read again under
+  // the lock of the node at each block stalled it). One refresh at a time: one asked meanwhile runs after it. The size and
+  // weight of a block (read with the block) for the rows a page shows and the boxes of the ribbon.
   let detailsVersion = $state(0);
+  const EXPLORER_PART = 10000;
+  type IndexRow = [number, string, number, number, number];
+  const toRow = ([height, hash, time, nTx, difficulty]: IndexRow): BlockRow => cache.get(hash) ?? { height, hash, time, nTx, difficulty };
+  /** Up to `count` rows from the height `from` down, in parts; fewer when the chain is shorter (or moved meanwhile). */
+  async function readRows(from: number, count: number): Promise<BlockRow[]> {
+    const out: BlockRow[] = [];
+    while (out.length < count && from >= 0) {
+      const part = await host.explorerBlocks(Math.min(EXPLORER_PART, count - out.length), from);
+      // The rows start where asked, or the chain changed under the reading: what was read is kept, the rest next time.
+      if (!part.length || part[0][0] !== from) break;
+      out.push(...part.map(toRow));
+      from = part[part.length - 1][0] - 1;
+    }
+    return out;
+  }
+  async function loadBlocks() {
+    const count = prefs.explorerCount;
+    const [tip] = await host.explorerBlocks(1);
+    if (!tip) {
+      blocks = [];
+      return;
+    }
+    const [tipHeight, tipHash] = tip;
+    const wanted = count === 0 ? tipHeight + 1 : Math.min(count, tipHeight + 1);
+    // Nothing to do if the list is up to date.
+    if (blocks.length === wanted && blocks[0]?.hash === tipHash) return;
+    // The rows kept: those below the new ones, if the top one is still in the chain (no reorganization past it).
+    let kept: BlockRow[] = [];
+    const top = blocks[0];
+    if (top && top.height <= tipHeight) {
+      const [same] = await host.explorerBlocks(1, top.height);
+      if (same && same[1] === top.hash) kept = blocks;
+    }
+    const fresh = await readRows(tipHeight, Math.min(wanted, kept.length ? tipHeight - kept[0].height : wanted));
+    let next = [...fresh, ...kept].slice(0, wanted);
+    // More of the older ones (a larger count chosen).
+    if (next.length < wanted && next.length && next[next.length - 1].height > 0) next = next.concat(await readRows(next[next.length - 1].height - 1, wanted - next.length));
+    blocks = next;
+  }
+  let loadingBlocks: Promise<void> | null = null;
+  let loadAgain = false;
   async function refreshBlocks() {
+    if (loadingBlocks) {
+      loadAgain = true;
+      return loadingBlocks;
+    }
+    loadingBlocks = (async () => {
+      do {
+        loadAgain = false;
+        try {
+          await loadBlocks();
+        } catch {
+          // Again at the next block.
+        }
+      } while (loadAgain);
+    })();
     try {
-      const count = prefs.explorerCount;
-      const tip = await rpc.call('getbestblockhash', []);
-      // Nothing to do if the list is up to date.
-      if (blocks.length && blocks[0].hash === tip && (count === 0 ? blocks.length === blocks[0].height + 1 : blocks.length === Math.min(count, blocks[0].height + 1))) return;
-      const rows = await host.explorerBlocks(count);
-      blocks = rows.map(([height, hash, time, nTx, difficulty]) => cache.get(hash) ?? { height, hash, time, nTx, difficulty });
-    } catch {
-      // Again at the next block.
+      await loadingBlocks;
+    } finally {
+      loadingBlocks = null;
     }
   }
   /** The size and weight of these blocks, read once each. */

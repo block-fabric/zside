@@ -1,5 +1,6 @@
-// The RPC methods the pages call are the ones the host lets them call (src/webui/rpcpolicy.cpp, audit M3):
-// a method missing there would fail in the app only.
+// The RPC methods the pages call are the ones the host lets them call (src/webui/rpcpolicy.cpp, audit M3): a method
+// missing there would fail in the app only. What pays, signs or changes the votes of the node is not one of them: the host
+// decodes it and asks the user on the desktop first (src/webui/confirm.cpp and the chain's local.cpp, rpc.confirmed; audit 7 #1).
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -39,6 +40,29 @@ export function built(text: string, sidechain: boolean): string {
 const POLICY = built(readFileSync(join(__dirname, '../../../rpcpolicy.cpp'), 'utf8'), SIDECHAIN).replace(/\/\/.*$/gm, '');
 /** The methods of this chain's own pages (local.cpp), added to the policy. */
 const LOCAL = built(readFileSync(join(__dirname, '../../../local.cpp'), 'utf8'), SIDECHAIN).replace(/\/\/.*$/gm, '');
+/** The kit's methods the host confirms on the desktop (confirm.cpp), as this chain builds them. */
+const CONFIRM = built(readFileSync(join(__dirname, '../../../confirm.cpp'), 'utf8'), SIDECHAIN).replace(/\/\/.*$/gm, '');
+
+/** A part of local.cpp: from the definition of a function to the next one. */
+function localPart(name: string): string {
+  const start = LOCAL.indexOf(` ${name}()\n{`);
+  if (start < 0) return '';
+  const next = LOCAL.slice(start + 1).search(/\n[A-Za-z].*\(.*\)\n\{/);
+  return next < 0 ? LOCAL.slice(start) : LOCAL.slice(start, start + 1 + next);
+}
+
+/** The methods the host confirms on the desktop (confirm.cpp KitMethods and local.cpp ConfirmedRpcMethods), by their kind. */
+function confirmed(): Map<string, string> {
+  const body = CONFIRM.slice(CONFIRM.indexOf('std::map<std::string, Method> KitMethods()'));
+  const kit = body.slice(0, body.indexOf('return methods;'));
+  const kind = /\{"([a-z0-9_]+)",\s*\{(?:confirm::Method::Kind::|Kind::)?(NODE|SPEND|KEYS),/g;
+  return new Map([...kit.matchAll(kind), ...localPart('ConfirmedRpcMethods').matchAll(kind)].map((m) => [m[1], m[2]]));
+}
+
+/** What pays, signs, unlocks or changes what the node votes for: never the page's to call. */
+const NEVER = ['send', 'sendtoaddress', 'sendmany', 'walletprocesspsbt', 'sendrawtransaction', 'createsidechaindeposit', 'walletpassphrase', 'setwithdrawalvote',
+  'setdefaultwithdrawalvote', 'acksidechain', 'createsidechainproposal', 'removesidechainproposal', 'setgenerate', 'signmessage', 'signrawtransactionwithwallet',
+  'bumpfee', 'psbtbumpfee', 'createbmmrequest', 'setbmm', 'requestbmmblock', 'createwithdrawal', 'refundwithdrawal'];
 
 /** The sources that never run in this chain: the pages chain.json drops, and the home of the other role. */
 function runsHere(where: string): boolean {
@@ -61,17 +85,16 @@ function sources(dir: string): string[] {
 
 function allowed(): Set<string> {
   const body = POLICY.slice(POLICY.indexOf('methods{'), POLICY.indexOf('return methods;'));
-  const local = LOCAL.slice(LOCAL.indexOf('RpcMethods()'), LOCAL.indexOf('KeyedRpcMethods()') > 0 ? LOCAL.indexOf('KeyedRpcMethods()') : undefined);
-  return new Set([...body.matchAll(/\{"([a-z0-9_]+)", (?:WORKER|LONG)\}/g), ...local.matchAll(/\{"([a-z0-9_]+)", (?:Bridge::Thread::)?(?:WORKER|LONG)\}/g)].map((m) => m[1]));
+  // The chain's own (local.cpp), but for those the host confirms: rpcpolicy.cpp leaves those out.
+  const host = confirmed();
+  const local = [...localPart('RpcMethods').matchAll(/\{"([a-z0-9_]+)", (?:Bridge::Thread::)?(?:WORKER|LONG)\}/g)].map((m) => m[1]).filter((m) => !host.has(m));
+  return new Set([...[...body.matchAll(/\{"([a-z0-9_]+)", (?:WORKER|LONG)\}/g)].map((m) => m[1]), ...local]);
 }
 
+/** The wallet methods of the policy that need the keys to read: the chain's own (local.cpp KeyedRpcMethods). */
 function keyed(): Set<string> {
-  const fn = POLICY.slice(POLICY.indexOf('bool KeyedWalletRpc'));
-  const list = fn.slice(fn.indexOf('methods{'), fn.indexOf('};'));
-  // And those of this chain's own pages (local.cpp).
-  const local = LOCAL.slice(LOCAL.indexOf('KeyedRpcMethods()'), LOCAL.indexOf('void RegisterHost'));
-  const own = local.slice(local.indexOf('return'));
-  return new Set([...list.matchAll(/"([a-z0-9_]+)"/g), ...own.matchAll(/"([a-z0-9_]+)"/g)].map((m) => m[1]));
+  const own = localPart('KeyedRpcMethods');
+  return new Set([...own.slice(own.indexOf('return')).matchAll(/"([a-z0-9_]+)"/g)].map((m) => m[1]));
 }
 
 /** The methods named in a call of the RPC client, of walletRpc, or of withKeys. */
@@ -101,17 +124,17 @@ function used(): { rpc: Map<string, string>; keyed: Map<string, string>; dynamic
 }
 
 describe('the RPC methods of the pages', () => {
-  it('are all allowed by the host', () => {
-    const ok = allowed();
-    expect(ok.size).toBeGreaterThan(30);
+  it('are all allowed by the host, or confirmed by it on the desktop', () => {
+    const ok = new Set([...allowed(), ...confirmed().keys()]);
+    expect(allowed().size).toBeGreaterThan(30);
     const { rpc } = used();
     expect(rpc.size).toBeGreaterThan(30);
     const missing = [...rpc].filter(([m]) => !ok.has(m)).map(([m, where]) => `${m} (${where})`);
     expect(missing).toEqual([]);
   });
 
-  it('that need keys are the ones the host runs with keys', () => {
-    const ok = keyed();
+  it('that need keys are the ones the host runs with keys, asking for the passphrase itself', () => {
+    const ok = new Set([...keyed(), ...[...confirmed()].filter(([, kind]) => kind !== 'NODE').map(([m]) => m)]);
     const { keyed: calls } = used();
     expect(calls.size).toBeGreaterThan(0);
     const missing = [...calls].filter(([m]) => !ok.has(m)).map(([m, where]) => `${m} (${where})`);
@@ -135,6 +158,21 @@ describe('the RPC methods of the pages', () => {
       for (const m of ['setbmm', 'requestbmmblock']) expect(ok.has(m)).toBe(false);
     } else {
       for (const m of ['getmainchaininfo', 'createwithdrawal']) expect(ok.has(m)).toBe(false);
+    }
+  });
+
+  it('never include what pays, signs, unlocks or votes: the host confirms those (audit 7 #1)', () => {
+    const ok = allowed();
+    expect(NEVER.filter((m) => ok.has(m))).toEqual([]);
+    const host = confirmed();
+    for (const m of SIDECHAIN ? ['createwithdrawal', 'refundwithdrawal', 'signmessage'] : ['createsidechaindeposit', 'setwithdrawalvote', 'acksidechain', 'setgenerate', 'signmessage']) {
+      expect(host.has(m), m).toBe(true);
+    }
+    for (const m of host.keys()) expect(ok.has(m), m).toBe(false);
+    // The page's own passphrase prompt is never used to unlock: no page code sends one to a method that spends.
+    for (const file of sources(SRC)) {
+      const text = readFileSync(file, 'utf8');
+      expect(/'wallet\.withKeys'|walletpassphrase'/.test(text), file).toBe(false);
     }
   });
 

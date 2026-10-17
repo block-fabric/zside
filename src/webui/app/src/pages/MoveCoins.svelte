@@ -19,6 +19,7 @@
   import { host } from '../lib/rpc';
   import { formatAmount, satsToCoins } from '../lib/units';
   import { setUiMode } from '../lib/uimode.svelte';
+  import { depositFeeEstimate } from '../lib/wallet';
 
   let { dc, refresh }: { dc: DrivechainState | null; refresh: () => void } = $props();
 
@@ -87,6 +88,22 @@
     destination = '';
     done = null;
   }
+
+  // The fee of the deposit, before the user moves the coins (audit 7 #20c): about what the wallet pays, as the desktop
+  // says it again when it asks.
+  let feeEstimate = $state<bigint | null>(null);
+  $effect(() => {
+    const wallet = wallets.current;
+    const dest = destination.trim();
+    if (step !== 3 || wallet === null || !dest) return;
+    let live = true;
+    depositFeeEstimate(wallet, dest).then((fee) => {
+      if (live) feeEstimate = fee;
+    });
+    return () => {
+      live = false;
+    };
+  });
 
   async function move() {
     const wallet = wallets.current;
@@ -194,6 +211,7 @@
           <dl class="facts summary">
             <dt>To</dt><dd><SafeText text={chosen.title} /></dd>
             <dt>Amount</dt><dd><Amount sats={amount} /></dd>
+            {#if feeEstimate !== null}<dt><Term id="fee">Fee</Term></dt><dd>about <Amount sats={feeEstimate} /> (total about <Amount sats={amount + feeEstimate} />)</dd>{/if}
             <dt>Arrives at</dt><dd class="mono break">{destination.trim()}</dd>
             <dt>When</dt><dd>After the next block of the sidechain, usually a minute or two.</dd>
           </dl>

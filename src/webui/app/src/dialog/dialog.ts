@@ -7,11 +7,22 @@
 // It draws the look of the app: the theme the host passes (a built-in one, or a theme of the user checked here as
 // strictly as a theme file, lib/customthemes.ts), its fonts (built in) and text size. A theme of the user whose text
 // cannot be read on the dialog is drawn as its base: what is asked is read before it is answered.
-import { baseColors, checkStoredThemes, contrastOf, isDarkColor, isThemeChoice, parseColor, type BaseTheme, type CustomTheme, type TokenName } from '../lib/customthemes';
+import { baseColors, checkStoredThemes, contrastOf, isDarkColor, isThemeChoice, parseColor, toHex, type BaseTheme, type CustomTheme, type TokenName } from '../lib/customthemes';
 import { revealBidi } from '../lib/format';
 import { applyTheme, clampFontAdjust, DEFAULT_THEME, isTheme, resolveTheme, type FontChoice } from '../lib/themes';
 
 export type Level = 'info' | 'warning' | 'danger';
+
+/** A fact the host decoded (dialog.h Row): a destination, whole, before its amount; the fee; the total; what a vote changes. */
+export type RowKind = 'text' | 'address' | 'amount' | 'total' | 'heading' | 'note';
+export interface Row {
+  label: string;
+  value: string;
+  kind: RowKind;
+}
+const ROW_KINDS: readonly RowKind[] = ['text', 'address', 'amount', 'total', 'heading', 'note'];
+/** At most so many facts, and so long (the host cuts them so already). */
+const MAX_ROWS = 81;
 
 export interface DialogLook {
   theme: string;
@@ -32,13 +43,22 @@ export interface DialogData {
   level: Level;
   passphrase: boolean;
   passphraseLabel: string;
+  /** An error shown at the field: the passphrase typed before was wrong. */
+  error: string;
+  rows: Row[];
   look: DialogLook;
 }
 
 export type DialogBridge = (method: string, params?: Record<string, unknown>) => Promise<unknown>;
 
-/** How long after the window shows the button that accepts takes no click or key (a click or Enter meant for the main window). */
-export const ARM_MS = 400;
+/**
+ * How long after the window shows with the focus the button that accepts takes no click or key (a click or Enter meant for
+ * the main window, a "game" of the page that puts the user's pointer where the button comes): as the dialogs of Firefox
+ * (audit 7 #7). The delay starts again each time the window shows again or gets the focus back.
+ */
+export const ARM_MS = 1000;
+/** Without a word of the host that the window shows (dialog.h), the delay starts this long after the page is ready. */
+export const SHOWN_WAIT_MS = 1500;
 /** The least contrast of text on its background (WCAG AA), and of what is not text (icons, the focus ring, the fill of a button). */
 export const MIN_TEXT_CONTRAST = 4.5;
 export const MIN_UI_CONTRAST = 3;
@@ -65,6 +85,15 @@ export function readData(raw: unknown): DialogData {
     level,
     passphrase: o.passphrase === true,
     passphraseLabel: str(o.passphraseLabel, 200),
+    error: str(o.error, 400),
+    rows: Array.isArray(o.rows)
+      ? o.rows.slice(0, MAX_ROWS).flatMap((raw): Row[] => {
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+          const r = raw as Record<string, unknown>;
+          const kind = ROW_KINDS.includes(r.kind as RowKind) ? (r.kind as RowKind) : 'text';
+          return [{ label: str(r.label, 60), value: str(r.value, 2000), kind }];
+        })
+      : [],
     look: {
       theme: str(l.theme, 40, DEFAULT_THEME),
       custom: l.custom ?? null,
@@ -88,7 +117,7 @@ export type DialogToken = (typeof DIALOG_TOKENS)[number];
  * Every pair of text and background the dialog draws (dialog.css): the title, the text and the details on the
  * surface, the footer and the details on surface-2, a button under the pointer on raised, the field's label in
  * text-muted, the borders of the buttons and of the field in text-muted, the button that accepts (on-accent on
- * accent), the one of a danger (negative, on surface-2 and raised).
+ * accent), the one of a danger (negative, on surface-2 and raised), the error of a wrong passphrase (negative on surface).
  */
 export const TEXT_PAIRS: readonly (readonly [DialogToken, DialogToken])[] = [
   ['text', 'surface'],
@@ -98,6 +127,7 @@ export const TEXT_PAIRS: readonly (readonly [DialogToken, DialogToken])[] = [
   ['text-muted', 'surface-2'],
   ['text-muted', 'raised'],
   ['on-accent', 'accent'],
+  ['negative', 'surface'],
   ['negative', 'surface-2'],
   ['negative', 'raised'],
 ];
@@ -137,7 +167,9 @@ export function dialogColors(base: BaseTheme, custom: Pick<CustomTheme, 'colors'
   const replaced = new Set<DialogToken>();
   for (const t of DIALOG_TOKENS) {
     const own = custom?.colors[t];
-    if (own !== undefined && parseColor(own)?.a === 1) colors[t] = own.trim();
+    const parsed = own === undefined ? null : parseColor(own);
+    // Drawn as the hex of what was parsed: what is checked is what is drawn (audit 7 #9).
+    if (parsed?.a === 1) colors[t] = toHex(parsed);
     else {
       colors[t] = fallback[t];
       if (own !== undefined) replaced.add(t);
@@ -225,7 +257,7 @@ export interface Rendered {
  * (revealBidi), each paragraph isolated as to direction.
  */
 export function render(doc: Document, data: DialogData): Rendered {
-  const root = el(doc, 'main', { id: 'dialog', className: `dialog ${data.level}` });
+  const root = el(doc, 'main', { id: 'dialog', className: `dialog ${data.level}${data.rows.length ? ' wide' : ''}` });
   root.setAttribute('role', 'alertdialog');
   root.setAttribute('aria-modal', 'true');
   root.setAttribute('aria-labelledby', 'dialog-title');
@@ -247,6 +279,7 @@ export function render(doc: Document, data: DialogData): Rendered {
     message.append(p);
   }
   body.append(message);
+  if (data.rows.length) body.append(renderRows(doc, data.rows));
   if (data.details) {
     const details = el(doc, 'pre', { id: 'dialog-details', className: 'details', text: revealBidi(data.details) });
     details.dir = 'ltr';
@@ -264,6 +297,13 @@ export function render(doc: Document, data: DialogData): Rendered {
     field.setAttribute('autocapitalize', 'off');
     field.maxLength = 1024;
     label.append(field);
+    if (data.error) {
+      const error = el(doc, 'span', { id: 'dialog-error', className: 'error', text: revealBidi(data.error) });
+      error.setAttribute('role', 'alert');
+      field.setAttribute('aria-invalid', 'true');
+      field.setAttribute('aria-describedby', 'dialog-error');
+      label.append(error);
+    }
     body.append(label);
   }
 
@@ -282,14 +322,54 @@ export function render(doc: Document, data: DialogData): Rendered {
   return { root, accept, cancel, field };
 }
 
+/**
+ * The facts, one a line, in the order the host gave them: a heading over the facts of one recipient, a note across, else
+ * a label and its value. A destination is shown whole in a monospaced font (wrapped, never cut), left to right.
+ */
+function renderRows(doc: Document, rows: Row[]): HTMLElement {
+  const box = el(doc, 'dl', { id: 'dialog-rows', className: 'rows' });
+  for (const row of rows) {
+    if (row.kind === 'heading') {
+      const h = el(doc, 'div', { className: 'row heading', text: revealBidi(row.value ? `${row.label} ${row.value}` : row.label) });
+      h.dir = 'auto';
+      box.append(h);
+      continue;
+    }
+    if (row.kind === 'note') {
+      const n = el(doc, 'div', { className: 'row note', text: revealBidi(row.value) });
+      n.dir = 'auto';
+      box.append(n);
+      continue;
+    }
+    const line = el(doc, 'div', { className: `row ${row.kind}` });
+    line.dataset.kind = row.kind;
+    const dt = el(doc, 'dt', { text: revealBidi(row.label) });
+    const dd = el(doc, 'dd', { text: revealBidi(row.value) });
+    if (row.kind === 'address' || row.kind === 'amount' || row.kind === 'total') {
+      dd.dir = 'ltr';
+      dd.setAttribute('translate', 'no');
+    } else {
+      dd.dir = 'auto';
+    }
+    line.append(dt, dd);
+    box.append(line);
+  }
+  return box;
+}
+
 /** The elements Tab goes through, in order: the field, Cancel, the button that accepts. */
 function focusables(r: Rendered): HTMLElement[] {
   return [r.field, r.cancel, r.accept].filter((x): x is HTMLInputElement | HTMLButtonElement => !!x && !x.disabled);
 }
 
 export interface Controller {
-  /** The window shows: the button that accepts takes clicks and keys after ARM_MS. */
+  /**
+   * The window shows with the focus: the button that accepts takes clicks and keys ARM_MS after `now`, and only a press
+   * that starts after that (never one held from before, nor a key repeated by the keyboard).
+   */
   arm(now?: number): void;
+  /** The window hides or loses the focus: the button that accepts waits for the next arm. */
+  disarm(): void;
   /** Whether the dialog has been answered. */
   answered(): boolean;
   /** Its keys no longer listened to (the tests). */
@@ -299,10 +379,16 @@ export interface Controller {
 /**
  * The buttons and the keys of the dialog: Escape cancels, Enter does what the focus is on (Cancel at first, the safe
  * default; in the passphrase field, accept), Tab stays in the dialog. `answer` is called once.
+ *
+ * The button that accepts (audit 7 #7) takes a click only when the press of the pointer that made it started after the
+ * dialog was armed, and a key only when it was pressed after (a key held down repeats: those are never taken).
  */
 export function wire(doc: Document, r: Rendered, answer: (accept: boolean, passphrase?: string) => void, clock: () => number = () => performance.now()): Controller {
   let armedAt = Number.POSITIVE_INFINITY;
   let done = false;
+  // The press of the pointer not clicked yet, and the last Enter or Space: when they started.
+  let pressAt: number | null = null;
+  let keyAt: number | null = null;
   const armed = () => clock() >= armedAt;
   const finish = (accept: boolean) => {
     if (done) return;
@@ -323,9 +409,29 @@ export function wire(doc: Document, r: Rendered, answer: (accept: boolean, passp
     r.cancel.disabled = true;
     answer(accept, passphrase);
   };
+  const onPress = () => {
+    pressAt = clock();
+  };
+  doc.addEventListener('pointerdown', onPress, true);
+  doc.addEventListener('mousedown', onPress, true);
   r.cancel.addEventListener('click', () => finish(false));
-  r.accept.addEventListener('click', () => finish(true));
+  r.accept.addEventListener('click', () => {
+    // A click of the pointer counts from its press; a click of a key (Space, Enter) from the key; one of neither (the
+    // tests, assistive tools) from now.
+    const started = pressAt ?? keyAt ?? clock();
+    pressAt = null;
+    if (started < armedAt) return;
+    finish(true);
+  });
   const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      // A key held down repeats: never taken (it was pressed before the dialog showed, for the main window).
+      if (e.repeat) {
+        e.preventDefault();
+        return;
+      }
+      keyAt = clock();
+    }
     if (e.key === 'Escape') {
       e.preventDefault();
       finish(false);
@@ -347,11 +453,22 @@ export function wire(doc: Document, r: Rendered, answer: (accept: boolean, passp
   doc.addEventListener('keydown', onKey);
   return {
     arm(now = clock()) {
+      if (done) return;
       armedAt = now + ARM_MS;
+      // A press or a key from before does not count.
+      pressAt = null;
+      keyAt = null;
       (r.field ?? r.cancel).focus();
     },
+    disarm() {
+      armedAt = Number.POSITIVE_INFINITY;
+    },
     answered: () => done,
-    dispose: () => doc.removeEventListener('keydown', onKey),
+    dispose: () => {
+      doc.removeEventListener('keydown', onKey);
+      doc.removeEventListener('pointerdown', onPress, true);
+      doc.removeEventListener('mousedown', onPress, true);
+    },
   };
 }
 
@@ -361,6 +478,13 @@ export function measure(doc: Document, root: HTMLElement): { width: number; heig
   const rect = root.getBoundingClientRect();
   doc.documentElement.classList.remove('measuring');
   return { width: Math.ceil(rect.width), height: Math.ceil(rect.height) };
+}
+
+declare global {
+  interface Window {
+    /** The host says the window shows with the focus (true), or hides or lost it (false): dialog.h, window_gtk.cpp, window_win32.cpp. */
+    __chainsDialogArm?: (on: boolean) => void;
+  }
 }
 
 /** The whole dialog: asks the host what to show, draws it in the look of the app, says its size, gives the answer. */
@@ -373,10 +497,32 @@ export async function start(bridge: DialogBridge, doc: Document = document, win:
   const control = wire(doc, r, (accept, passphrase) => {
     void bridge('answer', passphrase === undefined ? { accept } : { accept, passphrase });
   });
+  // The delay of the button that accepts starts when the window is on the screen with the focus, as the host and the
+  // page see it, and again each time it comes back (audit 7 #7).
+  let shown = false;
+  win.__chainsDialogArm = (on: boolean) => {
+    shown = true;
+    if (on) control.arm();
+    else control.disarm();
+  };
+  win.addEventListener('blur', () => control.disarm());
+  win.addEventListener('focus', () => {
+    shown = true;
+    control.arm();
+  });
+  doc.addEventListener('visibilitychange', () => {
+    if (doc.visibilityState === 'hidden') control.disarm();
+    else if (shown) control.arm();
+  });
   // The fonts first: the size depends on them.
   if (doc.fonts?.ready) await Promise.race([doc.fonts.ready, new Promise((resolve) => setTimeout(resolve, 1500))]);
   await bridge('ready', measure(doc, r.root));
   doc.body.classList.remove('loading');
-  control.arm();
+  // The focus on the safe default from the start (Cancel, or the field), armed or not.
+  (r.field ?? r.cancel).focus();
+  // Without a word of the host that the window shows (a platform that says nothing), from a moment after now.
+  setTimeout(() => {
+    if (!shown) control.arm();
+  }, SHOWN_WAIT_MS);
   return control;
 }

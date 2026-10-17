@@ -117,6 +117,7 @@ add_library(chains_webui_core STATIC EXCLUDE_FROM_ALL
   assets.cpp
   bridge.cpp
   rpcpolicy.cpp
+  confirm.cpp
   console.cpp
   dialog.cpp
   guard.cpp

@@ -5,12 +5,12 @@
   import { CHAIN } from '../chain/config';
   import CopyButton from '../components/CopyButton.svelte';
   import Icon from '../components/Icon.svelte';
-  import { confirm, errorText, inform, prompt, walletRpc } from '../lib/dialogs.svelte';
+  import { confirm, errorText, inform, prompt, withUnlock } from '../lib/dialogs.svelte';
   import { ownTab, setOwnTab } from '../lib/nav.svelte';
   import { rpc } from '../lib/rpc';
   import { noWalletText, prefs, savePrefs, wallets } from '../lib/state.svelte';
   import { bareDescriptor, coinsToUnits, jsonCoinsToUnits, keyOfDescriptor, psbtStatus, sharedDescriptor, signersText, unitsToCoins } from '../lib/tools';
-  import { walletDisplayName } from '../lib/wallet';
+  import { psbt as psbtApi, walletApi, walletDisplayName } from '../lib/wallet';
 
   // A tab of a page that holds it (Tools, Advanced transactions): without a title of its own.
   let { embedded = false }: { embedded?: boolean } = $props();
@@ -215,12 +215,13 @@
     const wallet = wallets.current;
     if (wallet === null) return warn(t('Open the wallet that holds your key first.'));
     try {
-      // Signs, without finalizing, so that the next partner can still add a signature.
-      const r = await walletRpc<{ psbt: string }>(wallet, 'walletprocesspsbt', [psbt.trim(), true, 'ALL', true, false]);
+      // Signs, without finalizing, so that the next partner can still add a signature; the desktop shows what it spends and
+      // pays first (audit 7 #1).
+      const shown = psbt.trim();
+      const r = await withUnlock(wallet, () => walletApi(wallet).psbtSign(shown, false));
       if (!r) return;
-      const before = psbt.trim();
       psbt = r.psbt;
-      if (before === r.psbt) await inform(t('Multisig Lounge'), t('This wallet added no signature: either it already signed, or it holds none of the keys of the shared address.'));
+      if (!r.signed) await inform(t('Multisig Lounge'), t('This wallet added no signature: either it already signed, or it holds none of the keys of the shared address.'));
     } catch (e) {
       await warn(errorText(e));
     }
@@ -230,10 +231,13 @@
     try {
       const final = await rpc.raw<{ complete: boolean; hex?: string }>('finalizepsbt', [psbt.trim()]);
       if (!final.complete) return warn(t('The transaction does not have enough signatures yet.'));
-      if (!(await confirm(t('Multisig Lounge'), t('Send this transaction? %1', status), { yes: 'Send' }))) return;
-      const txid = await rpc.raw<string>('sendrawtransaction', [final.hex]);
+      // The desktop shows what it pays (decoded by the host) and asks before it goes to the network (audit 7 #1).
+      const shown = psbt.trim();
+      const wallet = wallets.current;
+      const r = await withUnlock(wallet ?? '', () => psbtApi.broadcast(shown, wallet ?? undefined));
+      if (!r) return;
       psbt = '';
-      await inform(t('Multisig Lounge'), t('Sent as transaction %1', txid));
+      await inform(t('Multisig Lounge'), t('Sent as transaction %1', r.txid));
     } catch (e) {
       await warn(errorText(e));
     }

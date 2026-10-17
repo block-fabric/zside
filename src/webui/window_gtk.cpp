@@ -183,11 +183,19 @@ public:
                          }),
                          nullptr);
 
-        // The last press of a button in the page: the moves and resizes the page starts begin there.
+        // The last press of a button in the page: the moves and resizes the page starts begin there. It is an input of the
+        // user too (LastUserInput: the clipboard takes calls right after one).
         g_signal_connect(m_view, "button-press-event", G_CALLBACK(+[](GtkWidget*, GdkEventButton* event, gpointer self) -> gboolean {
                              auto* w{static_cast<GtkWindowImpl*>(self)};
                              if (w->m_last_press) gdk_event_free(w->m_last_press);
                              w->m_last_press = gdk_event_copy(reinterpret_cast<GdkEvent*>(event));
+                             if (gdk_event_get_event_type(reinterpret_cast<GdkEvent*>(event)) == GDK_BUTTON_PRESS) w->NoteUserInput();
+                             return FALSE;
+                         }),
+                         this);
+        g_signal_connect(m_view, "key-press-event", G_CALLBACK(+[](GtkWidget*, GdkEventKey* event, gpointer self) -> gboolean {
+                             // A key of the user (not a modifier alone): the page gets it as usual.
+                             if (!event->is_modifier) static_cast<GtkWindowImpl*>(self)->NoteUserInput();
                              return FALSE;
                          }),
                          this);
@@ -372,6 +380,18 @@ public:
     }
 
     void Snapshot(const std::string& png_path, std::function<void(bool ok)> done) override { SnapshotView(m_view, png_path, std::move(done)); }
+
+    std::optional<UserInput> LastUserInput() override
+    {
+        if (m_input_serial == 0) return std::nullopt;
+        return UserInput{m_input_serial, (g_get_monotonic_time() - m_input_time) / 1000};
+    }
+
+    void NoteUserInput() override
+    {
+        ++m_input_serial;
+        m_input_time = g_get_monotonic_time();
+    }
 
     void Ask(const dialog::Request& request, std::function<void(dialog::Answer)> done) override
     {
@@ -643,6 +663,34 @@ private:
                                   return TRUE;
                               }),
                               tag2, +[](gpointer data, GClosure*) { delete static_cast<DialogTag*>(data); }, GConnectFlags(0));
+        // The button that accepts takes clicks and keys a moment after the window is on the screen and has the focus, and
+        // again after each time it lost it (audit 7 #7): the page is told when the window shows, hides, takes or loses
+        // the focus, and starts the delay then (dialog.ts, arm).
+        for (const char* signal : {"map-event", "focus-in-event"}) {
+            auto* tag_arm{new DialogTag{this, id}};
+            g_signal_connect_data(window, signal, G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer data) -> gboolean {
+                                      auto* t{static_cast<DialogTag*>(data)};
+                                      t->self->ArmThemed(t->id, true);
+                                      return FALSE;
+                                  }),
+                                  tag_arm, +[](gpointer data, GClosure*) { delete static_cast<DialogTag*>(data); }, GConnectFlags(0));
+        }
+        for (const char* signal : {"unmap-event", "focus-out-event"}) {
+            auto* tag_disarm{new DialogTag{this, id}};
+            g_signal_connect_data(window, signal, G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer data) -> gboolean {
+                                      auto* t{static_cast<DialogTag*>(data)};
+                                      t->self->ArmThemed(t->id, false);
+                                      return FALSE;
+                                  }),
+                                  tag_disarm, +[](gpointer data, GClosure*) { delete static_cast<DialogTag*>(data); }, GConnectFlags(0));
+        }
+        auto* tag_state{new DialogTag{this, id}};
+        g_signal_connect_data(window, "window-state-event", G_CALLBACK(+[](GtkWidget*, GdkEventWindowState* event, gpointer data) -> gboolean {
+                                  auto* t{static_cast<DialogTag*>(data)};
+                                  if (event->new_window_state & (GDK_WINDOW_STATE_ICONIFIED | GDK_WINDOW_STATE_WITHDRAWN)) t->self->ArmThemed(t->id, false);
+                                  return FALSE;
+                              }),
+                              tag_state, +[](gpointer data, GClosure*) { delete static_cast<DialogTag*>(data); }, GConnectFlags(0));
         // Closed by the desktop (Alt+F4): Cancel.
         auto* tag3{new DialogTag{this, id}};
         g_signal_connect_data(window, "delete-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer data) -> gboolean {
@@ -719,6 +767,13 @@ private:
         gtk_widget_grab_focus(GTK_WIDGET(m_themed->web));
     }
 
+    /** Tell the page of the dialog window that it shows with the focus (the delay of its button starts), or not (it waits). */
+    void ArmThemed(uint64_t id, bool on)
+    {
+        if (!m_themed || m_themed->id != id || !m_themed->session->Shown() || m_themed->session->Answered()) return;
+        m_themed->view->eval(on ? "window.__chainsDialogArm && window.__chainsDialogArm(true)" : "window.__chainsDialogArm && window.__chainsDialogArm(false)");
+    }
+
     /** The dialog window goes (hidden now, destroyed once what its web view has queued ran). */
     void CloseThemed()
     {
@@ -759,8 +814,7 @@ private:
     {
         const UniValue page{dialog::PageData(request)};
         const std::string title{page.find_value("title").get_str()};
-        std::string message{page.find_value("message").get_str()};
-        if (!page.find_value("details").get_str().empty()) message += "\n\n" + page.find_value("details").get_str();
+        const std::string message{dialog::FallbackText(page)};
         SetScheme(dialog::SchemeOf(request.look));
         GtkWidget* box{gtk_message_dialog_new(GTK_WINDOW(m_window), GtkDialogFlags(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
                                               request.level == dialog::Level::INFO ? GTK_MESSAGE_INFO : GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE, "%s", title.c_str())};
@@ -802,6 +856,33 @@ private:
         m_native = box;
         m_native_title = title;
         m_native_message = message;
+        // The button that accepts, as in the dialog window (audit 7 #7): taken a moment after the dialog shows with the
+        // focus, and again after each time it lost it.
+        gtk_dialog_set_response_sensitive(GTK_DIALOG(box), GTK_RESPONSE_ACCEPT, FALSE);
+        const auto arm_native{+[](GtkWidget* widget, GdkEvent*, gpointer data) -> gboolean {
+            auto* self{static_cast<GtkWindowImpl*>(data)};
+            if (self->m_native != widget) return FALSE;
+            const uint64_t serial{++self->m_native_arm};
+            gtk_dialog_set_response_sensitive(GTK_DIALOG(widget), GTK_RESPONSE_ACCEPT, FALSE);
+            auto* tag{new DialogTag{self, serial}};
+            g_timeout_add_full(G_PRIORITY_DEFAULT, NATIVE_ARM_MS, +[](gpointer d) -> gboolean {
+                auto* t{static_cast<DialogTag*>(d)};
+                if (t->self->m_native && t->self->m_native_arm == t->id) gtk_dialog_set_response_sensitive(GTK_DIALOG(t->self->m_native), GTK_RESPONSE_ACCEPT, TRUE);
+                return G_SOURCE_REMOVE;
+            }, tag, +[](gpointer d) { delete static_cast<DialogTag*>(d); });
+            return FALSE;
+        }};
+        const auto disarm_native{+[](GtkWidget* widget, GdkEvent*, gpointer data) -> gboolean {
+            auto* self{static_cast<GtkWindowImpl*>(data)};
+            if (self->m_native != widget) return FALSE;
+            ++self->m_native_arm;
+            gtk_dialog_set_response_sensitive(GTK_DIALOG(widget), GTK_RESPONSE_ACCEPT, FALSE);
+            return FALSE;
+        }};
+        g_signal_connect(box, "map-event", G_CALLBACK(arm_native), this);
+        g_signal_connect(box, "focus-in-event", G_CALLBACK(arm_native), this);
+        g_signal_connect(box, "focus-out-event", G_CALLBACK(disarm_native), this);
+        g_signal_connect(box, "unmap-event", G_CALLBACK(disarm_native), this);
         gtk_widget_show_all(box);
     }
 
@@ -846,6 +927,12 @@ private:
     GtkWidget* m_native{nullptr};
     std::string m_native_title;
     std::string m_native_message;
+    //! The delay of the button that accepts of the dialog of GTK: started again at each focus (the timers of older ones do nothing).
+    uint64_t m_native_arm{0};
+    static constexpr guint NATIVE_ARM_MS{1000};
+    //! The last input of the user in the main window (LastUserInput): its serial number, and when (g_get_monotonic_time).
+    uint64_t m_input_serial{0};
+    gint64 m_input_time{0};
     //! GTK's prefer-dark setting of the desktop, before the app set it for a dialog.
     std::optional<bool> m_desktop_dark;
 };

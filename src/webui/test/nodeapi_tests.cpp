@@ -225,13 +225,65 @@ BOOST_AUTO_TEST_CASE(console_asks_the_desktop_first)
     BOOST_CHECK(asked[0].message.starts_with("Command: generatetodescriptor\n\n"));
     BOOST_CHECK_EQUAL(asked[0].accept, "Run");
 
-    // Inside a reading one, it is asked too; accepted, it runs, and is asked once for the line.
+    // Inside a reading one, it is asked too; accepted, it runs. Each call is asked with its own parameters (audit 7 #3:
+    // one yes for the name of a command covered other calls of it the page put in the line).
     asked.clear();
     answer = true;
     r = run("echo(setban(1.2.3.4, add), setban(1.2.3.5, add))");
     BOOST_CHECK_MESSAGE(r["ok"].get_bool(), r.write());
     BOOST_CHECK(run("listbanned")["result"].get_str().find("1.2.3.5/32") != std::string::npos);
-    BOOST_CHECK_EQUAL(asked.size(), 1U);
+    BOOST_REQUIRE_EQUAL(asked.size(), 2U);
+    const auto row{[](const webui::Window::ConfirmDialog& d, const std::string& label) {
+        for (const auto& row : d.rows) {
+            if (row.label == label) return row.value;
+        }
+        return std::string{};
+    }};
+    BOOST_CHECK_EQUAL(row(asked[0], "Command"), "setban");
+    BOOST_CHECK_EQUAL(row(asked[0], "subnet"), "1.2.3.4");
+    BOOST_CHECK_EQUAL(row(asked[1], "subnet"), "1.2.3.5");
+    BOOST_CHECK_EQUAL(asked[0].details, "setban \"1.2.3.4\" \"add\"");
+
+    // The destinations first and whole, then the amounts, by the names the node gives its parameters.
+    asked.clear();
+    answer = false;
+    run("generatetoaddress 1 rchn1qxyz");
+    BOOST_REQUIRE_EQUAL(asked.size(), 1U);
+    BOOST_REQUIRE(asked[0].rows.size() >= 3);
+    BOOST_CHECK_EQUAL(asked[0].rows[1].label, "address");
+    BOOST_CHECK(asked[0].rows[1].kind == webui::dialog::Row::Kind::ADDRESS);
+    BOOST_CHECK_EQUAL(asked[0].rows[1].value, "rchn1qxyz");
+    BOOST_CHECK_EQUAL(asked[0].rows[2].label, "nblocks");
+    asked.clear();
+    run("prioritisetransaction " + std::string(64, 'a') + " 0 1000");
+    BOOST_REQUIRE_EQUAL(asked.size(), 1U);
+    BOOST_CHECK_EQUAL(asked[0].rows[1].label, "fee_delta");
+    BOOST_CHECK(asked[0].rows[1].kind == webui::dialog::Row::Kind::AMOUNT);
+    // An object of destinations and amounts (sendmany): each destination, then its amount.
+    UniValue many{UniValue::VARR};
+    many.push_back("");
+    UniValue amounts{UniValue::VOBJ};
+    amounts.pushKV("rchn1qa", 1);
+    amounts.pushKV("rchn1qb", 2);
+    many.push_back(amounts);
+    const auto sendmany{webui::guard::ConsoleConfirmation("sendmany", many, "w", {"dummy", "amounts"})};
+    BOOST_REQUIRE(sendmany);
+    BOOST_CHECK_EQUAL(sendmany->rows[1].label, "Wallet");
+    BOOST_CHECK_EQUAL(sendmany->rows[2].value, "rchn1qa");
+    BOOST_CHECK(sendmany->rows[2].kind == webui::dialog::Row::Kind::ADDRESS);
+    BOOST_CHECK_EQUAL(sendmany->rows[3].value, "1");
+    BOOST_CHECK_EQUAL(sendmany->rows[4].value, "rchn1qb");
+    // A passphrase is never shown.
+    asked.clear();
+    run("walletpassphrase \"do not show\" 60");
+    BOOST_REQUIRE_EQUAL(asked.size(), 1U);
+    BOOST_CHECK(asked[0].details.find("do not show") == std::string::npos);
+    bool hidden{false};
+    for (const auto& r2 : asked[0].rows) {
+        BOOST_CHECK(r2.value.find("do not show") == std::string::npos);
+        hidden |= r2.value == "(hidden)";
+    }
+    BOOST_CHECK(hidden);
 
     // The wallet is named in the dialog on one line; marks that turn text around are spaces there.
     asked.clear();
@@ -249,7 +301,7 @@ BOOST_AUTO_TEST_CASE(console_asks_the_desktop_first)
         BOOST_CHECK_MESSAGE(webui::guard::ConsoleRunsQuietly(m), m);
     }
     // A name that is no command is never put in a dialog.
-    BOOST_CHECK(!webui::guard::ConsoleConfirmation("get\nblock", ""));
+    BOOST_CHECK(!webui::guard::ConsoleConfirmation("get\nblock", UniValue{UniValue::VARR}, ""));
     BOOST_CHECK(!webui::guard::ConsoleRunsQuietly("GETBALANCE"));
 }
 
@@ -717,8 +769,37 @@ esac
     BOOST_CHECK(args.find("-mainchainrpccookiefile=") != std::string::npos);
     BOOST_CHECK(args.ends_with("-daemon"));
 
+    // One block mined for an offer: capped, and on the user's word given to the desktop, the amount first (audit 7 #2).
+    const auto mine_error{[&](const char* amount) {
+        try {
+            nodes.Call("sidechainNodes.mineOnce", Obj({{"stem", "fake"}, {"amount", amount}}));
+        } catch (const webui::HostError& e) {
+            return e.code;
+        }
+        return 0;
+    }};
+    BOOST_CHECK_EQUAL(mine_error("0.0999"), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(mine_error("-1"), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(mine_error("lots"), webui::BRIDGE_INVALID_REQUEST);
+    asked.clear();
+    asked_titles.clear();
+    accept = false;
+    BOOST_CHECK_EQUAL(nodes.Call("sidechainNodes.mineOnce", Obj({{"stem", "fake"}, {"amount", "0.0001"}}))["log"][0].get_str(), "Fake chain: no block was asked for: it was declined.");
+    BOOST_REQUIRE_EQUAL(asked_titles.size(), 1U);
+    BOOST_CHECK_EQUAL(asked_titles[0], "Mine one block of Fake chain");
+    BOOST_CHECK(asked[0].starts_with("Offer: 0.0001 CHN, for one block of Fake chain"));
+    accept = true;
     BOOST_CHECK_EQUAL(nodes.Call("sidechainNodes.mineOnce", Obj({{"stem", "fake"}, {"amount", "0.0001"}}))["log"][0].get_str(),
                       "Fake chain: asked for one block with 2 transactions, offering 0.0001. It is mined if the next block of this chain takes the offer.");
+    // Merged mining on: asked first too.
+    asked_titles.clear();
+    accept = false;
+    BOOST_CHECK_EQUAL(nodes.Call("sidechainNodes.mining", Obj({{"stem", "fake"}, {"on", true}}))["log"][0].get_str(), "Fake chain: mining was not turned on: it was declined.");
+    BOOST_REQUIRE_EQUAL(asked_titles.size(), 1U);
+    BOOST_CHECK_EQUAL(asked_titles[0], "Turn merged mining of Fake chain on");
+    accept = true;
+    asked.clear();
+    asked_titles.clear();
     BOOST_CHECK_EQUAL(nodes.Call("sidechainNodes.stop", Obj({{"stem", "fake"}}))["log"][0].get_str(), "Fake chain: stopping");
     BOOST_CHECK(nodes.Call("sidechainNodes.log", Obj({{"stem", "fake"}}))["log"][0].get_str().starts_with("Fake chain has no log at "));
 

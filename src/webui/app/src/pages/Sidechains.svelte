@@ -3,7 +3,7 @@
   // deposits to them, the proposals of new sidechains with their acks, and the withdrawal bundles
   // with the votes of the miners. Richer than Qt: an overview of the slots, the progress of each
   // proposal and bundle, and the deposits of a sidechain.
-  import { t } from '../lib/i18n.svelte';
+  import { isolate, t } from '../lib/i18n.svelte';
   import Pager from '../components/Pager.svelte';
   import SafeText from '../components/SafeText.svelte';
   import AmountInput from '../components/AmountInput.svelte';
@@ -26,7 +26,7 @@
     type DrivechainState,
     type PendingProposal,
   } from '../lib/chain';
-  import { ask, confirm, errorText, inform, walletRpc } from '../lib/dialogs.svelte';
+  import { ask, confirm, declined, errorText, inform, walletRpc } from '../lib/dialogs.svelte';
   import { formatCount, formatTime, shortHash } from '../lib/format';
   import { detail, showDetail } from '../lib/detail.svelte';
   import { nav, takeFocus } from '../lib/nav.svelte';
@@ -37,6 +37,9 @@
   import { host, rpc } from '../lib/rpc';
   import { node, noWalletText, prefs, toast, wallets } from '../lib/state.svelte';
   import { coinsToSats, formatAmount, satsToCoins, unitInfo } from '../lib/units';
+  import { depositFeeEstimate } from '../lib/wallet';
+  import { depositAgain, isDropped, makeDepositAgain } from '../lib/deposits.svelte';
+  import { current } from '../lib/walletdata.svelte';
 
   const TABS = [
     { id: 'sidechains', label: 'Sidechains' },
@@ -128,6 +131,29 @@
   let destination = $state('');
   let amount = $state<bigint | null>(null);
   let amountKey = $state(0);
+  // A deposit the mempool dropped, made again from this form (deposits.svelte.ts): it replaces that one.
+  let replaces = $state<string | null>(null);
+  $effect(() => {
+    const again = depositAgain.next;
+    if (!again) return;
+    depositAgain.next = null;
+    selectedSlot = again.slot;
+    destination = again.destination;
+    amount = again.amount;
+    amountKey++;
+    replaces = again.replaces;
+    queueMicrotask(() => document.getElementById('deposit-amount')?.focus());
+  });
+  // The deposits of the wallet the mempool dropped: said, with a way to make each again (audit 7-A #1).
+  const dropped = $derived(current.recordsLoaded ? current.records.filter((r) => isDropped(r) && r.amount < 0n) : []);
+  async function again(txid: string) {
+    if (wallets.current === null) return;
+    try {
+      await makeDepositAgain(wallets.current, txid);
+    } catch (e) {
+      await inform(t('Sidechains'), errorText(e), 'error');
+    }
+  }
   let destCheck = $state<{ kind: 'plain' | 'valid' | 'invalid'; slot?: number } | null>(null);
   let depositing = $state(false);
 
@@ -195,11 +221,16 @@
       return;
     }
     const sats = amount;
+    // The fee too, before anything is asked (audit 7 #20c): about what the wallet pays, as the desktop says it again.
+    const fee = await depositFeeEstimate(wallet, dest);
     const r = await ask({
       title: t('Confirm sidechain deposit'),
       message: t('Deposit %1 to the sidechain "%2" (slot %3), to be credited there to:', formatAmount(sats, prefs.unit, { withUnit: true }), selected.title, selected.slot),
       code: dest,
-      informative: t('Coins deposited to a sidechain can only come back through a withdrawal approved by the miners.'),
+      informative: [
+        fee === null ? t('The wallet adds the network fee when it makes the transaction.') : t('Network fee: about %1. Total: about %2.', formatAmount(fee, prefs.unit, { withUnit: true }), formatAmount(sats + fee, prefs.unit, { withUnit: true })),
+        t('Coins deposited to a sidechain can only come back through a withdrawal approved by the miners.'),
+      ].join('\n'),
       level: 'question',
       choices: [
         { id: 'no', label: 'Cancel' },
@@ -209,8 +240,9 @@
     if (r.choice !== 'yes') return;
     depositing = true;
     try {
-      const result = await walletRpc<{ txid: string }>(wallet, 'createsidechaindeposit', [selected.slot, dest, satsToCoins(sats)]);
+      const result = await walletRpc<{ txid: string }>(wallet, 'createsidechaindeposit', replaces ? [selected.slot, dest, satsToCoins(sats), replaces] : [selected.slot, dest, satsToCoins(sats)]);
       if (!result) return;
+      replaces = null;
       await inform(t('Sidechains'), t('Deposit sent in transaction %1.', result.txid), 'info');
       destination = '';
       amount = null;
@@ -231,11 +263,12 @@
 
   async function call(method: string, params: unknown[]) {
     try {
+      // Acks, proposals and votes are confirmed on the desktop first (rpc.confirmed): a no there changes nothing.
       await rpc.raw(method, params);
       await refresh();
       return true;
     } catch (e) {
-      await inform(t('Sidechains'), errorText(e), 'warning');
+      if (!declined(e)) await inform(t('Sidechains'), errorText(e), 'warning');
       return false;
     }
   }
@@ -287,7 +320,7 @@
     try {
       await rpc.raw('setwithdrawalvote', params);
     } catch (e) {
-      await inform(t('Sidechains'), errorText(e), 'warning');
+      if (!declined(e)) await inform(t('Sidechains'), errorText(e), 'warning');
       return;
     }
     // The new vote at once, as the node counts it (listwithdrawalbundles): upvoting a bundle downvotes the
@@ -352,8 +385,8 @@
             class="slot {s.state}"
             class:chosen={s.slot === selectedSlot}
             class:replacing={s.replacing}
-            title={s.state === 'free' ? `Slot ${s.slot}: free` : `Slot ${s.slot}: ${s.title} (${s.state}${s.replacing ? ', a replacement is proposed' : ''})`}
-            aria-label={s.state === 'free' ? `Slot ${s.slot}, free` : `Slot ${s.slot}, ${s.title}, ${s.state}`}
+            title={s.state === 'free' ? `Slot ${s.slot}: free` : `Slot ${s.slot}: ${isolate(s.title)} (${s.state}${s.replacing ? ', a replacement is proposed' : ''})`}
+            aria-label={s.state === 'free' ? `Slot ${s.slot}, free` : `Slot ${s.slot}, ${isolate(s.title)}, ${s.state}`}
             onclick={() => {
               if (s.state === 'active') selectedSlot = s.slot;
               else if (s.state === 'proposed' || s.state === 'queued') nav.tab = 'proposals';
@@ -377,7 +410,7 @@
               {#each sidechainsShown as s (s.slot)}
                 <tr class:chosen={s.slot === selectedSlot} onclick={() => pick(s.slot)} use:selectable={() => pick(s.slot)}>
                   <td class="num">{s.slot}</td>
-                  <td><button type="button" class="link" onclick={() => pick(s.slot)} translate="no">{s.title}</button><span class="desc muted" translate="no" title={s.description}>{s.description}</span></td>
+                  <td><button type="button" class="link" onclick={() => pick(s.slot)} translate="no">{s.title}</button><span class="desc muted" translate="no" dir="auto" title={isolate(s.description)}>{s.description}</span></td>
                   <td class="end">{#if s.escrow}<Amount sats={escrowOf(s)} />{:else}<span class="muted">no deposits yet</span>{/if}</td>
                   <td class="end num">{s.pendingbundles}</td>
                   <td class="end num">{formatCount(s.activationheight)}</td>
@@ -391,6 +424,13 @@
 
       <section class="panel deposit">
         <div class="panel-head"><h2>Deposit to the selected sidechain</h2></div>
+        {#if dropped.length}
+          <div class="panel-body dropped" role="alert" aria-label="Dropped deposits">
+            {#each dropped as r (r.key)}
+              <p><span class="status bad">Dropped &mdash; not sent</span> <Amount sats={-r.amount} /> <span class="mono" translate="no">{shortHash(r.txid)}</span> <button type="button" class="btn small" onclick={() => again(r.txid)}>Make it again</button></p>
+            {/each}
+          </div>
+        {/if}
         <form class="panel-body form" onsubmit={(e) => { e.preventDefault(); deposit(); }}>
           <!-- Every active sidechain, to choose the one to deposit to (user decision); the list selects it too. -->
           <div class="field">
@@ -408,6 +448,9 @@
             <span id="deposit-destination-check" class:error={destCheck?.kind === 'invalid'} class="hint">{destMessage}</span>
           </div>
           {#key amountKey}<AmountInput id="deposit-amount" bind:value={amount} label="Amount" />{/key}
+          {#if replaces}
+            <p class="hint" id="deposit-replaces">Makes again the dropped deposit <span class="mono" translate="no">{shortHash(replaces)}</span>: only one of the two can ever be mined. <button type="button" class="link" onclick={() => (replaces = null)}>Make a new deposit instead</button></p>
+          {/if}
           <div class="row">
             <button type="submit" class="btn primary" disabled={!selected || depositing || wallets.current === null}>{depositing ? 'Depositing…' : 'Deposit'}</button>
             {#if wallets.current === null}<span class="muted">Open a wallet to deposit from it.</span>{/if}
@@ -482,7 +525,7 @@
                 <td class="num">{p.slot}</td>
                 <td translate="no">{p.title}{#if p.description}<span class="desc muted">{p.description}</span>{/if}</td>
                 <td class="end num">{p.age}</td>
-                <td><Meter value={p.acks} max={proposalNeeds(p, dc.info)} label="Acks of {p.title}" text="{p.acks} / {proposalNeeds(p, dc.info)}" tone={p.ack ? 'positive' : 'accent'} /></td>
+                <td><Meter value={p.acks} max={proposalNeeds(p, dc.info)} label={`Acks of ${isolate(p.title)}`} text="{p.acks} / {proposalNeeds(p, dc.info)}" tone={p.ack ? 'positive' : 'accent'} /></td>
                 <td class="end num" class:bad={p.failures > 0}>{p.failures} / {dc.info.activationmaxfailures}</td>
                 <td class="end num">{p.blocksleft}</td>
                 <td>{p.replacement ? 'yes' : 'no'}</td>
@@ -889,5 +932,17 @@
     .detail-grid {
       grid-template-columns: minmax(0, 1fr);
     }
+  }
+  .dropped {
+    display: grid;
+    gap: 0.4rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .dropped p {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
   }
 </style>

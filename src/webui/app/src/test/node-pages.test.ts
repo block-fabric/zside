@@ -412,6 +412,7 @@ describe('tools', () => {
 
   it('pages the blocks of the explorer, sorted across all of them', async () => {
     const hashOf = (h: number) => h.toString(16).padStart(64, '0');
+    const explorerCalls: { count: number; from?: number }[] = [];
     host({
       getbestblockhash: () => hashOf(30),
       getblock: (r) => {
@@ -419,10 +420,14 @@ describe('tools', () => {
         return { height: h, time: 1_700_000_000 + h, nTx: 1 + (h % 7), size: 250, weight: 1000, difficulty: 1, hash: hashOf(h), previousblockhash: h > 0 ? hashOf(h - 1) : undefined, tx: [] };
       },
       getrawmempool: () => ({}),
-      // The list from the block index: the latest `count` blocks (0: all 31), newest first.
+      // The list from the block index: `count` blocks (1 to 10 000) from the height `from` down (the tip, 30, by default),
+      // newest first; read in parts, and only what the page lacks (audit 7 #12).
       'explorer.blocks': (r) => {
-        const count = (r.params as { count: number }).count || 31;
-        return Array.from({ length: Math.min(count, 31) }, (_, i) => 30 - i).map((h) => [h, hashOf(h), 1_700_000_000 + h, 1 + (h % 7), 1]);
+        const { count, from } = r.params as { count: number; from?: number };
+        explorerCalls.push({ count, from });
+        if (!(count >= 1 && count <= 10000)) throw new Error('count: 1 to 10000');
+        const top = Math.min(from ?? 30, 30);
+        return Array.from({ length: Math.max(0, Math.min(count, top + 1)) }, (_, i) => top - i).map((h) => [h, hashOf(h), 1_700_000_000 + h, 1 + (h % 7), 1]);
       },
     });
     prefs.explorerCount = 25;
@@ -449,6 +454,9 @@ describe('tools', () => {
     expect(listed.at(-1)?.textContent).toBe('All');
     await fireEvent.change(screen.getByLabelText('Blocks listed'), { target: { value: '0' } });
     await waitFor(() => screen.getByText(/1–25 of 31/));
+    // "All": only the older rows the list lacked were read (from block 5 down), never the whole chain again.
+    expect(explorerCalls.some((c) => c.from === 5 && c.count === 6)).toBe(true);
+    expect(explorerCalls.every((c) => c.count >= 1 && c.count <= 10000)).toBe(true);
   });
 
   it('hashes text and hexadecimal', async () => {

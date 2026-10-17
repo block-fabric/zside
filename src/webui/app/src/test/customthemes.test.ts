@@ -267,13 +267,15 @@ describe('the themes of the user in the preferences', () => {
 
   it('draws a theme of the user as its base with its colours set one by one, and takes them off again', () => {
     const doc = document;
-    const theme: CustomTheme = { id: 'custom-x1', name: 'X', base: 'dracula', colors: { bg: '#f4f4f4', 'text-muted': 'rgb(80 80 80)', accent: '#123456' } };
+    const theme: CustomTheme = { id: 'custom-x1', name: 'X', base: 'light', colors: { bg: '#f4f4f4', 'text-muted': 'rgb(80 80 80)', accent: '#123456' } };
     applyLook(doc, theme.id, [theme], null, 0, false);
     const root = doc.documentElement;
-    expect(root.dataset.theme).toBe('dracula');
+    expect(root.dataset.theme).toBe('light');
     expect(root.dataset.themeChoice).toBe('custom');
     expect(root.style.getPropertyValue('--bg')).toBe('#f4f4f4');
     expect(root.style.getPropertyValue('--accent')).toBe('#123456');
+    // Drawn as the hex of what was parsed: what is checked is what is drawn (audit 7 #9).
+    expect(root.style.getPropertyValue('--text-muted')).toBe('#505050');
     expect(root.style.getPropertyValue('--chevron')).toContain("stroke='%23505050'");
     // A light page: the form controls are drawn light.
     expect(root.style.colorScheme).toBe('light');
@@ -288,6 +290,11 @@ describe('the themes of the user in the preferences', () => {
     applyLook(doc, 'mocha', [theme], null, 0, false);
     expect(root.dataset.theme).toBe('mocha');
     expect(root.style.getPropertyValue('--accent')).toBe('');
+    // A light page on a dark base: the text of the base cannot be read on it, so the page stays the base's (audit 7 #10).
+    const unreadable: CustomTheme = { id: 'custom-x2', name: 'Y', base: 'dracula', colors: { bg: '#f4f4f4', accent: '#123456' } };
+    applyLook(doc, unreadable.id, [unreadable], null, 0, false);
+    expect(root.style.getPropertyValue('--bg')).toBe('');
+    expect(root.style.getPropertyValue('--accent')).toBe('#123456');
     expect(root.style.getPropertyValue('--chevron')).toBe('');
     // A theme that no longer exists: the default look.
     applyLook(doc, 'custom-gone', [], null, 0, false);

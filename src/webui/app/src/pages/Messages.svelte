@@ -51,9 +51,9 @@
     signBusy = true;
     try {
       const api = walletApi(wallet);
-      const r = await withUnlock(wallet, (passphrase) => api.signMessage(signAddress.trim(), signMessage, passphrase));
+      const r = await withUnlock(wallet, () => api.signMessage(signAddress.trim(), signMessage));
       if (!r) {
-        signStatus = { text: t('Wallet unlock was cancelled.'), ok: false };
+        signStatus = { text: t('Not signed: it was declined.'), ok: false };
       } else {
         signature = r.signature;
         signStatus = { text: t('Message signed.'), ok: true };

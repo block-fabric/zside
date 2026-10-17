@@ -27,6 +27,7 @@
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <webui/bridge.h>
+#include <webui/confirm.h>
 #include <webui/console.h>
 
 #include <algorithm>
@@ -64,6 +65,9 @@ std::string Digest(std::span<const unsigned char> data)
     Hasher{}.Write(data.data(), data.size()).Finalize(out);
     return HexStr(out);
 }
+
+//! The most rows of the explorer one call gives (explorer.blocks).
+constexpr int64_t MAX_EXPLORER_ROWS{10'000};
 
 const std::vector<std::string> METHODS{
     "console.check", "console.run", "peers.disconnect", "peers.ban", "bans.unban", "drivechain.depositAddress",
@@ -136,14 +140,13 @@ UniValue NodeApi::Call(const std::string& method, const UniValue& params)
         const UniValue& wallet{Param(params, "wallet")};
         const std::string wallet_name{wallet.isStr() ? wallet.get_str() : std::string{}};
         // The page can call this with any line: a command that does more than read waits for the user's word,
-        // given to the desktop, once per command and line (the line is checked as it runs, nested commands too).
-        std::set<std::string> accepted;
+        // given to the desktop, for each call (the line is checked as it runs, nested commands too), with the parameters
+        // it runs with shown (audit 7 #3).
         const console::ExecuteFn execute{[&](const std::string& m, const UniValue& p, const std::string& uri) {
-            if (!guard::ConsoleRunsQuietly(m) && !accepted.contains(m)) {
-                const auto dialog{guard::ConsoleConfirmation(m, wallet_name)};
+            if (!guard::ConsoleRunsQuietly(m)) {
+                const auto dialog{guard::ConsoleConfirmation(m, p, wallet_name, confirm::ArgNames(node, m))};
                 if (!dialog) throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found");
                 if (!m_confirm(*dialog)) throw JSONRPCError(RPC_MISC_ERROR, strprintf("%s was not run: it was declined", m));
-                accepted.insert(m);
             }
             return node.executeRpc(m, p, uri);
         }};
@@ -277,20 +280,31 @@ UniValue NodeApi::Call(const std::string& method, const UniValue& params)
         return out;
     }
     if (method == "explorer.blocks") {
-        // The latest blocks of the active chain, newest first, from the block index alone (no block read
-        // from disk): the block explorer lists up to all of them at once (user decision: 10 000, 50 000,
-        // all). Each row: [height, hash, time, transactions, difficulty]; its size and weight are read
-        // (getblock) for the rows a page shows.
+        // Blocks of the active chain from the block index alone (no block read from disk), newest first: `count` of them
+        // (at most MAX_EXPLORER_ROWS) from the height `from` down (the tip by default). The page asks for the rows it
+        // lacks in parts (all of them: part after part; on a new tip: only the new ones), never the whole chain at once
+        // (audit 7 #12). The index entries are taken under cs_main, the rows made without it (an entry of the block
+        // index stays as long as the node runs). Each row: [height, hash, time, transactions, difficulty]; its size
+        // and weight are read (getblock) for the rows a page shows.
         const node::NodeContext* context{m_node().context()};
         if (!context || !context->chainman) throw HostError("The chain is not loaded yet");
         const int64_t asked{ParamInt(params, "count")};
-        if (asked < 0) throw HostError(BRIDGE_INVALID_REQUEST, "count: 0 (all) or more is needed");
+        if (asked < 1 || asked > MAX_EXPLORER_ROWS) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("count: 1 to %d", MAX_EXPLORER_ROWS));
+        const UniValue& from_value{Param(params, "from")};
+        if (!from_value.isNull() && !from_value.isNum()) throw HostError(BRIDGE_INVALID_REQUEST, "from: a height");
+        std::vector<const CBlockIndex*> indexes;
+        {
+            LOCK(::cs_main);
+            const CChain& chain{context->chainman->ActiveChain()};
+            const int tip{chain.Height()};
+            const int64_t from{from_value.isNull() ? tip : std::min<int64_t>(from_value.getInt<int64_t>(), tip)};
+            const int64_t count{from < 0 ? 0 : std::min<int64_t>(asked, from + 1)};
+            indexes.reserve(count);
+            for (int64_t h{from}; h > from - count; --h) indexes.push_back(chain[static_cast<int>(h)]);
+        }
         UniValue rows{UniValue::VARR};
-        LOCK(::cs_main);
-        const CBlockIndex* tip{context->chainman->ActiveChain().Tip()};
-        const int64_t count{asked == 0 || !tip ? (tip ? tip->nHeight + 1 : 0) : std::min<int64_t>(asked, tip->nHeight + 1)};
-        rows.reserve(count);
-        for (const CBlockIndex* index{tip}; index && std::cmp_less(rows.size(), count); index = index->pprev) {
+        rows.reserve(indexes.size());
+        for (const CBlockIndex* index : indexes) {
             UniValue row{UniValue::VARR};
             row.push_back(index->nHeight);
             row.push_back(index->GetBlockHash().GetHex());

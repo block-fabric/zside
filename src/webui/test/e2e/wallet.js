@@ -48,6 +48,11 @@
     await waitFor('the passphrase dialog to go', () => !$('#passphrase-form'));
   }
   const walletOf = (name) => T().wallets.list.find((w) => w.name === name);
+  // The questions of the desktop (the dialog window of the host): what pays, signs or unlocks is asked there, with the
+  // passphrase typed there, never in the page (audit 7 #1). The test answers the next one, and reads what it asked.
+  const desktopAnswers = (answer) => host('test.confirmAnswer', answer);
+  const lastAsked = async () => (await host('test.confirmed')).at(-1);
+  const rowOf = (asked, label) => (asked && asked.rows ? asked.rows.find((r) => r.label === label) : undefined);
   async function go(page, tab = '') {
     T().go(page, tab);
     await sleep(150);
@@ -133,16 +138,34 @@
     await waitFor('the smart fee', () => /CHN\/kvB/.test(text('.fee')));
     await snapshot('send-filled-light');
     await click('Send', () => $('.actions'));
-    await passphrase('Unlock wallet', { pass1: PASS });
+    // The page's preview: no passphrase asked in the page.
     d = await dialogTitled('Confirm send coins');
+    await check('send: no passphrase in the page', !$('#passphrase-form'));
     await check('send: confirmation with fee and total', /Transaction fee \([\d.]+ kvB\)/.test(d.textContent) && d.textContent.includes('Total Amount: 10.0'), d.textContent.slice(0, 300));
+    await check('send: the address first, then the amount, then the label', d.textContent.includes(`To ${bobAddress}: 10.00000000 CHN`) && d.textContent.indexOf(bobAddress) < d.textContent.indexOf('(label \u201cBob\u201d)'), d.textContent.slice(0, 400));
     const sendButton = $('button[data-choice="send"]', d);
     await check('send: the button waits', sendButton.disabled && /\(\d\)/.test(sendButton.textContent));
     await snapshot('send-confirm-light');
+    // Declined on the desktop: nothing is sent.
+    await desktopAnswers({ yes: false });
+    await click('Send', d);
+    await waitFor('declined', () => text('.toasts').includes('Nothing was sent'), 30000);
+    let asked = await lastAsked();
+    await check('send: the desktop asked, with what the transaction pays read from it',
+      asked && asked.title === 'Send coins' && asked.passphrase && rowOf(asked, 'Pay to')?.value === bobAddress && rowOf(asked, 'Amount')?.value === '10.00000000 CHN' &&
+        rowOf(asked, 'Label')?.value === '\u201cBob\u201d' && /CHN$/.test(rowOf(asked, 'Network fee')?.value ?? '') && /^10\.0000\d+ CHN$/.test(rowOf(asked, 'Total')?.value ?? '') &&
+        asked.rows.findIndex((r) => r.label === 'Pay to') < asked.rows.findIndex((r) => r.label === 'Amount'),
+      JSON.stringify(asked));
+    await check('send: declined, nothing sent', (await rpc('getrawmempool', [])).length === 0);
+    // Again, accepted on the desktop with the passphrase typed there.
+    await click('Send', () => $('.actions'));
+    d = await dialogTitled('Confirm send coins');
+    await desktopAnswers({ yes: true, passphrase: PASS });
     await click('Send', d);
     await waitFor('the transaction sent', () => T().nav.highlightTx, 30000);
     const sentTxid = T().nav.highlightTx;
-    await check('send: alice locked again', walletOf('alice').locked);
+    await waitFor('alice locked again', async () => (await rpc('getwalletinfo', [], 'alice')).unlocked_until === 0, 20000);
+    await check('send: alice locked again', true);
     await waitFor('bob sees it', () => T().wallets.balances.bob && T().wallets.balances.bob.untrustedPending === 1000000000n, 30000);
     await check('send: bob receives 10', true);
     const book = await host('wallet.addresses', { wallet: 'alice' });
@@ -173,9 +196,11 @@
     d = await dialogTitled('Confirm fee bump');
     await check('bump: current, increase, new fee', d.textContent.includes('Current fee:') && d.textContent.includes('New fee:'));
     await snapshot('bump-fee-light');
+    await desktopAnswers({ yes: true, passphrase: PASS });
     await click('Yes', d);
-    await passphrase('Unlock wallet', { pass1: PASS });
     const replaced = await waitFor('the replacement', async () => (await rpc('gettransaction', [sentTxid], 'alice')).replaced_by_txid, 30000);
+    asked = await lastAsked();
+    await check('bump: asked on the desktop, the transaction it replaces and the fees', asked && asked.title === 'Increase the fee' && rowOf(asked, 'Replaces')?.value === sentTxid && !!rowOf(asked, 'Fee before'), JSON.stringify(asked));
     await check('bump: the transaction replaced by one with a higher fee', /^[0-9a-f]{64}$/.test(replaced), String(replaced));
 
     // Export the history.
@@ -210,11 +235,16 @@
     await waitFor('the PSBT loaded', () => text('.ops').includes('Sends'), 30000);
     await check('PSBT: loaded from the file, needs signatures', text('.ops').includes('Transaction still needs signature(s).') && text('.ops').includes('2.00000000'));
     await snapshot('psbt-loaded-light');
+    await desktopAnswers({ yes: true });
     await click('Sign Tx');
     await waitFor('signed', () => text('.ops').includes('Signed transaction successfully'), 30000);
+    asked = await lastAsked();
+    await check('PSBT: signing asked on the desktop, what it spends of the wallet and pays', asked && asked.title === 'Sign a partially signed transaction' && rowOf(asked, 'Pay to')?.value === aliceAddress && !!rowOf(asked, 'Spends of this wallet'), JSON.stringify(asked));
+    await desktopAnswers({ yes: true });
     await click('Broadcast Tx');
     await waitFor('broadcast', () => text('.ops').includes('Transaction broadcast successfully'), 30000);
-    await check('PSBT: signed and broadcast', true);
+    asked = await lastAsked();
+    await check('PSBT: signed and broadcast, the broadcast asked on the desktop', asked && asked.title === 'Broadcast a transaction', JSON.stringify(asked));
     await snapshot('psbt-broadcast-light');
     T().savePrefs({ psbtControls: false });
 
@@ -228,9 +258,11 @@
     await go('wallets', 'unlock');
     d = await dialogTitled('Unlock wallet for a while');
     set($('#unlock-minutes', d), '1');
+    await desktopAnswers({ yes: true, passphrase: 'bob pass' });
     await click('Unlock', d);
-    await passphrase('Unlock wallet', { pass1: 'bob pass' });
     await waitFor('bob unlocked', () => !walletOf('bob').locked, 30000);
+    asked = await lastAsked();
+    await check('unlock: the passphrase typed on the desktop, not in the page', asked && asked.passphrase && rowOf(asked, 'For')?.value === '1 minute' && !$('#passphrase-form'), JSON.stringify(asked));
     await check('unlock with a timeout', (await rpc('getwalletinfo', [], 'bob')).unlocked_until > 0);
     await snapshot('wallets-unlocked-light');
     await click('Lock now');
@@ -249,9 +281,11 @@
     await go('messages', `sign:${signer}`);
     set(await waitFor('the message box', () => $('#sign-message')), 'I own this address.');
     await sleep(100);
+    await desktopAnswers({ yes: true, passphrase: PASS });
     await click('Sign Message', () => $('.messages form'));
-    await passphrase('Unlock wallet', { pass1: PASS });
     await waitFor('the signature', () => $('#signature-out').value.length > 40, 30000);
+    asked = await lastAsked();
+    await check('sign: asked on the desktop, the address and the message', asked && rowOf(asked, 'Address')?.value === signer && rowOf(asked, 'Message')?.value === 'I own this address.', JSON.stringify(asked));
     const signature = $('#signature-out').value;
     await check('sign a message with a P2WPKH address', text('.messages').includes('Message signed.'));
     await snapshot('messages-sign-light');
@@ -279,11 +313,11 @@
     await check('receiving addresses: labels, used, received', grid.textContent.includes('signing') && grid.textContent.includes('Used') && grid.textContent.includes('Unused'), grid.textContent.slice(0, 300));
     set($('#addr-new-label'), 'Savings');
     set($('#addr-new-type'), 'bech32m');
+    // A locked wallet asks for its passphrase, on the desktop, only when it has no address ready.
+    await desktopAnswers({ yes: true, passphrase: PASS });
     await click('Generate new address');
-    // A locked wallet asks for its passphrase only when it has no address ready.
-    const unlockAsked = await waitFor('the new address or the passphrase', () => (grid.textContent.includes('Savings') ? 'done' : $('#passphrase-form') ? 'ask' : null), 30000);
-    if (unlockAsked === 'ask') await passphrase('Unlock wallet', { pass1: PASS });
     await waitFor('the new address', () => grid.textContent.includes('Savings') && grid.textContent.includes('Bech32m'), 30000);
+    await desktopAnswers({ clear: true });
     const book2 = await host('wallet.addresses', { wallet: 'alice' });
     const savings = book2.find((e) => e.label === 'Savings');
     await check('receiving addresses: a new taproot address with its label', !!savings && savings.purpose === 'receive' && savings.address.startsWith('rchn1p'), JSON.stringify(savings));
@@ -371,7 +405,6 @@
     const chosenRow = $$('[role="row"]', coinGrid).find((r) => { const b = $('input[type="checkbox"]', r); return b && b.checked; });
     const chosenAmount = chosenRow ? chosenRow.querySelectorAll('[role="gridcell"]')[1].textContent.trim() : '';
     await click('Send', () => $('.actions'));
-    await passphrase('Unlock wallet', { pass1: PASS });
     d = await dialogTitled('Confirm send coins');
     await click('Cancel', d);
     await check('choose coins: the send takes the coin chosen', !!chosenAmount, chosenAmount);
@@ -393,11 +426,13 @@
     $$('input[type="checkbox"]', proofGrid)[1].click();
     await waitFor('the total of the coins', () => text('.plan').includes('2 coin(s)'), 10000);
     await snapshot('proof-coins-light');
+    // Signed on the desktop's word, the passphrase typed there: one question for every address.
+    await desktopAnswers({ yes: true, passphrase: PASS });
     await click('Create proof');
-    // Alice is encrypted: the passphrase, unless she is unlocked for a while.
-    const made = await waitFor('the proof, or the passphrase', () => ($('#proof-output') && $('#proof-output').value.includes('-----END') ? 'proof' : $('#passphrase-form') ? 'pass' : null), 30000);
-    if (made === 'pass') await passphrase('Unlock wallet', { pass1: PASS });
     const proofText = await waitFor('the proof', () => ($('#proof-output').value.includes('-----END') ? $('#proof-output').value : null), 30000);
+    asked = await lastAsked();
+    await check('proof of funds: one question of the desktop, the message and each address', asked && asked.title === 'Sign a message' && asked.rows.filter((r) => r.label === 'Address').length >= 1, JSON.stringify(asked));
+    await desktopAnswers({ clear: true });
     const listedCoins = proofText.split('-----COINS-----\n')[1]?.split('-----SIGNATURES-----')[0].trim().split('\n') ?? [];
     await check('proof of funds: the two coins chosen are listed', listedCoins.length === 2 && listedCoins.every((l) => /^[0-9a-f]{64}:\d+ \d+\.\d{8}$/.test(l)), listedCoins.join(' | '));
     T().selectWallet('bob');

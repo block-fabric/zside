@@ -7,7 +7,7 @@
   import SafeText from '../components/SafeText.svelte';
   import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
-  import { ask, askPassphrase, confirm, errorText, inform, prompt } from '../lib/dialogs.svelte';
+  import { ask, askPassphrase, confirm, errorText, inform, prompt, withUnlock } from '../lib/dialogs.svelte';
   import { chooseFile, FILTERS, safeFileName } from '../lib/files';
   import { go, nav } from '../lib/nav.svelte';
   import { rpc } from '../lib/rpc';
@@ -363,22 +363,13 @@
   async function unlockTimed() {
     if (name === null) return;
     unlockFor.open = false;
-    let error: string | undefined;
-    for (;;) {
-      const p = await askPassphrase('unlock', { wallet: name, error });
-      if (!p) return;
-      try {
-        await rpc.raw('walletpassphrase', [p.passphrase, Math.max(1, Math.round(unlockFor.minutes * 60))], { wallet: name });
-        unlockedUntil = Math.floor(Date.now() / 1000) + Math.round(unlockFor.minutes * 60);
-        return;
-      } catch (e) {
-        if (e instanceof BridgeError && e.code === WalletError.PASSPHRASE_INCORRECT) {
-          error = 'The passphrase entered for the wallet decryption was incorrect.';
-          continue;
-        }
-        await inform(t('Wallet unlock failed'), errorText(e), 'error');
-        return;
-      }
+    const seconds = Math.max(1, Math.round(unlockFor.minutes * 60));
+    try {
+      // The passphrase is typed in the dialog of the desktop, never in the page (audit 7 #1).
+      const ok = await withUnlock(name, () => walletApi(name!).unlock(seconds));
+      if (ok) unlockedUntil = Math.floor(Date.now() / 1000) + seconds;
+    } catch (e) {
+      await inform(t('Wallet unlock failed'), errorText(e), 'error');
     }
   }
 

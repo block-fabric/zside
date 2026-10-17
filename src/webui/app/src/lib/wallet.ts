@@ -194,10 +194,6 @@ export interface PsbtState {
   signed?: number;
 }
 
-function withPass(params: Record<string, unknown>, passphrase?: string): Record<string, unknown> {
-  return passphrase ? { ...params, passphrase } : params;
-}
-
 function outpoints(list?: Outpoint[]) {
   return list?.map((o) => ({ txid: o.txid, vout: o.vout }));
 }
@@ -208,7 +204,8 @@ export function walletApi(wallet: string) {
     info: () => call<WalletInfo>('wallet.info', w),
     encrypt: (passphrase: string) => call<boolean>('wallet.encrypt', { ...w, passphrase }),
     changePassphrase: (old: string, next: string) => call<boolean>('wallet.changePassphrase', { ...w, old, new: next }),
-    unlock: (passphrase: string) => call<boolean>('wallet.unlock', { ...w, passphrase }),
+    /** Unlocked for so long: the passphrase is typed in the dialog of the desktop, never in the page (audit 7 #1). */
+    unlock: (seconds: number) => call<boolean>('wallet.unlock', { ...w, seconds }),
     lock: () => call<boolean>('wallet.lock', w),
     backup: (file: string) => call<string>('wallet.backup', { ...w, file }),
     exportWatchOnly: (file: string) => call<string>('wallet.exportWatchOnly', { ...w, file }),
@@ -236,14 +233,17 @@ export function walletApi(wallet: string) {
       const r = await call<{ token: string; oldFee: number; newFee: number; canSend: boolean }>('wallet.bump.prepare', { ...w, txid });
       return { token: r.token, oldFee: n(r.oldFee), newFee: n(r.newFee), canSend: r.canSend };
     },
-    bumpCommit: (token: string, passphrase?: string) => call<{ txid: string }>('wallet.bump.commit', withPass({ ...w, token }, passphrase)),
+    /** Confirmed on the desktop, with the passphrase of a locked wallet typed there. */
+    bumpCommit: (token: string) => call<{ txid: string }>('wallet.bump.commit', { ...w, token }),
+    /** A deposit of the wallet to a sidechain, from its transaction: its slot, its destination, its amount if told, and whether it was dropped. */
+    depositInfo: (txid: string) => call<{ txid: string; slot: number; destination?: string; amount?: number; dropped: boolean }>('wallet.deposit.info', { ...w, txid }),
     bumpPsbt: (token: string) => call<{ psbt: string }>('wallet.bump.psbt', { ...w, token }),
     addresses: () => call<AddressEntry[]>('wallet.addresses', w),
     addSending: (address: string, label: string) => call<string>('wallet.addressBook.add', { ...w, address, label }),
     editAddress: (address: string, label: string, newAddress?: string) =>
       call<{ address: string; changed: boolean }>('wallet.addressBook.edit', { ...w, address, label, ...(newAddress ? { newAddress } : {}) }),
     deleteAddress: (address: string) => call<boolean>('wallet.addressBook.delete', { ...w, address }),
-    newAddress: (label: string, type: string, passphrase?: string) => call<string>('wallet.newAddress', withPass({ ...w, label, type }, passphrase)),
+    newAddress: (label: string, type: string) => call<string>('wallet.newAddress', { ...w, label, type }),
     displayAddress: (address: string) => call<boolean>('wallet.displayAddress', { ...w, address }),
     requests: async () => (await call<(Omit<ReceiveRequest, 'amount'> & { amount: number })[]>('wallet.requests', w)).map((r) => ({ ...r, amount: n(r.amount) })),
     addRequest: async (r: { address: string; label: string; amount: bigint; message: string }) => {
@@ -280,20 +280,18 @@ export function walletApi(wallet: string) {
     smartFee: (confTarget: number) => call<{ feePerK: number; fallback: boolean; reason: string; target?: number; requiredFeePerK: number }>('wallet.fee', { ...w, confTarget }),
     available: async (selected?: Outpoint[]) => n(await call<number>('wallet.available', { ...w, selected: outpoints(selected) })),
     checkChange: (address: string) => call<{ valid: boolean; mine: boolean; label: string }>('wallet.checkChange', { ...w, address }),
-    prepare: async (recipients: Recipient[], cc: CoinControl, fee: FeeChoice, passphrase?: string): Promise<Prepared> => {
-      const r = await call<Record<string, unknown>>(
-        'wallet.send.prepare',
-        withPass(
-          {
-            ...w,
-            recipients: recipients.map((x) => ({ address: x.address, label: x.label ?? '', amount: Number(x.amount), subtractFee: !!x.subtractFee, message: x.message ?? '' })),
-            selected: outpoints(cc.selected),
-            ...(cc.changeAddress ? { changeAddress: cc.changeAddress } : {}),
-            ...fee,
-          },
-          passphrase,
-        ),
-      );
+    /** The transaction made, not signed yet: commit asks the user on the desktop, then signs and sends it. `data`: an output of data. */
+    prepare: async (recipients: Recipient[], cc: CoinControl, fee: FeeChoice, data?: string): Promise<Prepared> => {
+      const r = await call<Record<string, unknown>>('wallet.send.prepare', {
+        ...w,
+        recipients: [
+          ...recipients.map((x) => ({ address: x.address, label: x.label ?? '', amount: Number(x.amount), subtractFee: !!x.subtractFee, message: x.message ?? '' })),
+          ...(data ? [{ data }] : []),
+        ],
+        selected: outpoints(cc.selected),
+        ...(cc.changeAddress ? { changeAddress: cc.changeAddress } : {}),
+        ...fee,
+      });
       return {
         token: String(r.token),
         fee: n(r.fee),
@@ -305,12 +303,14 @@ export function walletApi(wallet: string) {
         txid: String(r.txid),
       };
     },
+    /** Asks the user on the desktop (what it pays, read from the transaction), then signs and sends; declined: BRIDGE_CANCELLED. */
     commit: (token: string) => call<{ complete: boolean; txid?: string; psbt?: string }>('wallet.send.commit', { ...w, token }),
     createPsbt: (token: string) => call<{ psbt: string }>('wallet.send.psbt', { ...w, token }),
     discard: (token: string) => call<boolean>('wallet.send.discard', { token }),
-    signMessage: (address: string, message: string, passphrase?: string) => call<{ signature: string }>('wallet.signMessage', withPass({ ...w, address, message }, passphrase)),
+    signMessage: (address: string, message: string) => call<{ signature: string }>('wallet.signMessage', { ...w, address, message }),
     psbtOpen: (psbt: string) => call<PsbtState>('wallet.psbt.open', { ...w, psbt }),
-    psbtSign: (psbt: string, passphrase?: string) => call<PsbtState>('wallet.psbt.sign', withPass({ ...w, psbt }, passphrase)),
+    /** Confirmed on the desktop. `finalize: false` keeps the signatures apart (a multisig PSBT signed by several). */
+    psbtSign: (psbt: string, finalize = true) => call<PsbtState>('wallet.psbt.sign', { ...w, psbt, finalize }),
   };
 }
 
@@ -329,8 +329,24 @@ export const psbt = {
   fromClipboardText: (base64: string) => call<{ psbt: string }>('psbt.decode', { base64 }),
   fromFile: (fileBase64: string) => call<{ psbt: string }>('psbt.decode', { fileBase64 }),
   open: (psbtText: string) => call<PsbtState>('wallet.psbt.open', { psbt: psbtText }),
-  broadcast: (psbtText: string) => call<{ txid: string }>('psbt.broadcast', { psbt: psbtText }),
+  /** Confirmed on the desktop (what it pays, decoded by the host); with a wallet, what it spends of it is said too. */
+  broadcast: (psbtText: string, wallet?: string) => call<{ txid: string }>('psbt.broadcast', wallet ? { psbt: psbtText, wallet } : { psbt: psbtText }),
 };
+
+/**
+ * About what the wallet pays as a network fee for a deposit to a sidechain (the escrow output spent and made again, one
+ * coin of the wallet, its change, the destination), at its fee rate: null when it cannot be told. The confirmation of the
+ * desktop says the same estimate (src/webui/confirm.cpp, Deposit); the wallet sets the fee when it makes the transaction.
+ */
+export async function depositFeeEstimate(wallet: string, destination: string): Promise<bigint | null> {
+  try {
+    const { feePerK } = await walletApi(wallet).smartFee(6);
+    const vsize = 11 + 41 + 68 + 9 + 10 + 9 + 3 + new TextEncoder().encode(destination).length + 31;
+    return BigInt(Math.ceil((feePerK * vsize) / 1000));
+  } catch {
+    return null;
+  }
+}
 
 /** Whether an error asks for the passphrase of the wallet. */
 export function needsUnlock(e: unknown): boolean {
@@ -340,7 +356,7 @@ export function needsUnlock(e: unknown): boolean {
 // --- The transaction history (TransactionRecord, TransactionTableModel) ---
 
 export type RecordType = 'mined' | 'recv' | 'recvOther' | 'send' | 'sendOther' | 'other';
-export type TxStatus = 'confirmed' | 'unconfirmed' | 'confirming' | 'conflicted' | 'abandoned' | 'immature' | 'notaccepted';
+export type TxStatus = 'confirmed' | 'unconfirmed' | 'confirming' | 'conflicted' | 'abandoned' | 'immature' | 'notaccepted' | 'dropped';
 
 export interface TxRecord {
   /** Unique: txid and output index. */
@@ -362,8 +378,8 @@ export interface TxRecord {
   sortKey: string;
   /** Height of the block of the transaction (of the conflict, for a conflicted one); -1 out of a block. */
   blockHeight: number;
-  /** In a block (c), conflicted by one (x), or neither (u); null when the host did not say. */
-  state: 'c' | 'x' | 'u' | null;
+  /** In a block (c), conflicted by one (x), or neither (u); a deposit to a sidechain the mempool dropped (d); null when the host did not say. */
+  state: 'c' | 'x' | 'u' | 'd' | null;
   coinbase: boolean;
   abandoned: boolean;
   /** Whether the wallet trusts it, as the host said (what matters for a transaction out of a block). */
@@ -407,7 +423,7 @@ function parseAll(raw: unknown[][]): TxRecord[] {
       countsForBalance: Boolean(r[11]),
       sortKey: String(r[12]),
       blockHeight: r.length > 13 ? Number(r[13]) : -1,
-      state: r.length > 14 && (r[14] === 'c' || r[14] === 'x' || r[14] === 'u') ? r[14] : null,
+      state: r.length > 14 && (r[14] === 'c' || r[14] === 'x' || r[14] === 'u' || r[14] === 'd') ? r[14] : null,
       coinbase: Boolean(r[15]),
       abandoned: Boolean(r[16]),
       trusted: r.length > 17 ? Boolean(r[17]) : Boolean(r[11]),
@@ -449,6 +465,8 @@ export function newest<T extends Pick<TxRecord, 'time' | 'sortKey'>>(records: re
  */
 export function withStatus(r: TxRecord, height: number, maturity: number): TxRecord {
   if (r.state === null || maturity <= 0) return r;
+  // A deposit the mempool dropped stays so until the host says otherwise (it is made again, or mined after all).
+  if (r.state === 'd') return r.status === 'dropped' && !r.countsForBalance && r.depth === 0 ? r : { ...r, status: 'dropped', depth: 0, maturesIn: 0, countsForBalance: false };
   const depth = r.state === 'c' ? height - r.blockHeight + 1 : r.state === 'x' ? -(height - r.blockHeight + 1) : 0;
   const toMaturity = r.coinbase ? Math.max(0, maturity - depth) : 0;
   const trusted = depth >= 1 ? true : depth < 0 ? false : r.trusted;
@@ -518,6 +536,8 @@ export function statusText(r: Pick<TxRecord, 'status' | 'depth' | 'maturesIn'>):
       return t('Immature (%1 confirmations, will be available after %2)', r.depth, r.depth + r.maturesIn);
     case 'notaccepted':
       return t('Generated but not accepted');
+    case 'dropped':
+      return t('Dropped \u2014 not sent');
   }
 }
 
@@ -541,6 +561,8 @@ export function plainStatusText(r: Pick<TxRecord, 'status' | 'depth' | 'maturesI
       return tn('Usable in %n block(s)', r.maturesIn);
     case 'notaccepted':
       return t('Mined, but not accepted');
+    case 'dropped':
+      return t('Dropped \u2014 not sent');
   }
 }
 
@@ -682,18 +704,27 @@ export function filterRecords(records: readonly TxRecord[], f: TxFilter): TxReco
 
 // --- CSV (CSVModelWriter: every value quoted, quotes doubled) ---
 
+/** What a spreadsheet skips at the start of a cell before it sees a formula: spaces of every width, controls, invisible marks, quotes. */
+// eslint-disable-next-line no-control-regex
+const CSV_LEAD = /^[\s\u0000-\u001f\u007f-\u009f\u00a0\u1680\u180e\u2000-\u200f\u2028-\u202f\u205f-\u206f\u3000\ufeff"']+/;
+/** What starts a formula: = + - @, and their full-width forms (＝ ＋ － ＠). */
+const CSV_FORMULA = /^[=+\-@\uff1d\uff0b\uff0d\uff20]/;
+
 /**
- * A cell a spreadsheet would run as a formula (=, +, -, @, a tab or a return first: a label from someone else
- * such as =cmd|' /C calc'!A0) gets a ' first, as OWASP's CSV injection advice says; numbers (-0.5) stay as they
- * are (audit port-2 #12). A file read back takes the ' off (csvCell).
+ * A cell a spreadsheet would run as a formula (=, +, -, @ or their full-width forms, after any spaces, controls, invisible
+ * marks or quotes; or a tab, a return or another control first: a label from someone else such as =cmd|' /C calc'!A0)
+ * gets a ' first, as OWASP's CSV injection advice says; numbers (-0.5) stay as they are (audit port-2 #12, audit 7 #20).
+ * A file read back takes the ' off (csvCell).
  */
 export function csvSafe(v: string): string {
-  return /^[=+\-@\t\r]/.test(v) && !/^[-+]?\d[\d.,]*(e[-+]?\d+)?$/i.test(v) ? `'${v}` : v;
+  if (/^[-+]?\d[\d.,]*(e[-+]?\d+)?$/i.test(v)) return v;
+  // eslint-disable-next-line no-control-regex
+  return CSV_FORMULA.test(v.replace(CSV_LEAD, '')) || /^[\u0000-\u001f\u007f-\u009f]/.test(v) ? `'${v}` : v;
 }
 
 /** A cell of a CSV file this app wrote, as it was before csvSafe. */
 export function csvCell(v: string): string {
-  return /^'[=+\-@\t\r]/.test(v) ? v.slice(1) : v;
+  return v.startsWith("'") && csvSafe(v.slice(1)) === v ? v.slice(1) : v;
 }
 
 export function toCsv(header: string[], rows: string[][]): string {
@@ -750,7 +781,7 @@ export function receivingAddresses(entries: readonly AddressEntry[], records: re
   const seen = new Map<string, { received: bigint; last: number }>();
   for (const r of records) {
     if ((r.type !== 'recv' && r.type !== 'mined') || r.credit <= 0n || !r.address) continue;
-    if (r.status === 'conflicted' || r.status === 'abandoned' || r.abandoned) continue;
+    if (r.status === 'conflicted' || r.status === 'abandoned' || r.status === 'dropped' || r.abandoned) continue;
     const s = seen.get(r.address) ?? { received: 0n, last: 0 };
     s.received += r.credit;
     s.last = Math.max(s.last, r.time);
@@ -783,7 +814,7 @@ export function plainText(r: TxRecord, unit: Unit): string {
 
 /** The running balance after each transaction, oldest first: for the balance chart of the overview. */
 export function balanceHistory(records: readonly TxRecord[]): { time: number; balance: bigint }[] {
-  const counted = records.filter((r) => r.status !== 'conflicted' && r.status !== 'abandoned' && r.status !== 'notaccepted');
+  const counted = records.filter((r) => r.status !== 'conflicted' && r.status !== 'abandoned' && r.status !== 'notaccepted' && r.status !== 'dropped');
   const byTime = counted.sort(compareRecords);
   const out: { time: number; balance: bigint }[] = [];
   let balance = 0n;

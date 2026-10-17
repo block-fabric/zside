@@ -581,7 +581,7 @@ UniValue NodeOptions::Set(const std::string& name, const UniValue& value)
         set_prune(Bool(value), "");
     } else if (name == "pruneSize") {
         const int64_t gb{Int(value)};
-        if (gb < now["limits"]["pruneMinGB"].getInt<int64_t>() || gb > std::numeric_limits<int>::max()) throw std::runtime_error("This prune size is out of range");
+        if (gb < now["limits"]["pruneMinGB"].getInt<int64_t>() || gb > MAX_PRUNE_GB) throw std::runtime_error("This prune size is out of range");
         set_prune_size(static_cast<int>(gb), "");
     } else if (name == "spendZeroConf") {
         set_flag("spendzeroconfchange", Bool(value), now["spendZeroConf"].get_bool());

@@ -3,7 +3,7 @@
 // contrast of every theme, aligned tables, settings that wait for Apply, the frame, the language.
 // Run by run_audit.py, which also submits a block by hand and starts the app again.
 (async () => {
-  const { host, rpc, sleep, log, T, waitFor, check, snapshot, text, buttonByText, finish } = E2E;
+  const { host, rpc, asPage, sleep, log, T, waitFor, check, snapshot, text, buttonByText, finish } = E2E;
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => [...root.querySelectorAll(s)];
   const set = (el, value) => {
@@ -115,17 +115,47 @@
     await rpc('generatetoaddress', [1, bigAddress]);
     await waitFor('the coins of enc', () => T().wallets.balances.enc && T().wallets.balances.enc.trusted > 0n, 30000);
     await go('proof', 'prove');
+    // The passphrase is typed in the dialog of the desktop (audit 7 #1): never in the page.
+    await host('test.confirmAnswer', { yes: true, passphrase: PASS });
     $('#proof-statement').closest('form').requestSubmit();
-    const dialog = await waitFor('the passphrase', () => $$('dialog[open]').find((d) => d.textContent.includes('Unlock wallet')), 20000);
-    set($('#pass1', dialog), PASS);
-    await sleep(50);
-    $('#passphrase-form').requestSubmit();
     await waitFor('the proof', () => $('#proof-output') && $('#proof-output').value.includes('-----BEGIN'), 30000).catch(() => null);
+    await check('audit 7 #1 no passphrase asked in the page, none sent by it', !$('#passphrase-form') && !calls.some((c) => !String(c.method).startsWith('test.') && c.params && !Array.isArray(c.params) && 'passphrase' in c.params));
     const proofText = $('#proof-output') ? $('#proof-output').value : '';
     const info = await rpc('getwalletinfo', [], 'enc');
     await check('M2 a proof of funds signs with a locked wallet', proofText.length > 50, proofText.slice(0, 60));
     await check('M2 and the wallet is locked again at once', info.unlocked_until === 0, JSON.stringify(info.unlocked_until));
     await check('M2 the page never unlocked it for a while', !calls.some((c) => c.method === 'walletpassphrase'));
+
+    // --- Audit 7: what pays, signs or votes is the desktop's to confirm; the page cannot do it on its own ---
+    const refusedCode = (p) => p.then(() => 0, (e) => (e && e.code) || -1);
+    await check('audit 7 #1 the page cannot send, sign, broadcast, unlock or vote by RPC',
+      (await Promise.all(['send', 'walletprocesspsbt', 'sendrawtransaction', 'createsidechaindeposit', 'walletpassphrase', 'setwithdrawalvote', 'setdefaultwithdrawalvote', 'acksidechain', 'setgenerate', 'signmessage'].map((m) => refusedCode(asPage(m, [], true))))).every((c) => c === -32601));
+    const prepared = await host('wallet.send.prepare', { wallet: 'big', recipients: [{ address: encAddress, amount: 100000 }] });
+    const unasked = await refusedCode(host('wallet.send.commit', { wallet: 'big', token: prepared.token }));
+    await check('audit 7 #1 a send nobody answered on the desktop is declined', unasked === -32800, String(unasked));
+    const lastQuestion = (await host('test.confirmed')).at(-1);
+    await check('audit 7 #1 the question names the destination before the amount, the fee and the total',
+      lastQuestion && lastQuestion.title === 'Send coins' && lastQuestion.rows.map((r) => r.label).join(',').startsWith('Wallet,Network,Pay to,Amount') && lastQuestion.rows.some((r) => r.label === 'Total'),
+      JSON.stringify(lastQuestion));
+    // #15: no secret setting is read by the page.
+    await check('audit 7 #15 the page reads no secret setting', (await refusedCode(host('node.getSetting', { name: 'rpcpassword' }))) === -32600 && (await refusedCode(host('node.getSetting', { name: 'prune' }))) === 0);
+    // #5: the clipboard only right after a key or a click of the user, once for each.
+    await check('audit 7 #5 the clipboard is not read without a gesture of the user', (await refusedCode(host('clipboard.read'))) === -32800);
+    await check('audit 7 #5 nor written', (await refusedCode(host('clipboard.write', { text: 'rchn1qattacker' }))) === -32800);
+    await host('test.gesture');
+    await check('audit 7 #5 written right after a key of the user', (await refusedCode(host('clipboard.write', { text: 'copied by the user' }))) === 0);
+    await check('audit 7 #5 once for each key', (await refusedCode(host('clipboard.write', { text: 'again' }))) === -32800);
+    await host('test.gesture');
+    const pasted = await host('clipboard.read').catch(() => null);
+    await check('audit 7 #5 read right after a key of the user', pasted === 'copied by the user', String(pasted));
+    await check('audit 7 #5 once for each key, read', (await refusedCode(host('clipboard.read'))) === -32800);
+    // #13: a file chosen once is written once.
+    await host('test.fileAnswer', { path: `${window.__E2E_FILES}/once.txt` });
+    const chosen = await host('file.choose', { save: true, title: 'Save' });
+    await check('audit 7 #13 the file chosen is written', (await refusedCode(host('file.write', { path: chosen, text: 'one' }))) === 0);
+    await check('audit 7 #13 and not again later', (await refusedCode(host('file.write', { path: chosen, text: 'two' }))) === -32600);
+    // #14: wallet names are names.
+    await check('audit 7 #14 a wallet is never made outside the wallets folder', (await refusedCode(host('wallets.create', { name: '../outside' }))) === -32600 && (await refusedCode(host('wallets.open', { name: '/tmp/planted' }))) === -32600);
     T().selectWallet('big');
 
     // M5: the text of every theme reaches 4.5:1, measured on what the page draws.

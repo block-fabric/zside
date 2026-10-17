@@ -19,6 +19,7 @@
   import { prefs, savePrefs, toast, wallets } from '../lib/state.svelte';
   import type { Column } from '../lib/table';
   import { abandon, bumpFee } from '../lib/txactions';
+  import { isDropped, makeDepositAgain } from '../lib/deposits.svelte';
   import { formatAmount, parseAmount } from '../lib/units';
   import {
     addressText,
@@ -198,6 +199,8 @@
           { label: 'Show transaction details', action: () => (details = chosen), separator: true },
           { label: 'Increase transaction fee', action: () => wallet !== null && bump(chosen.txid), disabled: !actions.canBump, separator: true },
           { label: 'Abandon transaction', action: () => wallet !== null && abandon(wallet, chosen.txid), disabled: !actions.canAbandon, danger: true },
+          // A deposit to a sidechain the mempool dropped: made again in its place, confirmed on the desktop.
+          ...(isDropped(chosen) ? [{ label: 'Make the deposit again', action: () => wallet !== null && makeDepositAgain(wallet, chosen.txid).catch((e) => inform(t('Sidechains'), errorText(e), 'error')) }] : []),
           { label: 'Edit address label', action: () => editLabel(chosen), disabled: !chosen.address, separator: true },
           { label: 'Show in block explorer', action: () => go('explorer', `search:${chosen.txid}`), separator: true },
           ...thirdPartyLinks(prefs.thirdPartyTxUrls, chosen.txid).map((l) => ({ label: l.label, action: () => host.open('url', l.url).catch(() => undefined) })),
@@ -223,7 +226,7 @@
   }
 
   function rowClass(r: TxRecord): string {
-    if (r.status === 'abandoned') return 'danger';
+    if (r.status === 'abandoned' || r.status === 'dropped') return 'danger';
     if (!r.countsForBalance && r.status !== 'immature') return 'unconfirmed';
     return '';
   }

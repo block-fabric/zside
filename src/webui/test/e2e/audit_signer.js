@@ -59,11 +59,15 @@
     sendButton.click();
     const confirm = await waitFor('the confirmation', () => $$('dialog[open]').find((d) => d.textContent.includes('Confirm send coins')), 30000);
     const sign = await waitFor('its button', () => $$('button', confirm).find((b) => b.textContent.trim().startsWith('Sign on device') && !b.disabled), 10000);
+    // The desktop asks first, with what the transaction pays (audit 7 #1).
+    await host('test.confirmAnswer', { yes: true });
     sign.click();
     await waitFor('sent', () => T().nav.highlightTx, 30000);
     await check('G06 the device signed, and the transaction is sent', T().nav.highlightTx === mockTx.txid, `${T().nav.highlightTx} / ${mockTx.txid}`);
     const mempool = await rpc('getrawmempool');
     await check('G06 it is in the mempool', mempool.includes(mockTx.txid));
+    const asked = (await host('test.confirmed')).at(-1);
+    await check('G06 asked on the desktop: sign on the device, the destination', asked && asked.title === 'Send coins: sign on the device' && asked.rows.some((r) => r.label === 'Pay to' && r.value === dest), JSON.stringify(asked));
     await snapshot('audit-signer-send-light');
     await finish();
   } catch (e) {

@@ -18,7 +18,10 @@ Runs chains-app on regtest in a virtual display, several times:
   6. audit_lang.js: -lang=fr;
   7. audit_dialog.js: the confirmations of the host in its dialog window (audit
      port-1 #4), in Midnight, Light, Dracula and a theme of the user, answered in
-     that window; the dialog of the system when it cannot be made; one at a time.
+     that window; the dialog of the system when it cannot be made; one at a time;
+     the spends of audit 7 #1 (a send to two recipients, a PSBT) with what the host
+     decoded, their pictures in Midnight and Light; the arming of the button that
+     accepts (#7); the limits of the questions (#8).
 
     run_audit.py --app build/bin/chains-app --tmp <dir> --shots <dir> [--only audit-dialog,...]
 """
@@ -137,7 +140,8 @@ def main():
         if result is not None:
             failures.append(f"the block was refused: {result}")
 
-    if run(args.app, base, "audit", "audit.js", main_args, env, args.shots, failures, on_event=submit_block) is not None or not ONLY:
+    if run(args.app, base, "audit", "audit.js", main_args, env, args.shots, failures, on_event=submit_block,
+           prelude=f"window.__E2E_FILES = {json.dumps(str(base))};\n") is not None or not ONLY:
         check_shutdown(datadir, failures)
         settings = json.loads((datadir / "regtest" / "settings.json").read_text())
         print(f"  settings.json at the stop: prune={settings.get('prune')!r} par={settings.get('par')!r}", flush=True)

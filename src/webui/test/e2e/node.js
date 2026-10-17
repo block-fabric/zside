@@ -77,6 +77,26 @@
     return h;
   };
   const be64 = (n) => le64(n).match(/../g).reverse().join('');
+  // What pays, signs or changes the votes of the node is asked on the desktop (the dialog window of the host, audit 7 #1):
+  // the test answers the next question, and reads what it asked.
+  const desktop = (answer) => host('test.confirmAnswer', answer);
+  const lastAsked = async () => (await host('test.confirmed')).at(-1);
+  const rowOf = (asked, label) => (asked && asked.rows ? asked.rows.find((r) => r.label === label) : undefined);
+  const dialogWindow = (action, more = {}) => host('test.dialog', { action, ...more });
+  /** The question shown in the dialog window: waited for, its picture taken, then answered in it as a user would. */
+  async function inWindow(name, accept) {
+    await waitFor(`${name}: the dialog window`, async () => (await dialogWindow('kind')) === 'themed', 30000);
+    await waitFor(`${name}: its page`, async () => {
+      const shown = await dialogWindow('eval', { script: `!document.body.classList.contains('loading') && !!document.getElementById('dialog-accept')` });
+      return shown === true;
+    }, 30000);
+    await sleep(400);
+    await dialogWindow('snapshot', { name });
+    // The button that accepts takes a click a second after the window shows.
+    if (accept) await sleep(2600);
+    await dialogWindow('eval', { script: `document.getElementById(${JSON.stringify(accept ? 'dialog-accept' : 'dialog-cancel')}).click(); true` });
+    await waitFor(`${name}: the window gone`, async () => (await dialogWindow('kind')) === 'none', 20000);
+  }
 
   /** Pictures of a page in light and dark. */
   const both = [];
@@ -109,8 +129,12 @@
     await waitFor('the form error', () => text('.errors').includes('The build commit hash is 40 hexadecimal characters.'));
     await check('proposal: a bad hash is refused before it goes to the node', true);
     set($('#proposal-hash2'), '');
+    // Proposed on the desktop's word: the slot and the title.
+    await desktop({ yes: true });
     await click('Propose');
     await waitFor('the queued proposal', () => text('[aria-label="Queued proposals"]').includes('Testchain'), 30000);
+    let q = await lastAsked();
+    await check('proposal: asked on the desktop, with the slot and the title', q && q.title === 'Propose a sidechain' && rowOf(q, 'Title')?.value === 'Testchain', JSON.stringify(q));
     const queued = await rpc('listsidechainproposals');
     await check('proposal queued for the next block', queued.queued.length === 1 && queued.queued[0].title === 'Testchain' && queued.queued[0].description === 'A sidechain for testing');
     await snapshot('sidechains-queued-light');
@@ -122,15 +146,18 @@
     // A second one, that this node stops acking.
     set($('#proposal-slot'), '2');
     set($('#proposal-title'), 'Unwanted');
+    await desktop({ yes: true });
     await click('Propose');
     await waitFor('the second queued', () => text('[aria-label="Queued proposals"]').includes('Unwanted'));
     await mine(1);
     const row = await waitFor('the second proposal', () => $$('[aria-label="Proposals"] tbody tr').find((tr) => tr.textContent.includes('Unwanted')));
     row.click();
     await sleep(100);
+    await desktop({ yes: true });
     await click('Stop acking');
     await waitFor('no ack', async () => (await rpc('listsidechainproposals')).pending.some((p) => p.title === 'Unwanted' && !p.ack));
-    await check('proposal: stop acking', true);
+    q = await lastAsked();
+    await check('proposal: stop acking, asked on the desktop with the proposal', q && q.title === 'Stop acking a sidechain proposal' && rowOf(q, 'Title')?.value === 'Unwanted', JSON.stringify(q));
     await snapshot('sidechains-proposals-light');
     both.push({ name: 'sidechains-proposals', page: 'sidechains', tab: 'proposals' });
 
@@ -148,8 +175,28 @@
     await click('Deposit', () => $('form', $('.deposit')));
     let d = await dialogTitled('Confirm sidechain deposit');
     await check('deposit: confirmation names the sidechain and the address', d.textContent.includes('Deposit 2.00000000 CHN to the sidechain "Testchain" (slot 1)') && d.textContent.includes('s1_erin_b91ea9'));
+    await check('deposit: the preview says the fee', /Network fee: about 0\.0000\d+ CHN\. Total: about 2\.0000\d+ CHN\./.test(d.textContent), d.textContent.slice(0, 400));
     await snapshot('sidechains-deposit-confirm-light');
+    // The desktop asks, with what the host decoded (audit 7 #1): pictures of it in Light, declined there; then in
+    // Midnight, accepted there.
+    await desktop({ show: true });
     await click('Deposit', d);
+    await inWindow('spend-deposit-light', false);
+    q = await lastAsked();
+    await check('deposit: asked on the desktop, the sidechain, the destination whole before the amount, the fee and the total',
+      q && q.title === 'Deposit to a sidechain' && rowOf(q, 'Sidechain')?.value === 'Testchain (slot 1)' && rowOf(q, 'Deposit to')?.value === 's1_erin_b91ea9' &&
+        rowOf(q, 'Credited to')?.value === 'erin' && rowOf(q, 'Amount')?.value === '2.00000000 CHN' && /^about 0\.0000\d+ CHN$/.test(rowOf(q, 'Network fee')?.value ?? '') &&
+        q.rows.findIndex((r) => r.label === 'Deposit to') < q.rows.findIndex((r) => r.label === 'Amount'),
+      JSON.stringify(q));
+    await check('deposit: declined on the desktop, nothing sent', !openDialog() && (await rpc('getrawmempool', [])).length === 0);
+    T().savePrefs({ theme: 'midnight' });
+    await sleep(300);
+    await click('Deposit', () => $('form', $('.deposit')));
+    d = await dialogTitled('Confirm sidechain deposit');
+    await desktop({ show: true });
+    await click('Deposit', d);
+    await inWindow('spend-deposit-midnight', true);
+    T().savePrefs({ theme: 'light' });
     const sent = await answerDialog('Sidechains', 'OK');
     await check('deposit sent', /Deposit sent in transaction [0-9a-f]{64}\./.test(sent), sent);
 
@@ -160,6 +207,7 @@
     await click('Deposit', () => $('form', $('.deposit')));
     const question = await answerDialog('Sidechains', 'Deposit anyway');
     await check('deposit: a plain destination is questioned', question.includes('"alice" is not a deposit address'));
+    await desktop({ yes: true });
     await click('Deposit', await dialogTitled('Confirm sidechain deposit'));
     await answerDialog('Sidechains', 'OK');
 
@@ -199,23 +247,35 @@
     $('button.expand', brow).click();
     await waitFor('the payouts', () => text('.payouts').includes('1.00000000'));
     await check('bundle: payouts of a known bundle', true);
+    // A vote is changed on the desktop's word: an upvote with the bundle and what it pays (audit 7 #1).
+    await desktop({ yes: false });
+    await click('Downvote sidechain');
+    await waitFor('the question', async () => (await lastAsked())?.title === 'Change a withdrawal vote', 20000);
+    await sleep(300);
+    await check('bundle: a vote declined on the desktop changes nothing', (await rpc('listwithdrawalbundles'))[0].vote !== 'downvote');
+    await desktop({ yes: true });
     await click('Downvote sidechain');
     await waitFor('the downvote', async () => (await rpc('listwithdrawalbundles'))[0].vote === 'downvote');
     await check('bundle: downvote', true);
+    await desktop({ yes: true });
     await click('Upvote');
     await waitFor('the upvote', async () => (await rpc('listwithdrawalbundles'))[0].vote === 'upvote' && (await rpc('listwithdrawalbundles'))[0].hash === bundle.hash);
-    await check('bundle: upvote', true);
+    q = await lastAsked();
+    await check('bundle: upvote, asked on the desktop with the bundle and what it pays',
+      q && rowOf(q, 'Bundle')?.value === bundle.hash && rowOf(q, 'Pays')?.value === payTo && q.level === 'danger', JSON.stringify(q));
     await mine(2);
     await waitFor('the score', () => {
       const m = $$('[aria-label="Withdrawal bundles"] [role="progressbar"]')[0];
       return m && m.getAttribute('aria-valuetext') === '3 of 30';
     }, 30000);
     await check('bundle: the score grows with the upvotes', true);
+    await desktop({ yes: true });
     set($('select[aria-label="Default withdrawal vote"]'), 'abstain');
     await waitFor('the default vote', async () => (await rpc('getdrivechaininfo')).defaultwithdrawalvote === 'abstain');
     await check('bundle: default vote', true);
+    await desktop({ yes: true });
     set($('select[aria-label="Default withdrawal vote"]'), 'upvote');
-    await sleep(300);
+    await waitFor('the default vote back', async () => (await rpc('getdrivechaininfo')).defaultwithdrawalvote === 'upvote');
     await snapshot('sidechains-withdrawals-light');
     both.push({ name: 'sidechains-withdrawals', page: 'sidechains', tab: 'withdrawals' });
 
@@ -251,6 +311,7 @@
     // --- Solo mining ---
     await go('mine');
     set(await waitFor('the mining form', () => $('#mining-address')), minerAddress);
+    await desktop({ yes: true });
     await click('Start mining');
     await waitFor('the miner', () => text('.state').includes('Mining, threads: 1'), 30000);
     await waitFor('a block found', async () => (await rpc('getgenerate')).blocksfound >= 1, 120000);
@@ -284,8 +345,12 @@
     await waitFor('the fingerprint', () => text('#timestamp-hash') === fingerprint);
     await check('timestamp: fingerprint of the file', true);
     await click('Stamp this file');
+    // Sent on the desktop's word: the data in the chain, the fee and the total (audit 7 #1).
+    await desktop({ yes: true });
     await answerDialog('Timestamp File', 'Yes');
     await waitFor('the stamp sent', () => text('#timestamp-result').startsWith('The fingerprint was published in transaction'));
+    q = await lastAsked();
+    await check('timestamp: the stamp asked on the desktop, its data and its fee', q && q.title === 'Send coins' && (rowOf(q, 'Data')?.value ?? '').startsWith('OP_RETURN ') && !!rowOf(q, 'Network fee'), JSON.stringify(q));
     await click('Find the stamp of this file');
     await waitFor('no stamp yet', () => text('#timestamp-result').startsWith('No stamp of this file was found'), 60000);
     await check('timestamp: not found before it is mined', true);
@@ -299,9 +364,13 @@
     // --- Proof of funds ---
     await go('proof', 'prove');
     set(await waitFor('the statement', () => $('#proof-statement')), 'These coins are mine');
+    // Each address signs on the desktop's word, in one question.
+    await desktop({ yes: true });
+    await desktop({ yes: true });
     await click('Create proof');
     await waitFor('the proof', () => $('#proof-output').value.startsWith('-----BEGIN CHAINS PROOF OF FUNDS-----\nThese coins are mine\n-----SIGNATURES-----\nrchn1'), 60000);
     const proofText = $('#proof-output').value;
+    await desktop({ clear: true });
     await check('proof: made with the addresses of the wallet', proofText.trim().endsWith('-----END CHAINS PROOF OF FUNDS-----'));
     if (openDialog()) await answerDialog('Proof of Funds', 'OK');
     await snapshot('proof-light');
@@ -355,14 +424,21 @@
     await check('multisig: prepared', text('#multisig-status').includes(`Pays 1.00000000 CHN to ${minerAddress}, and 1.99990000 CHN to ${shared}. Fee: 0.00010000 CHN.`), text('#multisig-status'));
     await click('Send transaction');
     await check('multisig: not sent without signatures', (await answerDialog('Multisig Lounge', 'OK')).includes('does not have enough signatures'));
+    // Signed on the desktop's word, with what it spends and pays (audit 7 #1).
+    await desktop({ yes: true });
     await click('Sign with my wallet');
     await waitFor('the signatures', () => text('#multisig-status').startsWith('Signatures: 2 of the 2 needed.'), 60000);
+    q = await lastAsked();
+    await check('multisig: signing asked on the desktop, each output', q && q.title === 'Sign a partially signed transaction' && q.rows.some((r) => r.kind === 'address' && r.value === minerAddress) && q.rows.some((r) => r.kind === 'address' && r.value === shared), JSON.stringify(q));
     await check('multisig: signed by both keys', true);
     await snapshot('multisig-spend-light');
     both.push({ name: 'multisig-spend', page: 'multisig', tab: 'spend' });
+    // Broadcast on the desktop's word, with what it pays decoded by the host.
+    await desktop({ yes: true });
     await click('Send transaction');
-    await answerDialog('Multisig Lounge', 'Send');
     const multisigSent = await answerDialog('Multisig Lounge', 'OK');
+    q = await lastAsked();
+    await check('multisig: the broadcast asked on the desktop', q && q.title === 'Broadcast a transaction' && q.rows.some((r) => r.kind === 'address' && r.value === minerAddress), JSON.stringify(q));
     await check('multisig: sent', multisigSent.includes('Sent as transaction'));
     await mine(1);
     await go('multisig', 'addresses');
@@ -556,11 +632,21 @@
     await waitFor('started', () => text('#sidechain-nodes-log').includes('Fake chain: node started'), 30000);
     await waitFor('running', () => $$('.card').find((c) => c.textContent.includes('Fake chain')).textContent.includes('running'), 30000);
     await check('sidechain nodes: node started, and running', $$('.card').find((c) => c.textContent.includes('Fake chain')).textContent.includes('yes, at block'));
+    // Merged mining, and one block for an offer: on the desktop's word, the offer first (audit 7 #2).
+    await desktop({ yes: true });
     await click('Auto mining on / off');
     await waitFor('mining on', () => text('#sidechain-nodes-log').includes('automatic mining turned on; fees go to sideaddress'), 30000);
+    await desktop({ yes: true });
     await click('Mine one block');
     await answerPrompt('Sidechain Nodes', '0.0002');
     await waitFor('one block asked', () => text('#sidechain-nodes-log').includes('asked for one block with 1 transactions, offering 0.0002'), 30000);
+    q = await lastAsked();
+    await check('sidechain nodes: one block asked on the desktop, the offer first', q && q.title === 'Mine one block of Fake chain' && q.message.startsWith('Offer: 0.0002 CHN'), JSON.stringify(q));
+    await click('Mine one block');
+    await answerPrompt('Sidechain Nodes', '0.5');
+    await waitFor('the cap', () => text('#sidechain-nodes-log').includes('at most 0.01') || /at most 0\.01/.test(text('dialog[open]')), 30000);
+    if (openDialog()) await answerDialog(openDialog().querySelector('h2').textContent.trim(), 'OK');
+    await check('sidechain nodes: an offer above 0.01 is refused', true);
     await check('sidechain nodes: mining', true);
     await snapshot('sidechain-nodes-light');
     both.push({ name: 'sidechain-nodes', page: 'sidechain-nodes', tab: '' });

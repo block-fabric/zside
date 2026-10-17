@@ -6,6 +6,7 @@
 #define BITCOIN_WEBUI_WINDOW_H
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -160,6 +161,19 @@ public:
     virtual void SetClipboard(const std::string& text) = 0;
     virtual std::optional<std::string> GetClipboard() = 0;
 
+    /**
+     * The last real input of the user in the main window: a key pressed or a button of the pointer, as the platform saw it
+     * (never an event the page makes up), by its serial number and how long ago (milliseconds). Nothing when it cannot be
+     * told. The clipboard takes calls only right after one (audit 7 #5).
+     */
+    struct UserInput {
+        uint64_t serial{0};
+        int64_t age_ms{0};
+    };
+    virtual std::optional<UserInput> LastUserInput() = 0;
+    /** For the tests (WEBUI_TEST_HOOKS): as if the user pressed a key now. */
+    virtual void NoteUserInput() = 0;
+
     /** A file chooser of the desktop, to open a file or to save one. */
     struct FileDialog {
         bool save{false};
@@ -196,6 +210,17 @@ public:
         //! Data shown apart, in a monospaced block, or nothing.
         std::string details{};
         dialog::Level level{dialog::Level::WARNING};
+        //! The facts decoded by the host, in order (dialog::Row): a destination before its amount, the fee, the total.
+        std::vector<dialog::Row> rows{};
+        //! A field for the passphrase of the wallet (an encrypted wallet that is locked): asked here, never by the page.
+        bool passphrase{false};
+        std::string passphrase_label{};
+        //! An error shown at the field (the passphrase typed before was wrong).
+        std::string error{};
+        //! The button that declines, when "Cancel" is not the word.
+        std::string cancel{};
+        //! What kind of question it is, for the limits of App::Confirm (audit 7 #8): the title when empty.
+        std::string kind{};
     };
 
     /**

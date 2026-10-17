@@ -5,13 +5,17 @@
 #ifndef BITCOIN_WEBUI_WALLETAPI_H
 #define BITCOIN_WEBUI_WALLETAPI_H
 
+#include <consensus/amount.h>
 #include <primitives/transaction.h>
 #include <sync.h>
 #include <univalue.h>
+#include <webui/guard.h>
+#include <webui/window.h>
 
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -34,11 +38,12 @@ class Bridge;
  *
  *   {"kind": "host", "method": "wallet.send.prepare", "params": {"wallet": "w1", ...}}
  *
- * Amounts are integers of satoshis. Methods that need the keys of an
- * encrypted wallet take an optional "passphrase": the wallet is unlocked for
- * the call and locked again after it (WalletModel::UnlockContext); without
- * one, a locked wallet answers with the code WALLET_UNLOCK_NEEDED (-13), and
- * the page asks for the passphrase and calls again.
+ * Amounts are integers of satoshis. What pays, signs or unlocks is confirmed in the dialog window of the host first
+ * (guard::AskFn, App::AskHost: outside the page, which can neither draw nor answer it), with the facts the host decoded
+ * from the transaction itself: each destination, whole, before its amount, the fee, the total, the wallet, the network
+ * (audit 7 #1). The passphrase of an encrypted wallet that is locked is typed in that dialog, never in the page: the
+ * wallet is unlocked for the call and locked again after it (WalletModel::UnlockContext). A declined question answers
+ * BRIDGE_CANCELLED.
  *
  * In a node without wallets (-disablewallet) every method that needs one answers WALLETS_DISABLED.
  *
@@ -53,7 +58,9 @@ class Bridge;
  *   wallets.restoreMigrate {file, name, passphrase?}; as wallets.migrate
  *   wallets.isEncrypted  {name}; bool
  *   wallet.info          {wallet}; {name, encrypted, locked, privateKeysDisabled, externalSigner, hd, ...}
- *   wallet.encrypt / wallet.changePassphrase / wallet.unlock / wallet.lock
+ *   wallet.encrypt / wallet.changePassphrase
+ *   wallet.unlock        {wallet, seconds}; unlocked for so long (walletpassphrase), the passphrase typed in the host's dialog
+ *   wallet.lock
  *   wallet.backup / wallet.exportWatchOnly {wallet, file}
  *   wallet.transactions  {wallet, txids? | latest?}; {height, hash, maturity, records: [...], gone?}
  *                        (all records; those of some transactions, and the ids no longer in the wallet; the newest)
@@ -64,22 +71,24 @@ class Bridge;
  *   wallet.bump.prepare / wallet.bump.commit / wallet.bump.psbt
  *   wallet.addresses     {wallet}; [{address, label, purpose, mine}]
  *   wallet.addressBook.add / .edit / .delete
- *   wallet.newAddress    {wallet, label, type, passphrase?}; address
+ *   wallet.newAddress    {wallet, label, type}; address
  *   wallet.displayAddress {wallet, address}
  *   wallet.requests / wallet.requests.add / wallet.requests.remove
  *   wallet.coins / wallet.coins.lock / wallet.coinControl.summary
  *   wallet.fee           {wallet, confTarget}; the smart fee of the send page
  *   wallet.available     {wallet, selected?}; the balance that can be sent
  *   wallet.checkChange   {wallet, address}; {valid, mine, label}
- *   wallet.send.prepare / wallet.send.commit / wallet.send.psbt / wallet.send.discard
+ *   wallet.send.prepare  {wallet, recipients: [{address, amount, label?, message?, subtractFee?} or {data}], ...}; the
+ *                        transaction made (not signed): {token, fee, recipients, total, ...}
+ *   wallet.send.commit   {wallet, token}; confirmed on the desktop, signed, sent: {txid} (or a PSBT for a multisig device)
+ *   wallet.send.psbt / wallet.send.discard
  *   send.isDust          {address, amount}; whether the output would be dust
- *   wallet.signMessage   {wallet, address, message, passphrase?}; {signature} or an error
- *   wallet.withKeys      {wallet, calls: [{method, params}], passphrase?}; [{result} or {error}]
- *                        (wallet RPC methods that need the keys, unlocked for the call alone)
+ *   wallet.signMessage   {wallet, address, message}; {signature} or an error (confirmed on the desktop)
+ *   (wallet RPC methods that spend, sign or need the keys: rpc.confirmed, confirm.h, through WithKeys)
  *   message.verify       {address, signature, message}; {ok, result, message}
  *   psbt.decode          {base64} or {fileBase64}; {psbt}
- *   wallet.psbt.open / wallet.psbt.sign {wallet?, psbt}; the state of the PSBT
- *   psbt.broadcast       {psbt}; {txid}
+ *   wallet.psbt.open / wallet.psbt.sign {wallet?, psbt, finalize?}; the state of the PSBT (signing confirmed on the desktop)
+ *   psbt.broadcast       {psbt}; {txid} (confirmed on the desktop)
  */
 class WalletApi
 {
@@ -91,7 +100,7 @@ public:
      */
     using FileFn = std::function<bool(const std::string& path, bool write)>;
 
-    explicit WalletApi(NodeFn node, FileFn may_use_file = {});
+    explicit WalletApi(NodeFn node, FileFn may_use_file = {}, guard::AskFn ask = {});
     ~WalletApi();
 
     WalletApi(const WalletApi&) = delete;
@@ -105,6 +114,20 @@ public:
 
     /** The methods, by name. */
     std::vector<std::string> Methods() const;
+
+    /**
+     * Run `run` with the keys of a wallet unlocked for it alone when they are needed (confirm::KeysFn): `dialog` asked
+     * first when `always`, and whenever the wallet is locked, with the passphrase typed in it (asked again when wrong,
+     * a few times). A note of the network fee the wallet sets is added for `fee_unknown`. Throws HostError: BRIDGE_CANCELLED
+     * on a no, PASSPHRASE_INCORRECT after the last wrong passphrase.
+     */
+    UniValue WithKeys(const std::string& wallet, Window::ConfirmDialog dialog, bool always, bool fee_unknown, const std::function<UniValue()>& run);
+
+    /** The network fee a wallet would pay for a transaction of so many virtual bytes, at its fee rate (confirm::FeeFn). */
+    std::optional<CAmount> FeeFor(const std::string& wallet, int64_t vsize);
+
+    /** How many times a wrong passphrase is asked again before the call fails. */
+    static constexpr int PASSPHRASE_TRIES{3};
 
     /** Error code of a wallet that must be unlocked for the call (RPC_WALLET_UNLOCK_NEEDED). */
     static constexpr int UNLOCK_NEEDED{-13};
@@ -124,6 +147,11 @@ private:
 
     NodeFn m_node;
     FileFn m_may_use_file;
+    guard::AskFn m_ask;
+    //! Asks the user (m_ask); declines without one.
+    dialog::Answer Ask(const Window::ConfirmDialog& dialog) const;
+    //! A loaded wallet by its name; throws -18.
+    std::unique_ptr<interfaces::Wallet> WalletNamed(const std::string& name) const;
     //! The wallet loader of the node; throws WALLETS_DISABLED in a node without one.
     interfaces::WalletLoader& Loader() const;
     //! The file of a call, if the user chose it (FileFn); throws otherwise.

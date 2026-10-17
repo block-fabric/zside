@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <webui/bridge.h>
+#include <webui/confirm.h>
 #include <webui/chainconfig.h>
 #include <webui/rpcpolicy.h>
 #include <webui/sidechainapi.h>
@@ -131,18 +132,25 @@ BOOST_AUTO_TEST_CASE(page_rpc_policy_of_the_chain)
 {
 #if WEBUI_SIDECHAIN
     // A sidechain: its peg and merged mining; none of the drivechain methods of the mainchain, no solo mining.
-    for (const char* m : {"getmainchaininfo", "getbmminfo", "listwithdrawals", "getwithdrawalbundle", "getdepositaddress", "createwithdrawal", "refundwithdrawal"}) {
+    for (const char* m : {"getmainchaininfo", "getbmminfo", "listwithdrawals", "getwithdrawalbundle", "getdepositaddress"}) {
         BOOST_CHECK_MESSAGE(webui::PageRpcPolicy(m).has_value(), m);
     }
-    // What spends the wallet of the mainchain node is a host method, confirmed on the desktop (bmm.set, bmm.request).
-    for (const char* m : {"acksidechain", "createsidechainproposal", "setwithdrawalvote", "createsidechaindeposit", "setgenerate", "getgenerate", "setbmm", "requestbmmblock"}) {
+    // What spends the wallet of the mainchain node is a host method, confirmed on the desktop (bmm.set, bmm.request); a
+    // withdrawal and its refund spend this wallet: confirmed on the desktop too (rpc.confirmed, audit 7 #1).
+    for (const char* m : {"acksidechain", "createsidechainproposal", "setwithdrawalvote", "createsidechaindeposit", "setgenerate", "getgenerate", "setbmm", "requestbmmblock",
+                          "createwithdrawal", "refundwithdrawal"}) {
         BOOST_CHECK_MESSAGE(!webui::PageRpcPolicy(m).has_value(), m);
     }
-    BOOST_CHECK(webui::KeyedWalletRpc("createwithdrawal"));
-    BOOST_CHECK(webui::KeyedWalletRpc("refundwithdrawal"));
-    BOOST_CHECK(!webui::KeyedWalletRpc("createsidechaindeposit"));
+    const auto& confirmed{webui::confirm::Methods()};
+    for (const char* m : {"createwithdrawal", "refundwithdrawal"}) {
+        BOOST_REQUIRE_MESSAGE(confirmed.contains(m), m);
+        BOOST_CHECK(confirmed.at(m).kind == webui::confirm::Method::Kind::SPEND);
+        BOOST_CHECK(!webui::KeyedWalletRpc(m));
+    }
+    BOOST_CHECK(!confirmed.contains("createsidechaindeposit"));
 #else
-    BOOST_CHECK(webui::PageRpcPolicy("acksidechain").has_value());
+    BOOST_CHECK(!webui::PageRpcPolicy("acksidechain").has_value());
+    BOOST_CHECK(webui::confirm::Methods().contains("acksidechain"));
     BOOST_CHECK(!webui::PageRpcPolicy("setbmm").has_value());
 #endif
 }

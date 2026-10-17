@@ -4,11 +4,12 @@
 import { t } from './i18n.svelte';
 import { closeDetail } from './detail.svelte';
 import { ask, errorText, inform, withUnlock, type Choice } from './dialogs.svelte';
+import { recipientLine } from './sendconfirm';
 import { nav } from './nav.svelte';
 import { host } from './rpc';
 import { prefs, toast, wallets } from './state.svelte';
 import { formatAmount, UNITS } from './units';
-import { nearestConfTarget, walletApi, walletDisplayName, type Prepared } from './wallet';
+import { nearestConfTarget, walletApi, type Prepared } from './wallet';
 import { current, refreshInfo } from './walletdata.svelte';
 
 export type QuickMode = 'send' | 'receive';
@@ -43,7 +44,7 @@ export async function quickSend(recipient: { address: string; label: string; amo
   const api = walletApi(wallet);
   let prepared: Prepared | null;
   try {
-    prepared = await withUnlock(wallet, (passphrase) => api.prepare([{ ...recipient, message: '' }], {}, quickFeeChoice(), passphrase));
+    prepared = await withUnlock(wallet, () => api.prepare([{ ...recipient, message: '' }], {}, quickFeeChoice()));
   } catch (e) {
     await inform(t('Send Coins'), errorText(e), 'warning');
     return null;
@@ -51,9 +52,8 @@ export async function quickSend(recipient: { address: string; label: string; amo
   if (!prepared) return null;
   const info = current.info ?? (await refreshInfo());
   const r = prepared.recipients[0];
-  let amount = formatAmount(r.amount, prefs.unit, { withUnit: true });
-  if (wallets.list.length > 1) amount = t("%1 from wallet '%2'", amount, walletDisplayName(wallet));
-  const line = r.label ? `${t("%1 to '%2'", amount, r.label)} (${r.address})` : t('%1 to %2', amount, r.address);
+  // The address first and whole, then the amount, then the label (audit 7 #4).
+  const line = recipientLine(r.address, r.amount, r.label, wallets.list.length > 1 ? wallet : null);
   const alternatives = UNITS.filter((u) => u.id !== prefs.unit)
     .map((u) => formatAmount(prepared.total, u.id, { withUnit: true }))
     .join(' or ');
@@ -78,7 +78,12 @@ export async function quickSend(recipient: { address: string; label: string; amo
     return null;
   }
   try {
-    const result = await api.commit(prepared.token);
+    // The desktop shows what the transaction pays and asks; a no there sends nothing.
+    const result = await withUnlock(wallet, () => api.commit(prepared.token));
+    if (!result) {
+      toast('info', t('Send Coins'), t('Nothing was sent: it was declined.'));
+      return null;
+    }
     if (!result.complete && result.psbt) {
       await host.copy(result.psbt).catch(() => undefined);
       await inform(t('Unsigned Transaction'), t('The PSBT has been copied to the clipboard. Open the Send page to save it.'), 'info');
