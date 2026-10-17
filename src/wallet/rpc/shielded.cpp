@@ -16,8 +16,12 @@
 
 #include <univalue.h>
 
+#include <algorithm>
+
 namespace wallet {
 namespace {
+//! The most transactions listshieldedtransactions returns at once (audit 7 E-ZS5).
+constexpr int MAX_SHIELDED_TXS_PAGE{1000};
 
 /**
  * The wallet of the request, its shielded account set up.
@@ -143,7 +147,9 @@ RPCMethod getshieldedbalance()
         {},
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
-            {RPCResult::Type::STR_AMOUNT, "available", "In notes in blocks: what can be spent"},
+            {RPCResult::Type::STR_AMOUNT, "available", "In notes in blocks"},
+            {RPCResult::Type::STR_AMOUNT, "spendable", strprintf("The part of available in notes %d blocks deep at least: what a payment can spend now "
+                                                                 "(a payment spends only notes that deep, so that its anchor does not name a note's block)", ANCHOR_CONFIRMATIONS)},
             {RPCResult::Type::STR_AMOUNT, "pending", "In notes waiting for a block"},
             {RPCResult::Type::NUM, "notes", "How many notes"},
             {RPCResult::Type::STR_AMOUNT, "watchonly", /*optional=*/true, "In notes of an account the wallet set up for another chain whose keys it cannot make (not in the above): watched, not spendable"},
@@ -159,6 +165,7 @@ RPCMethod getshieldedbalance()
     const ShieldedBalance balance{GetShieldedBalance(*pwallet)};
     UniValue result(UniValue::VOBJ);
     result.pushKV("available", ValueFromAmount(balance.available));
+    result.pushKV("spendable", ValueFromAmount(balance.spendable));
     result.pushKV("pending", ValueFromAmount(balance.pending));
     result.pushKV("notes", balance.notes);
     if (balance.watch_only > 0) result.pushKV("watchonly", ValueFromAmount(balance.watch_only));
@@ -258,7 +265,8 @@ RPCMethod sendshielded()
         "sendshielded",
         "Pay out of the wallet's shielded account, privately: to shielded addresses (with a memo each can read), or to\n"
         "transparent ones (which unshields: the amount and the address are then public, not where they came from).\n"
-        "The change goes back to the shielded account. The transaction has no transparent inputs." +
+        "The change goes back to the shielded account. The transaction has no transparent inputs.\n"
+        "It spends only notes 3 blocks deep at least, and leaves what casts planned (castcoins) hold back." +
         HELP_REQUIRING_PASSPHRASE,
         {
             {"amounts", RPCArg::Type::OBJ_USER_KEYS, RPCArg::Optional::NO, "The addresses and how much each",
@@ -266,7 +274,7 @@ RPCMethod sendshielded()
                 {"address", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "A shielded or transparent address, and the amount"},
             }},
             {"memo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "A memo for the shielded recipients, at most 512 bytes"},
-            {"fee", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "The fee (default: at the wallet's fee rate)"},
+            {"fee", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "The fee (default: at the wallet's fee rate); refused above -maxtxfee"},
         },
         TXID_RESULT,
         RPCExamples{HelpExampleCli("sendshielded", "'{\"zo1...\": 1.5}' \"for the coffee\"")},
@@ -291,7 +299,81 @@ RPCMethod sendshielded()
     }
     if (recipients.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "No recipients");
     const std::optional<CAmount> fee{request.params[2].isNull() ? std::nullopt : std::optional{AmountFromValue(request.params[2])}};
-    return TxResult(SendShielded(*pwallet, recipients, fee));
+    const CAmount hold_back{WITH_LOCK(pwallet->cs_wallet, return CastReserved(*pwallet))};
+    return TxResult(SendShielded(*pwallet, recipients, fee, /*subtract_fee=*/false, hold_back));
+},
+    };
+}
+
+RPCMethod estimateshieldedfee()
+{
+    return RPCMethod{
+        "estimateshieldedfee",
+        "What sendshielded, or unshieldcoins, would pay now: the fee, the notes it spends, and what each recipient gets.\n"
+        "Nothing is made, and the wallet may be locked. Give the fee returned to sendshielded or unshieldcoins (fee),\n"
+        "and the fee shown is the fee paid.",
+        {
+            {"amounts", RPCArg::Type::OBJ_USER_KEYS, RPCArg::Optional::NO, "The addresses and how much each",
+            {
+                {"address", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "A shielded or transparent address, and the amount (\"all\": one transparent address, as unshieldcoins all)"},
+            }},
+            {"subtractfeefromamount", RPCArg::Type::BOOL, RPCArg::Default{false}, "Take the fee out of the amount (one transparent recipient; always with \"all\")"},
+            {"fee", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "The fee (default: at the wallet's fee rate)"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::STR_AMOUNT, "fee", "The fee"},
+            {RPCResult::Type::NUM, "notes", "How many notes it spends"},
+            {RPCResult::Type::OBJ_DYN, "amounts", "What each address gets (the fee taken out where asked)", {
+                {RPCResult::Type::STR_AMOUNT, "address", ""},
+            }},
+            {RPCResult::Type::STR_AMOUNT, "total", "What leaves the shielded balance: the amounts and the fee"},
+        }},
+        RPCExamples{HelpExampleCli("estimateshieldedfee", "'{\"zo1...\": 1.5}'") + HelpExampleCli("estimateshieldedfee", "'{\"zs1...\": \"all\"}'")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    const auto pwallet{ReadyWallet(request, /*unlocked=*/false, /*rescan=*/false)};
+    if (!pwallet) return UniValue::VNULL;
+    bool subtract{!request.params[1].isNull() && request.params[1].get_bool()};
+    const std::optional<CAmount> fee{request.params[2].isNull() ? std::nullopt : std::optional{AmountFromValue(request.params[2])}};
+    const CAmount hold_back{WITH_LOCK(pwallet->cs_wallet, return CastReserved(*pwallet))};
+    std::vector<ShieldedRecipient> recipients;
+    const auto keys{request.params[0].getKeys()};
+    for (const std::string& key : keys) {
+        ShieldedRecipient r;
+        const UniValue& value{request.params[0][key]};
+        if (value.isStr() && value.get_str() == "all") {
+            if (keys.size() != 1 || DecodeShieldedAddress(key)) throw JSONRPCError(RPC_INVALID_PARAMETER, "\"all\" is for one transparent address alone");
+            r.amount = WITH_LOCK(pwallet->cs_wallet, return GetShieldedBalance(*pwallet).spendable) - hold_back;
+            if (r.amount <= 0) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Nothing in the shielded account that can be spent yet");
+            subtract = true;
+        } else {
+            r.amount = AmountFromValue(value);
+        }
+        if (const auto shielded{DecodeShieldedAddress(key)}) {
+            r.shielded = *shielded;
+        } else {
+            const CTxDestination dest{DecodeDestination(key)};
+            if (!IsValidDestination(dest)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Not an address: " + key);
+            r.script = GetScriptForDestination(dest);
+        }
+        recipients.push_back(std::move(r));
+    }
+    if (recipients.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "No recipients");
+    const auto result{EstimateShielded(*pwallet, recipients, fee, subtract, hold_back)};
+    if (const auto* error{std::get_if<std::string>(&result)}) throw JSONRPCError(RPC_WALLET_ERROR, *error);
+    const ShieldedEstimate& estimate{std::get<ShieldedEstimate>(result)};
+    UniValue amounts(UniValue::VOBJ);
+    CAmount total{estimate.fee};
+    for (size_t i{0}; i < keys.size(); ++i) {
+        amounts.pushKV(keys[i], ValueFromAmount(estimate.amounts[i]));
+        total += estimate.amounts[i];
+    }
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("fee", ValueFromAmount(estimate.fee));
+    obj.pushKV("notes", static_cast<uint64_t>(estimate.notes));
+    obj.pushKV("amounts", std::move(amounts));
+    obj.pushKV("total", ValueFromAmount(total));
+    return obj;
 },
     };
 }
@@ -355,9 +437,10 @@ RPCMethod unshieldcoins()
         "For amounts nobody can link to what went in, see castcoins." +
         HELP_REQUIRING_PASSPHRASE,
         {
-            {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "How much, or \"all\" for the whole shielded balance in blocks"},
+            {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "How much, or \"all\" for the whole shielded balance that can be spent (notes 3 blocks deep at least), less what casts planned hold back"},
             {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "A transparent address (default: a new one of the wallet)"},
             {"subtractfeefromamount", RPCArg::Type::BOOL, RPCArg::Default{false}, "Take the fee out of the amount (always with \"all\")"},
+            {"fee", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "The fee (default: at the wallet's fee rate; see estimateshieldedfee); refused above -maxtxfee"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {
             {RPCResult::Type::STR_HEX, "txid", "The transaction"},
@@ -372,10 +455,11 @@ RPCMethod unshieldcoins()
     const bool all{request.params[0].isStr() && request.params[0].get_str() == "all"};
     bool subtract{all || (!request.params[2].isNull() && request.params[2].get_bool())};
     CAmount amount;
+    const CAmount hold_back{WITH_LOCK(pwallet->cs_wallet, return CastReserved(*pwallet))};
     if (all) {
         LOCK(pwallet->cs_wallet);
-        amount = GetShieldedBalance(*pwallet).available;
-        if (amount <= 0) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Nothing in the shielded account in blocks yet");
+        amount = GetShieldedBalance(*pwallet).spendable - hold_back;
+        if (amount <= 0) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf("Nothing in the shielded account that can be spent yet (notes %d blocks deep, less what casts planned hold back)", ANCHOR_CONFIRMATIONS));
     } else {
         amount = AmountFromValue(request.params[0]);
     }
@@ -393,7 +477,8 @@ RPCMethod unshieldcoins()
     ShieldedRecipient r;
     r.script = GetScriptForDestination(dest);
     r.amount = amount;
-    const auto result{SendShielded(*pwallet, {r}, std::nullopt, subtract)};
+    const std::optional<CAmount> fee{request.params[3].isNull() ? std::nullopt : std::optional{AmountFromValue(request.params[3])}};
+    const auto result{SendShielded(*pwallet, {r}, fee, subtract, hold_back)};
     if (const auto* error{std::get_if<std::string>(&result)}) throw JSONRPCError(RPC_WALLET_ERROR, *error);
     const CTransactionRef& tx{std::get<CTransactionRef>(result)};
     UniValue obj(UniValue::VOBJ);
@@ -413,7 +498,8 @@ RPCMethod listshieldedtransactions()
         "listshieldedtransactions",
         "The transactions of the wallet's shielded account, newest first: what each received, spent and paid.",
         {
-            {"count", RPCArg::Type::NUM, RPCArg::Default{50}, "How many"},
+            {"count", RPCArg::Type::NUM, RPCArg::Default{50}, strprintf("How many, at most %d (more is read as %d)", MAX_SHIELDED_TXS_PAGE, MAX_SHIELDED_TXS_PAGE)},
+            {"skip", RPCArg::Type::NUM, RPCArg::Default{0}, "How many of the newest to skip (pages)"},
         },
         RPCResult{RPCResult::Type::ARR, "", "", {{RPCResult::Type::OBJ, "", "",
         {
@@ -438,7 +524,10 @@ RPCMethod listshieldedtransactions()
 {
     const auto pwallet{ReadyWallet(request, /*unlocked=*/false, /*rescan=*/false)};
     if (!pwallet) return UniValue::VNULL;
-    const int count{request.params[0].isNull() ? 50 : request.params[0].getInt<int>()};
+    // A page at most: each one is read again (its bundle parsed) under the wallet's lock.
+    const int count{std::clamp(request.params[0].isNull() ? 50 : request.params[0].getInt<int>(), 0, MAX_SHIELDED_TXS_PAGE)};
+    const int skip{request.params[1].isNull() ? 0 : request.params[1].getInt<int>()};
+    if (skip < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "skip must not be negative");
     LOCK(pwallet->cs_wallet);
     struct Entry {
         const CWalletTx* wtx;
@@ -471,7 +560,8 @@ RPCMethod listshieldedtransactions()
     for (const auto& entry : entries) sorted.push_back(&entry);
     std::sort(sorted.begin(), sorted.end(), [](const auto* a, const auto* b) { return a->second.wtx->GetTxTime() > b->second.wtx->GetTxTime(); });
     UniValue result(UniValue::VARR);
-    for (const auto* entry : sorted) {
+    for (size_t i{static_cast<size_t>(skip)}; i < sorted.size(); ++i) {
+        const auto* entry{sorted[i]};
         if (result.size() >= static_cast<size_t>(count)) break;
         const auto& [txid, e] = *entry;
         const CTransaction& tx{*e.wtx->GetTx()};
@@ -515,11 +605,12 @@ RPCMethod meltcoins()
     return RPCMethod{
         "meltcoins",
         "Melt: plan to shield every transparent coin of the wallet (in blocks, not locked), each one alone and whole,\n"
-        "at a random height over the next blocks, so that no two of them are seen together. The coins are locked\n"
-        "until then. The wallet carries out the plan as the blocks come: it must be running, and unlocked." +
+        "at a random height over the next blocks, one coin a block at most, so that no two of them go in one transaction\n"
+        "or one block. Their timing can still hint that they are one wallet's, on a quiet chain: use a large spread.\n"
+        "The coins are locked until then. The wallet carries out the plan as the blocks come: it must be running, and unlocked." +
         HELP_REQUIRING_PASSPHRASE,
         {
-            {"spread", RPCArg::Type::NUM, RPCArg::Default{36}, "Over how many blocks the coins go"},
+            {"spread", RPCArg::Type::NUM, RPCArg::Default{36}, strprintf("Over how many blocks the coins go (at most %d; more if there are more coins)", meltcast::MAX_SPREAD)},
         },
         RPCResult{RPCResult::Type::ARR, "", "The steps planned", {JOB_RESULT}},
         RPCExamples{HelpExampleCli("meltcoins", "") + HelpExampleCli("meltcoins", "144")},
@@ -540,12 +631,15 @@ RPCMethod castcoins()
         "castcoins",
         strprintf("Cast: plan to unshield an amount as standard bills, %s CHN times a power of two, each to a new transparent\n"
         "address of the wallet, at the heights every wallet uses for that bill (a window of %d blocks, once a period).\n"
-        "What is below the smallest bill stays in the pool. The fees come out of the pool too.\n"
+        "What is below the smallest bill stays in the pool. The fees come out of the pool too: %s a bill, the same in every\n"
+        "wallet. A bill spends notes %d blocks deep at least (not before; a melt just made waits). A wallet whose notes are\n"
+        "fragmented spends more than one note for a bill, which shows; and bills of one cast can still be summed up on a\n"
+        "quiet chain: use a larger spread.\n"
         "The wallet carries out the plan as the blocks come: it must be running, and unlocked, then.",
-        FormatMoney(meltcast::BILL_UNIT), meltcast::WINDOW),
+        FormatMoney(meltcast::BILL_UNIT), meltcast::WINDOW, FormatMoney(meltcast::CastFee()), ANCHOR_CONFIRMATIONS),
         {
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "How much"},
-            {"spread", RPCArg::Type::NUM, RPCArg::Default{1}, "Each bill goes at one of its next spread + 1 windows, at random"},
+            {"spread", RPCArg::Type::NUM, RPCArg::Default{1}, strprintf("Each bill goes at one of its next spread + 1 windows, at random (spread at most %d)", meltcast::MAX_SPREAD)},
         },
         RPCResult{RPCResult::Type::ARR, "", "The steps planned, a bill each", {JOB_RESULT}},
         RPCExamples{HelpExampleCli("castcoins", "1.5")},

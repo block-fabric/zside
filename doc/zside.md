@@ -29,17 +29,23 @@ nobody can tell they belong together.
 
 The pool hides who pays whom, but what goes in and what comes out are public, and can link the
 two: 13.47 shielded and 13.47 unshielded an hour later. Melt & cast, Paul Sztorc's design
-(https://www.truthcoin.info/blog/zside-meltcast/), leaves nothing to link. It is a wallet feature:
-nothing of it is a rule of the chain.
+(https://www.truthcoin.info/blog/zside-meltcast/), leaves much less to link. It is a wallet feature:
+nothing of it is a rule of the chain. It is not perfect: on a quiet chain, the timing of one wallet's
+melts, the number of notes a cast spends, or the sum of one plan's bills can still hint at what
+belongs together. A larger spread helps.
 
 - **Melt** (`meltcoins ( spread )`): every transparent coin of the wallet in a block (of at least
   four times its fee) is shielded alone and whole: the coin is the only input of its transaction,
   the fee comes out of it, and there is no change. Each goes at a random height over the next
-  `spread` blocks (36 by default). The coins are locked until they go, so nothing else spends them.
+  `spread` blocks (36 by default, at most 100000), **one coin a block at most** (the heights are drawn
+  without replacement; with more coins than blocks, the spread grows). The coins are locked until
+  they go, so nothing else spends them.
 - **Cast** (`castcoins amount ( spread )`): the amount comes out as **bills**, 0.01 CHN times a
   power of two (0.01, 0.02, 0.04 … 10485.76): its binary digits, in hundredths. What is below
   0.01 stays shielded. Each bill goes to a new transparent address of the wallet, no two to one,
-  with the fee out of the pool.
+  with the fee out of the pool: the **same fee in every wallet** (2 sat/vB for a cast of two actions,
+  `meltcast::CastFee`), since a cast's fee is public. A bill spends notes 3 blocks deep at least,
+  so a cast planned right after a melt waits until the melted notes are that deep.
 - **Common timings**: bill *k* goes out only in its **window**: with the tip at a height *h* where
   (*h* − 7*k*) mod 144 is below 3 (a period of 144 blocks, 12 on regtest). Every wallet casts that
   bill in the same blocks, so one cast of 0.64 looks like any other. A cast picks one of its bill's
@@ -87,6 +93,22 @@ one bill at a time.
 - A spend in the mempool whose anchor a reorg took away leaves it once the reorg is done (not on
   the way, against a state in between); the wallet then abandons it, and its notes are the
   account's again.
+- A payment spends only notes **3 blocks deep** at least (`ANCHOR_CONFIRMATIONS`), and its anchor is
+  always the root of the block 2 under the tip: the same for every payment of that height. The
+  anchor is public: one at the block of a note just received would tell which block the spent note
+  came from (and link a cast to the melt before it). `getshieldedbalance` says what is `spendable`
+  now; the rest waits a few blocks.
+- `sendshielded` and `unshieldcoins` leave in the account what casts planned hold back
+  (`cancelmeltcast` frees it), and refuse a fee given above `-maxtxfee`.
+- `estimateshieldedfee` says, before a payment, what it would pay (the fee, the notes, what each
+  recipient gets), with the wallet locked or not; given back as the payment's `fee`, the fee shown
+  is the fee paid (the app's confirmations do so).
+- A transaction without transparent inputs is final whatever its `nLockTime`, by the rules of the
+  chain (there is no input to hold it back, and no expiry height). As a policy, nodes keep it out of
+  the mempool until its lock time is met (`non-final-shielded`), so a lock time is not silently
+  ignored; a miner that does not follow the policy may still mine it early. The wallet uses lock
+  time 0.
+- `listshieldedtransactions` returns 1000 transactions at most at once (`skip` pages).
 - A payment spends at most as many notes as a transaction the network relays holds (about 30);
   past that the wallet says so: pay less, or join notes first by paying the account itself.
 - Melt & cast run on a thread of the wallets of their own (not the scheduler's, which runs the
@@ -113,7 +135,7 @@ one bill at a time.
 
 Node: `getshieldedinfo`.
 Wallet: `getshieldedaddress`, `getshieldedbalance`, `listshieldednotes`, `shieldcoins`,
-`sendshielded`, `listshieldedtransactions`; `meltcoins`, `castcoins`, `listmeltcast`, `cancelmeltcast`.
+`sendshielded`, `estimateshieldedfee`, `unshieldcoins`, `bumpshieldedfee`, `listshieldedtransactions`; `meltcoins`, `castcoins`, `listmeltcast`, `cancelmeltcast`.
 
 ## Building
 

@@ -19,6 +19,8 @@ from test_framework.util import assert_equal, assert_greater_than, assert_raises
 CAST_PERIOD = 12
 WINDOW = 3
 BILL_UNIT = Decimal("0.01")
+# The fee of every cast of one bill (meltcast::CastFee): 2 sat/vB for a bundle of two actions and an output.
+CAST_FEE = Decimal("0.00018522")
 
 
 class ZSideTest(SidechainTest):
@@ -31,6 +33,11 @@ class ZSideTest(SidechainTest):
     def mine_txs(self):
         self.sync_mempools()
         return self.nodes[0].getblock(self.bmm(), 2)
+
+    def deepen(self):
+        """Two blocks more: the notes of the last block are 3 deep, as a payment spends them (ANCHOR_CONFIRMATIONS)."""
+        self.mine_txs()
+        self.mine_txs()
 
     def run_sidechain_test(self):
         main = self.main
@@ -61,7 +68,13 @@ class ZSideTest(SidechainTest):
         assert_equal(len(tx["vin"]) > 0, True)
         assert_equal(side.getshieldedbalance()["pending"], Decimal(5))
         self.mine_txs()
-        assert_equal(side.getshieldedbalance(), {"available": Decimal(5), "pending": Decimal(0), "notes": 1})
+        assert_equal(side.getshieldedbalance(), {"available": Decimal(5), "spendable": Decimal(0), "pending": Decimal(0), "notes": 1})
+        # A payment spends only notes 3 blocks deep (audit 7 E-ZS1): its anchor never names a note's block.
+        assert_raises_rpc_error(-4, "Not enough shielded funds deep enough yet: 0.00 can be spent (notes 3 blocks deep), 5.00 in the last blocks",
+                                side.sendshielded, {other_address: 2})
+        self.mine_txs()
+        self.mine_txs()
+        assert_equal(side.getshieldedbalance(), {"available": Decimal(5), "spendable": Decimal(5), "pending": Decimal(0), "notes": 1})
         assert_equal(side.getshieldedinfo()["pool"], Decimal(5))
         assert_greater_than(balance_before - 5, side.getbalance() - Decimal("0.01"))
         notes = side.listshieldednotes()
@@ -92,6 +105,7 @@ class ZSideTest(SidechainTest):
         assert_equal(info["index"]["root"], info["root"])
 
         self.log.info("Unshield to a transparent address")
+        self.deepen()
         taddress = other.getnewaddress()
         txid = other.sendshielded({taddress: Decimal("1.5")})["txid"]
         self.mine_txs()
@@ -139,6 +153,7 @@ class ZSideTest(SidechainTest):
         self.run_conflict_test()
         self.run_rescan_test()
         self.run_key_version_test()
+        self.run_audit7_test()
         self.run_meltcast_test()
         self.run_unshield_test()
 
@@ -190,22 +205,26 @@ class ZSideTest(SidechainTest):
         self.mine_txs()
         assert_equal(side.getrawmempool(), [])
         self.disconnect_nodes(0, 1)
-        # On the first node's branch: a coin shielded in a block, then a spend of every note, the new
-        # one too: its anchor is the tree that block left, which the other branch has only at its second block.
+        # On the first node's branch: a coin shielded in a block, two blocks more, then a spend of every
+        # note, the new one too (3 deep): its anchor is the tree that block left, which the other branch
+        # has only at its second block.
         shield = side.shieldcoins(Decimal("0.5"))["txid"]
         shield_hex = side.gettransaction(shield)["hex"]
-        self.bmm(node=side, expect=False)
+        for _ in range(3):
+            self.bmm(node=side, expect=False)
         assert_equal(side.getrawmempool(), [])
-        available = side.getshieldedbalance()["available"]
+        available = side.getshieldedbalance()["spendable"]
+        assert_equal(available, side.getshieldedbalance()["available"])
         spend = side.sendshielded({side.getshieldedaddress(True): available - Decimal("0.01")})["txid"]
         assert spend in side.getrawmempool()
         # The other branch: a block without the coin, one with it (the tree the first node's block left),
-        # and one more, the longer branch.
+        # and two more, the longer branch.
         self.bmm(node=other, expect=False)
         # (The marker carries what goes into the pool: an unspendable output, allowed here.)
         other.sendrawtransaction(shield_hex, 0, 1)
         self.bmm(node=other, expect=False)
         assert shield in other.getblock(other.getbestblockhash())["tx"]
+        self.bmm(node=other, expect=False)
         self.bmm(node=other, expect=False)
         self.connect_nodes(0, 1)
         self.sync_blocks()
@@ -220,6 +239,7 @@ class ZSideTest(SidechainTest):
         side, other = self.nodes
         self.log.info("A shielded transaction is fee-bumped: the new one spends the same notes, and replaces it")
         self.mine_txs()
+        self.deepen()
         before = side.getshieldedbalance()
         assert_equal(before["pending"], 0)
         to = other.getshieldedaddress(True)
@@ -261,9 +281,11 @@ class ZSideTest(SidechainTest):
         self.log.info("A fee bump that takes more notes pays the replacement fee of its new size")
         other.createwallet("bumper")
         bumper = other.get_wallet_rpc("bumper")
+        self.deepen()
         # Three notes of 0.3.
         side.sendshielded({bumper.getshieldedaddress(True): Decimal("0.3") for _ in range(3)})
         self.mine_txs()
+        self.deepen()
         assert_equal(bumper.getshieldedbalance()["available"], Decimal("0.9"))
         # Two of them, exactly: a high fee, no change.
         txid = bumper.sendshielded({side.getshieldedaddress(): Decimal("0.599")}, None, Decimal("0.001"))["txid"]
@@ -288,6 +310,7 @@ class ZSideTest(SidechainTest):
         self.log.info("Payments proved at the same time spend different notes, and the wallet answers meanwhile")
         side.sendshielded({side.getshieldedaddress(True): Decimal("0.05") for _ in range(2)})
         self.mine_txs()
+        self.deepen()
         user, password = get_auth_cookie(side.datadir_path, side.chain)
         url = f"http://{user}:{password}@127.0.0.1:{rpc_port(side.index)}/wallet/{self.default_wallet_name}"
         to = other.getshieldedaddress(True)
@@ -324,6 +347,7 @@ class ZSideTest(SidechainTest):
         other.restorewallet("copy", backup)
         copy = other.get_wallet_rpc("copy")
         other_wallet = other.get_wallet_rpc(self.default_wallet_name)
+        self.deepen()
         txid = side.sendshielded({other_wallet.getshieldedaddress(): Decimal("0.1")})["txid"]
         self.sync_mempools()
         assert_equal(copy.gettransaction(txid)["txid"], txid)
@@ -373,6 +397,7 @@ class ZSideTest(SidechainTest):
         other.restorewallet("unlocked", backup)
         unlocked = other.get_wallet_rpc("unlocked")
         unlocked.walletpassphrase("secret", 600)
+        self.deepen()
         side.sendshielded({unlocked.getshieldedaddress(): Decimal("0.3")}, "to a locked wallet")
         self.mine_txs()
         assert_equal(unlocked.getshieldedbalance()["available"], Decimal("0.3"))
@@ -398,8 +423,10 @@ class ZSideTest(SidechainTest):
         other.createwallet("old")
         old = other.get_wallet_rpc("old")
         old_address = old.getshieldedaddress()
+        self.deepen()
         side.sendshielded({old_address: Decimal("0.2")}, "to a key of version 1")
         self.mine_txs()
+        self.deepen()
         assert_equal(old.getshieldedbalance()["available"], Decimal("0.2"))
         descriptors = []
         for d in old.listdescriptors(True)["descriptors"]:
@@ -457,6 +484,85 @@ class ZSideTest(SidechainTest):
         assert_raises_rpc_error(-6, "Nothing in the shielded account", other.unshieldcoins, "all")
         self.check_in_sync()
 
+    def run_audit7_test(self):
+        side, other = self.nodes
+        other.createwallet("holder")
+        holder = other.get_wallet_rpc("holder")
+        roots = {}
+
+        def mine():
+            self.mine_txs()
+            roots[side.getblockcount()] = side.getshieldedinfo()["root"]
+
+        self.log.info("A payment spends only notes 3 blocks deep, anchored 2 blocks under the tip: the anchor names no note's block (E-ZS1)")
+        self.deepen()
+        side.sendshielded({holder.getshieldedaddress(True): Decimal("0.3") for _ in range(2)})
+        for _ in range(3):
+            mine()
+        side.sendshielded({holder.getshieldedaddress(True): Decimal("0.4")})
+        mine()
+        tip = side.getblockcount()
+        assert roots[tip] != roots[tip - 1]
+        balance = holder.getshieldedbalance()
+        assert_equal((balance["available"], balance["spendable"]), (Decimal("1.0"), Decimal("0.6")))
+        # The newest note is needed: not before it is 3 deep.
+        assert_raises_rpc_error(-4, "Not enough shielded funds deep enough yet: 0.60 can be spent (notes 3 blocks deep), 0.40 in the last blocks",
+                                holder.sendshielded, {side.getshieldedaddress(): Decimal("0.7")})
+        # The fee shown before (estimateshieldedfee, E-ZS3) is the fee paid.
+        pay_to = side.getshieldedaddress()
+        estimate = holder.estimateshieldedfee({pay_to: Decimal("0.1")})
+        assert_equal((estimate["notes"], estimate["amounts"]), (1, {pay_to: Decimal("0.1")}))
+        assert_equal(estimate["total"], Decimal("0.1") + estimate["fee"])
+        paid = holder.sendshielded({pay_to: Decimal("0.1")}, None, estimate["fee"])["txid"]
+        assert_equal(other.getmempoolentry(paid)["fees"]["base"], estimate["fee"])
+        raw = holder.getrawtransaction(paid)
+        assert roots[tip - 2] in raw
+        assert roots[tip] not in raw
+        mine()
+
+        self.log.info("A fee given is refused above -maxtxfee (E-ZS3)")
+        assert_raises_rpc_error(-4, "The fee of 1.00 is more than the wallet pays (-maxtxfee)", holder.sendshielded, {side.getshieldedaddress(): Decimal("0.01")}, None, 1)
+
+        self.log.info("Payments leave what casts planned hold back (E-ZS7)")
+        self.deepen()
+        spendable = holder.getshieldedbalance()["spendable"]
+        assert_equal(spendable, holder.getshieldedbalance()["available"])
+        holder.castcoins(Decimal("0.16"), 5)
+        assert_raises_rpc_error(-4, "Not enough shielded funds besides the casts planned: 0.16 of the", holder.sendshielded, {side.getshieldedaddress(): spendable - Decimal("0.1")})
+        # All of it, as the confirmation shows it: the fee and what the address gets, estimated first.
+        to = holder.getnewaddress()
+        estimate = holder.estimateshieldedfee({to: "all"})
+        assert_equal(estimate["total"], spendable - Decimal("0.16"))
+        res = holder.unshieldcoins(estimate["total"], to, True, estimate["fee"])
+        assert_equal(res["amount"], estimate["amounts"][to])
+        assert_equal(res["amount"], estimate["total"] - estimate["fee"])
+        assert_greater_than(spendable - Decimal("0.16"), res["amount"])
+        assert_greater_than(res["amount"], spendable - Decimal("0.17"))
+        assert_equal(holder.cancelmeltcast("all"), 1)
+        self.mine_txs()
+        other.unloadwallet("holder")
+
+        self.log.info("The activity comes in pages of 1000 at most (E-ZS5)")
+        everything = side.listshieldedtransactions(2147483647)
+        assert 0 < len(everything) <= 1000
+        assert_equal(side.listshieldedtransactions(3, 1), side.listshieldedtransactions(4)[1:])
+        assert_equal(side.listshieldedtransactions(5, len(everything)), [])
+        assert_raises_rpc_error(-8, "skip must not be negative", side.listshieldedtransactions, 1, -1)
+
+        self.log.info("A transaction without transparent inputs waits for its lock time in the mempool (policy, E-ZS6)")
+        tx = tx_from_hex(raw)
+        tx.nLockTime = side.getblockcount() + 10
+        res = side.testmempoolaccept([tx.serialize().hex()])[0]
+        assert_equal(res["reject-reason"], "non-final-shielded")
+        tx.nLockTime = int(time.time()) + 3600 * 24
+        res = side.testmempoolaccept([tx.serialize().hex()])[0]
+        assert_equal(res["reject-reason"], "non-final-shielded")
+        # Met: judged on the rest (here, a bundle signed for another lock time).
+        tx.nLockTime = 1
+        res = side.testmempoolaccept([tx.serialize().hex()])[0]
+        assert res["reject-reason"] != "non-final-shielded", res
+        self.check_in_sync()
+
     def run_meltcast_test(self):
         side, other = self.nodes
 
@@ -476,16 +582,20 @@ class ZSideTest(SidechainTest):
         # Locked: nothing else spends them meanwhile, and a second melt plans nothing.
         assert_raises_rpc_error(-4, "No transparent coin to melt", side.meltcoins, 0)
         before = side.getshieldedbalance()["available"]
+        # One coin a block (audit 7 E-ZS2): with spread 0, the n coins go over the next n blocks, one each.
+        for k in range(1, len(coins) + 1):
+            self.mine_txs()
+            self.wait_until(lambda: sum(j["status"] == "sent" for j in side.listmeltcast()) == k, timeout=120)
         self.mine_txs()
-        self.wait_until(lambda: all(j["status"] == "sent" for j in side.listmeltcast()), timeout=120)
+        melt_blocks = [side.gettransaction(j["txid"])["blockhash"] for j in side.listmeltcast()]
+        assert_equal(len(set(melt_blocks)), len(coins))
         for job in side.listmeltcast():
-            tx = side.getrawtransaction(job["txid"], True)
+            tx = side.gettransaction(job["txid"], True, True)["decoded"]
             # One input, the coin; one output, the marker: no change.
             assert_equal(len(tx["vin"]), 1)
             assert_equal(f"{tx['vin'][0]['txid']}:{tx['vin'][0]['vout']}", job["coin"])
             assert_equal(len(tx["vout"]), 1)
         assert_equal(side.listlockunspent(), [])
-        self.mine_txs()
         melted = side.getshieldedbalance()["available"] - before
         assert_greater_than(sum(coins.values()), melted)
         assert_greater_than(melted, sum(coins.values()) - Decimal("0.01"))
@@ -535,6 +645,9 @@ class ZSideTest(SidechainTest):
             bill = int((job["amount"] / BILL_UNIT)).bit_length() - 1
             sent_at = wtx["blockheight"] - 1
             assert_greater_than(WINDOW, (sent_at - bill * 7) % CAST_PERIOD)
+            # The fee every wallet pays for a cast (audit 7 E-ZS2): 2 sat/vB for a cast of two actions.
+            activity = [t for t in side.listshieldedtransactions(1000) if t["txid"] == job["txid"]][0]
+            assert_equal(activity["unshielded"] - job["amount"], CAST_FEE)
         # No two bills to one address.
         outs = [o["scriptPubKey"]["address"] for j in side.listmeltcast() if j["id"] in cast_ids for o in side.gettransaction(j["txid"], True, True)["decoded"]["vout"] if o["value"] > 0]
         assert_equal(len(set(outs)), len(outs))

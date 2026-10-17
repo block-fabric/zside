@@ -182,6 +182,20 @@ bool CheckFinalTxAtTip(const CBlockIndex& active_chain_tip, const CTransaction& 
     return IsFinalTx(tx, nBlockHeight, nBlockTime);
 }
 
+/**
+ * Policy (zSide, audit 7 E-ZS6): a transaction without transparent inputs (shielded only) is final
+ * by consensus whatever its nLockTime (IsFinalTx: no input's nSequence to hold it back), and has no
+ * expiry height. The mempool keeps it back until its nLockTime is met, as it would were it an
+ * input's: a lock time is then not silently ignored by the nodes that follow the policy. (Making it
+ * a rule of the chain would need an activation height; the wallet always uses lock time 0.)
+ */
+static bool ShieldedLockTimeMetAtTip(const CBlockIndex& active_chain_tip, const CTransaction& tx)
+{
+    if (!tx.vin.empty() || tx.nLockTime == 0) return true;
+    const int64_t cutoff{tx.nLockTime < LOCKTIME_THRESHOLD ? int64_t{active_chain_tip.nHeight} + 1 : active_chain_tip.GetMedianTimePast()};
+    return int64_t{tx.nLockTime} < cutoff;
+}
+
 namespace {
 /**
  * A helper which calculates heights of inputs of a given transaction.
@@ -362,6 +376,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
         // The transaction must be final.
         if (!CheckFinalTxAtTip(*Assert(m_chain.Tip()), tx)) return true;
+        if (!ShieldedLockTimeMetAtTip(*Assert(m_chain.Tip()), tx)) return true;
 
         const LockPoints& lp = it->GetLockPoints();
         // CheckSequenceLocksAtTip checks if the transaction will be final in the next block to be
@@ -910,6 +925,9 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // be mined yet.
     if (!CheckFinalTxAtTip(*Assert(m_active_chainstate.m_chain.Tip()), tx)) {
         return state.Invalid(TxValidationResult::TX_PREMATURE_SPEND, "non-final");
+    }
+    if (!ShieldedLockTimeMetAtTip(*Assert(m_active_chainstate.m_chain.Tip()), tx)) {
+        return state.Invalid(TxValidationResult::TX_PREMATURE_SPEND, "non-final-shielded");
     }
 
     if (m_pool.exists(tx.GetWitnessHash())) {
