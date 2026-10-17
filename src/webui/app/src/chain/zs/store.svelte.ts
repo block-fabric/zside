@@ -9,6 +9,7 @@ import { BridgeError } from '../../lib/bridge';
 import { every } from '../../lib/poll';
 import { host, rpc } from '../../lib/rpc';
 import { node, wallets } from '../../lib/state.svelte';
+import { coinsToSats, satsToCoins } from '../../lib/units';
 import { WalletError } from '../../lib/wallet';
 import { memosOf, proofEstimate, type NoteRaw, type PlanStep, type PoolInfo, type ShieldedBalanceRaw, type ShieldedTxRaw } from './model';
 
@@ -16,8 +17,23 @@ import { memosOf, proofEstimate, type NoteRaw, type PlanStep, type PoolInfo, typ
 export const HISTORY_COUNT = 500;
 /** How many the user can choose to read (user decision, 2026-10-15); 0 is all of them. */
 export const HISTORY_POINTS = [25, 50, 100, 250, 500, 1000, 10000, 25000, 0] as const;
-/** The count asked of the node for "all" (listshieldedtransactions takes a count). */
-const ALL_HISTORY = 2147483647;
+/**
+ * The most listshieldedtransactions returns at once (the node's MAX_SHIELDED_TXS_PAGE): a longer history is read in pages
+ * (skip), and only when something changed (a block, a transaction of the wallet), not every few seconds (audit 7 E-ZS5:
+ * "All" rebuilt everything under the wallet's lock every 5 s).
+ */
+export const HISTORY_PAGE = 1000;
+
+/** The history of the account, newest first: `count` of it (0: all), read a page at a time. */
+async function readHistory(wallet: string, count: number): Promise<ShieldedTxRaw[]> {
+  const out: ShieldedTxRaw[] = [];
+  for (;;) {
+    const want = count === 0 ? HISTORY_PAGE : Math.min(HISTORY_PAGE, count - out.length);
+    const page = await rpc.raw<ShieldedTxRaw[]>('listshieldedtransactions', [want, out.length], { wallet });
+    out.push(...page);
+    if (page.length < want || (count !== 0 && out.length >= count)) return out;
+  }
+}
 
 /**
  * What the pages ask of the account beyond the usual (audit port-2 #10): more of its history ("Show older",
@@ -76,12 +92,13 @@ let lastWallet: string | null | undefined = undefined;
 let lastTx = -1;
 let running: Promise<void> | null = null;
 let again = false;
+let againFull = false;
 
 function sameJson(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-async function round(): Promise<void> {
+async function round(light: boolean): Promise<void> {
   const wallet = wallets.current;
   // The pool is of the chain: read with or without a wallet.
   const pool = rpc.raw<PoolInfo>('getshieldedinfo', []).catch(() => null);
@@ -93,7 +110,8 @@ async function round(): Promise<void> {
   const opts = { wallet };
   const [balance, txs, notes, plan, address, balances, poolInfo] = await Promise.allSettled([
     rpc.raw<ShieldedBalanceRaw>('getshieldedbalance', [], opts),
-    rpc.raw<ShieldedTxRaw[]>('listshieldedtransactions', [zsView.historyCount === 0 ? ALL_HISTORY : zsView.historyCount], opts),
+    // A long history is read again only when something changed (not on the light rounds of every few seconds).
+    light && (zsView.historyCount === 0 || zsView.historyCount > HISTORY_COUNT) && zs.wallet === wallet ? Promise.resolve(null) : readHistory(wallet, zsView.historyCount),
     rpc.raw<NoteRaw[]>('listshieldednotes', [zsView.spent], opts),
     rpc.raw<PlanStep[]>('listmeltcast', [], opts),
     zs.address && zs.wallet === wallet ? Promise.resolve(zs.address) : rpc.raw<string>('getshieldedaddress', [], opts),
@@ -126,7 +144,7 @@ async function round(): Promise<void> {
   zs.unlockNeeded = false;
   if (!sameJson(zs.balance, balance.value)) zs.balance = balance.value;
   let changed = false;
-  if (txs.status === 'fulfilled' && !sameJson(zs.txs, txs.value)) {
+  if (txs.status === 'fulfilled' && txs.value !== null && !sameJson(zs.txs, txs.value)) {
     zs.txs = txs.value;
     changed = true;
   }
@@ -144,22 +162,57 @@ async function round(): Promise<void> {
   zs.loaded = true;
 }
 
-/** Read it all again (after a payment, say); one round at a time, one asked for meanwhile follows. */
-export function refreshZs(): Promise<void> {
+/**
+ * Read it all again (after a payment, say); one round at a time, one asked for meanwhile follows. A light round (the
+ * timer's) leaves a long history as it is.
+ */
+export function refreshZs(light = false): Promise<void> {
   if (running) {
     again = true;
+    if (!light) againFull = true;
     return running;
   }
-  running = round()
+  running = round(light)
     .catch(() => {})
     .finally(() => {
       running = null;
       if (again) {
+        const full = againFull;
         again = false;
-        void refreshZs();
+        againFull = false;
+        void refreshZs(!full);
       }
     });
   return running;
+}
+
+/** What a payment out of the shielded account would pay (estimateshieldedfee): the fee, and what each address gets. */
+export interface PaymentEstimate {
+  fee: bigint;
+  notes: number;
+  /** By address: what it gets (the fee taken out where asked). */
+  amounts: Record<string, bigint>;
+  /** What leaves the shielded balance: the amounts and the fee. */
+  total: bigint;
+}
+
+/**
+ * Ask the node what a payment would pay, before it is confirmed (audit 7 E-ZS3): the confirmation shows the fee and what
+ * each address gets, and the payment is made with that fee, so what is shown is what is paid.
+ * @param amounts  by address, in coins ("all": one transparent address, the whole spendable balance)
+ */
+export async function estimatePayment(wallet: string, amounts: Record<string, string>, subtract = false, fee: bigint | null = null): Promise<PaymentEstimate> {
+  const params: unknown[] = [amounts, subtract];
+  if (fee !== null) params.push(satsToCoins(fee));
+  const r = await rpc.raw<{ fee: number; notes: number; amounts: Record<string, number>; total: number }>('estimateshieldedfee', params, { wallet });
+  const out: Record<string, bigint> = {};
+  for (const [address, value] of Object.entries(r.amounts)) out[address] = coinsToSats(value);
+  return { fee: coinsToSats(r.fee), notes: r.notes, amounts: out, total: coinsToSats(r.total) };
+}
+
+/** What a payment can spend now: notes 3 blocks deep (older nodes: all in blocks). */
+export function spendableOf(balance: ShieldedBalanceRaw | null): bigint {
+  return coinsToSats(balance?.spendable ?? balance?.available ?? 0);
 }
 
 /** Keep it up to date: with every block, every transaction of the wallet, and every 5 seconds. */
@@ -178,7 +231,7 @@ export function startZs(): void {
   let ticks = 0;
   timer = every(1000, () => {
     tick();
-    if (++ticks % 5 === 0) void refreshZs();
+    if (++ticks % 5 === 0) void refreshZs(true);
   });
 }
 
@@ -191,6 +244,7 @@ export function resetZs(): void {
   lastTx = -1;
   running = null;
   again = false;
+  againFull = false;
   Object.assign(zs, { wallet: null, loaded: false, error: '', unlockNeeded: false, balance: null, transparent: null, pool: null, txs: [], notes: [], plan: [], address: '', version: 0 });
   Object.assign(zsView, { historyCount: HISTORY_COUNT, spent: false });
   readKeys.clear();

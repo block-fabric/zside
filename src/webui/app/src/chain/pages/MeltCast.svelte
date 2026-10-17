@@ -94,7 +94,7 @@
       title: t('Cast'),
       message: t('Take %1 out of the shielded balance as standard bills, each to a new address of this wallet, at the blocks set for each bill?', formatAmount(castAmount, prefs.unit)),
       code: (bills?.bills ?? []).map((b) => formatAmount(b, prefs.unit)).join(' + '),
-      informative: t('The fees come out of the shielded balance too. Keep the wallet running meanwhile: it carries out the plan as the blocks come.'),
+      informative: t('The fees come out of the shielded balance too: the same fee for each bill in every wallet. A bill spends notes 3 blocks deep, so coins melted in the last blocks wait. Keep the wallet running meanwhile: it carries out the plan as the blocks come.'),
       level: 'question',
       choices: [
         { id: 'no', label: 'Cancel' },
@@ -209,7 +209,7 @@
       <section class="panel">
         <div class="panel-head"><h2>Melt my transparent coins</h2></div>
         <div class="panel-body zs-form">
-          <p>Every transparent coin of this wallet in a block goes into the shielded balance alone and whole, at a random block over the blocks you choose. No two of them are ever seen together. The coins are locked until each goes.</p>
+          <p>Every transparent coin of this wallet in a block goes into the shielded balance alone and whole, at a random block over the blocks you choose, one coin a block at most: no two of them go in one transaction or one block. Their timing can still hint, on a quiet chain, that they are one wallet's: a longer spread helps. The coins are locked until each goes.</p>
           <span class="muted small">{t('Transparent, in blocks')}: <Amount sats={transparent} /></span>
           <div class="field">
             <label for="zs-melt-spread">Over how many blocks</label>

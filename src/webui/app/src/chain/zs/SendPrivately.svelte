@@ -14,10 +14,11 @@
   import { MEMO_BYTES, memoBytes } from './model';
   import Privacy from './Privacy.svelte';
   import ProvingPanel from './ProvingPanel.svelte';
-  import { prove, proving, zs } from './store.svelte';
+  import { estimatePayment, prove, proving, spendableOf, zs } from './store.svelte';
   import ZAddressInput from './ZAddressInput.svelte';
 
-  const available = $derived(coinsToSats(zs.balance?.available ?? 0));
+  // What a payment can spend now: notes 3 blocks deep (audit 7 E-ZS1).
+  const available = $derived(spendableOf(zs.balance));
   const busy = $derived(proving.now !== null);
   let address = $state('');
   let valid = $state(false);
@@ -36,12 +37,25 @@
     const wallet = wallets.current;
     if (wallet === null || !ready || amount === null) return;
     const toPublic = kind === 'transparent';
+    const amounts = { [address.trim()]: satsToCoins(amount) };
+    // The fee first (audit 7 E-ZS3): shown, then paid as shown.
+    let estimate;
+    try {
+      estimate = await estimatePayment(wallet, amounts);
+    } catch (e) {
+      await inform(t('Send privately'), errorText(e), 'error');
+      return;
+    }
     const r = await ask({
       title: t('Send privately'),
       message: toPublic
         ? t('Pay out of the shielded balance? The amounts and the transparent addresses will be public; where the coins came from will not.')
         : t('Pay out of the shielded balance, privately? Only the recipients see the amounts and the memo.'),
-      code: `${formatAmount(amount, prefs.unit)} ${t('to')} ${address.trim()}`,
+      code: [
+        `${formatAmount(amount, prefs.unit)} ${t('to')} ${address.trim()}`,
+        `${t('Fee')}: ${formatAmount(estimate.fee, prefs.unit)}`,
+        `${t('Total out of the shielded balance')}: ${formatAmount(estimate.total, prefs.unit)}`,
+      ].join('\n'),
       level: toPublic ? 'warning' : 'question',
       choices: [
         { id: 'no', label: 'Cancel' },
@@ -49,7 +63,7 @@
       ],
     });
     if (r.choice !== 'yes') return;
-    const params: unknown[] = [{ [address.trim()]: satsToCoins(amount) }, toPublic ? '' : memo];
+    const params: unknown[] = [amounts, toPublic ? '' : memo, satsToCoins(estimate.fee)];
     try {
       const done = await prove('pay', 'Proving the payment', () => walletRpc<{ txid: string }>(wallet, 'sendshielded', params));
       if (!done) return;

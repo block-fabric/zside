@@ -38,7 +38,7 @@ import {
   type PlanStep,
   type ShieldedTxRaw,
 } from './zs/model';
-import { HISTORY_COUNT, HISTORY_POINTS, isRead, prove, proving, READ_KEEP, READ_PREF, readKeyOf, resetZs, zs, zsView } from './zs/store.svelte';
+import { HISTORY_COUNT, HISTORY_PAGE, HISTORY_POINTS, isRead, prove, proving, READ_KEEP, READ_PREF, readKeyOf, refreshZs, resetZs, zs, zsView } from './zs/store.svelte';
 import { setTransport, type BridgeRequest } from '../lib/bridge';
 import { buildCommands, menuSections } from '../lib/commands.svelte';
 import { dialogs } from '../lib/dialogs.svelte';
@@ -94,7 +94,24 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
     case 'getshieldedbalance':
       return balance;
     case 'listshieldedtransactions':
-      return TXS;
+      // A page of [count, skip] (audit 7 E-ZS5: at most 1000 at once).
+      return TXS.slice(Number(p[1] ?? 0), Number(p[1] ?? 0) + Number(p[0]));
+    case 'estimateshieldedfee': {
+      // A fee of 0.0001; "all" is the spendable balance; with the fee taken out, the address gets that much less.
+      const fee = 0.0001;
+      const subtract = p[1] === true;
+      const amounts: Record<string, number> = {};
+      let total = fee;
+      for (const [address, v] of Object.entries(p[0] as Record<string, string>)) {
+        const amount = v === 'all' ? (balance.spendable ?? balance.available) : Number(v);
+        const gets = v === 'all' || subtract ? Math.round((amount - fee) * 1e8) / 1e8 : amount;
+        amounts[address] = gets;
+        total = Math.round((total + gets) * 1e8) / 1e8;
+      }
+      return { fee: p[2] !== undefined ? Number(p[2]) : fee, notes: 1, amounts, total };
+    }
+    case 'getnewaddress':
+      return TRANSPARENT;
     case 'listshieldednotes':
       // Spent ones only when asked for (audit port-2 #10).
       return p[0] === true ? NOTES : NOTES.filter((n) => !n.spent_by);
@@ -309,7 +326,9 @@ describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
     await fireEvent.click(payButton);
     await answer('yes');
     await waitFor(() => expect(called('sendshielded').length).toBe(1));
-    expect(called('sendshielded')[0].params).toEqual([{ [ZADDR2]: '1.5' }, 'for the coffee']);
+    // With the fee the confirmation showed (estimateshieldedfee, audit 7 E-ZS3).
+    expect(called('estimateshieldedfee')[0].params).toEqual([{ [ZADDR2]: '1.5' }, false]);
+    expect(called('sendshielded')[0].params).toEqual([{ [ZADDR2]: '1.5' }, 'for the coffee', '0.0001']);
     expect(called('sendshielded')[0].kind).toBe('rpc');
   });
 
@@ -327,9 +346,12 @@ describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
     await waitFor(() => expect(payButton.disabled).toBe(false));
     await fireEvent.click(payButton);
     await waitFor(() => expect(document.querySelector('.dialog, dialog[open]')?.textContent).toMatch(/will be public/));
+    // The fee and the total, before it is paid (audit 7 E-ZS3).
+    expect(document.querySelector('.dialog, dialog[open]')?.textContent).toMatch(/Fee: 0\.0001/);
+    expect(document.querySelector('.dialog, dialog[open]')?.textContent).toMatch(/Total out of the shielded balance: 1\.0001/);
     await answer('yes');
     await waitFor(() => expect(called('sendshielded').length).toBe(1));
-    expect(called('sendshielded')[0].params).toEqual([{ [TRANSPARENT]: '1' }, '']);
+    expect(called('sendshielded')[0].params).toEqual([{ [TRANSPARENT]: '1' }, '', '0.0001']);
   });
 
   it('Shield and unshield: the amounts, all of it, and where to', async () => {
@@ -347,9 +369,14 @@ describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
     const allButtons = screen.getAllByRole('button', { name: 'All' });
     await fireEvent.click(allButtons[1]);
     await fireEvent.click(screen.getByRole('button', { name: 'Unshield' }));
+    // All of it, to a new address made first: the fee and what the address gets shown, then exactly that unshielded
+    // (audit 7 E-ZS3).
+    await waitFor(() => expect(document.querySelector('.dialog, dialog[open]')?.textContent).toMatch(/The address gets \(the fee taken out\): 4\.9998/));
+    expect(document.querySelector('.dialog, dialog[open]')?.textContent).toMatch(/Fee: 0\.0001/);
+    expect(called('estimateshieldedfee')[0].params).toEqual([{ [TRANSPARENT]: 'all' }, true]);
     await answer('yes');
     await waitFor(() => expect(called('unshieldcoins').length).toBe(1));
-    expect(called('unshieldcoins')[0].params).toEqual(['all', null, true]);
+    expect(called('unshieldcoins')[0].params).toEqual(['4.9999', TRANSPARENT, true, '0.0001']);
   });
 
   it('Receive: the address of the account, and a new one nobody can link to it', async () => {
@@ -435,7 +462,7 @@ describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
     const kept = (prefStore[READ_PREF] as Record<string, string[]>).w;
     expect(kept).toContain(readKeyOf(`${id('1')}:0`));
     expect(readKeyOf(`${id('1')}:0`)).toBe(`${id('1').slice(0, 16)}:0`);
-    expect(called('listshieldedtransactions')[0].params).toEqual([HISTORY_COUNT]);
+    expect(called('listshieldedtransactions')[0].params).toEqual([HISTORY_COUNT, 0]);
   });
 
   it('Memos: marks of an older version move from browser storage to the preferences; the newest kept; older memos said to be left out', async () => {
@@ -510,11 +537,42 @@ describe.runIf(CHAIN.name === 'zSide')('the pages of zSide', () => {
     calls.length = 0;
     await fireEvent.change(points, { target: { value: '25' } });
     await waitFor(() => expect(called('listshieldedtransactions').some((c) => (c.params as number[])[0] === 25)).toBe(true));
-    // All: every transaction, asked as the largest count the node takes.
+    // All: every transaction, a page of 1000 at a time (audit 7 E-ZS5).
     await fireEvent.change(points, { target: { value: '0' } });
-    await waitFor(() => expect(called('listshieldedtransactions').some((c) => (c.params as number[])[0] === 2147483647)).toBe(true));
+    await waitFor(() => expect(called('listshieldedtransactions').some((c) => (c.params as number[])[0] === HISTORY_PAGE && (c.params as number[])[1] === 0)).toBe(true));
+    expect(called('listshieldedtransactions').every((c) => (c.params as number[])[0] <= HISTORY_PAGE)).toBe(true);
     expect(zsView.historyCount).toBe(0);
     expect(screen.queryByText(/older ones are not/)).toBeNull();
+  });
+
+  it('Private activity: a long history is read again on a change, not by the light rounds of every few seconds (audit 7 E-ZS5)', async () => {
+    render(ZHistory);
+    await loaded();
+    zsView.historyCount = 0;
+    await refreshZs();
+    calls.length = 0;
+    await refreshZs(true);
+    expect(called('listshieldedtransactions').length).toBe(0);
+    expect(called('getshieldedbalance').length).toBe(1);
+    await refreshZs();
+    expect(called('listshieldedtransactions').map((c) => c.params)).toEqual([[HISTORY_PAGE, 0]]);
+    // The usual count is read by every round.
+    zsView.historyCount = HISTORY_COUNT;
+    calls.length = 0;
+    await refreshZs(true);
+    expect(called('listshieldedtransactions').map((c) => c.params)).toEqual([[HISTORY_COUNT, 0]]);
+  });
+
+  it('Pay: only notes 3 blocks deep can be spent, and the page says why the rest waits (audit 7 E-ZS1)', async () => {
+    balance = { available: 4.9999, spendable: 1, pending: 0, notes: 2 };
+    go('private', 'pay');
+    render(Private);
+    await loaded();
+    await fireEvent.input(document.querySelector('#zs-pay-to-0')!, { target: { value: ZADDR2 } });
+    await waitFor(() => expect(screen.getByText('A shielded address')).toBeTruthy());
+    await fireEvent.input(document.querySelector('#zs-pay-amount-0')!, { target: { value: '1.5' } });
+    await waitFor(() => expect(document.querySelector('.zs-settling')?.textContent).toMatch(/3\.9999.*arrived in the last blocks/));
+    expect((screen.getByRole('button', { name: 'Prove and pay' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('Melt & cast: the plan, a melt, a cast with its bills, a step cancelled', async () => {
@@ -617,7 +675,7 @@ describe('zSide in Simple mode', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Make public' }));
     await answer('yes');
     await waitFor(() => expect(called('unshieldcoins').length).toBe(1));
-    expect(called('unshieldcoins')[0].params).toEqual(['all', null, true]);
+    expect(called('unshieldcoins')[0].params).toEqual(['4.9999', TRANSPARENT, true, '0.0001']);
   });
 
   it('Private: the viewing keys when asked for, and every tab in Advanced', async () => {
@@ -646,7 +704,7 @@ describe('zSide in Simple mode', () => {
     await fireEvent.click(send);
     await answer('yes');
     await waitFor(() => expect(called('sendshielded').length).toBe(1));
-    expect(called('sendshielded')[0].params).toEqual([{ [ZADDR2]: '1.5' }, 'for the coffee']);
+    expect(called('sendshielded')[0].params).toEqual([{ [ZADDR2]: '1.5' }, 'for the coffee', '0.0001']);
   });
 
   it('Send: a public address gets no message, and Advanced keeps the kit form alone', async () => {
@@ -662,7 +720,7 @@ describe('zSide in Simple mode', () => {
     await waitFor(() => expect(send.disabled).toBe(false));
     await fireEvent.click(send);
     await answer('yes');
-    await waitFor(() => expect(called('sendshielded')[0]?.params).toEqual([{ [TRANSPARENT]: '1' }, '']));
+    await waitFor(() => expect(called('sendshielded')[0]?.params).toEqual([{ [TRANSPARENT]: '1' }, '', '0.0001']));
     prefs.uiMode = 'advanced';
     await waitFor(() => expect(screen.queryByRole('switch', { name: /Send privately/ })).toBeNull());
   });

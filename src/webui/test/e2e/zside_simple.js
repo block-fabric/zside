@@ -134,6 +134,9 @@
       const titles = ["Cast coins", "Increase the fee", "Melt coins", "Send privately", "Shield coins", "Unshield coins"];
       const asked = (await host('test.confirmed', {})).filter((q) => titles.includes(q.title));
       await check(`the desktop confirmed what the pages paid or signed (${asked.length})`, asked.length > 0 && asked.every((q) => q.rows.length > 1), JSON.stringify(asked.map((q) => q.title)));
+      // A private payment and an unshielding say their fee and what is paid in all (audit 7 E-ZS3).
+      const paying = asked.filter((q) => q.title === 'Send privately' || q.title === 'Unshield coins');
+      await check('the payments confirmed with their fee', paying.length >= 2 && paying.every((q) => q.rows.some((r) => r.label === 'Fee' && /^0\.\d+ /.test(r.value))), JSON.stringify(paying.map((q) => q.rows)));
     }
     await finish();
   } catch (e) {

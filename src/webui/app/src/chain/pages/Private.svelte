@@ -33,7 +33,7 @@
   import Ring from '../zs/Ring.svelte';
   import ZAddressInput from '../zs/ZAddressInput.svelte';
   import { describeTx, isViewingKey, MEMO_BYTES, memoBytes, viewingKeyHrp } from '../zs/model';
-  import { prove, proving, refreshZs, startZs, zs } from '../zs/store.svelte';
+  import { estimatePayment, prove, proving, refreshZs, spendableOf, startZs, zs } from '../zs/store.svelte';
   import Term from '../../components/Term.svelte';
   import { simpleMode } from '../../lib/uimode.svelte';
 
@@ -67,6 +67,9 @@
   const watchOnly = $derived(!!current.info?.privateKeysDisabled);
 
   const available = $derived(coinsToSats(zs.balance?.available ?? 0));
+  /** What a payment can spend now: notes 3 blocks deep (audit 7 E-ZS1); the rest of available waits a few blocks. */
+  const spendable = $derived(spendableOf(zs.balance));
+  const settling = $derived(available > spendable ? available - spendable : 0n);
   const pending = $derived(coinsToSats(zs.balance?.pending ?? 0));
   const watched = $derived(coinsToSats(zs.balance?.watchonly ?? 0));
   const transparent = $derived(coinsToSats(zs.transparent?.trusted ?? 0));
@@ -113,11 +116,18 @@
       seen.add(a);
     }
     if (memoSize > MEMO_BYTES) return t('The memo is longer than %1 bytes.', String(MEMO_BYTES));
-    if (payTotal > available) return t('More than the shielded balance in blocks (%1).', formatAmount(available, prefs.unit));
+    if (payTotal > spendable) return spendableProblem();
     if (customFee && (fee === null || fee <= 0n)) return t('Enter the fee.');
     return '';
   });
   const payReady = $derived(!payProblem && recipients.every((r) => r.valid && r.amount !== null && r.amount > 0n) && !busy && !watchOnly);
+
+  /** Too much for what can be spent now: and why, when part of the balance is too new. */
+  function spendableProblem(): string {
+    return settling > 0n
+      ? t('More than the shielded balance that can be spent now (%1): %2 arrived in the last blocks and can be spent 3 blocks after it arrived.', formatAmount(spendable, prefs.unit), formatAmount(settling, prefs.unit))
+      : t('More than the shielded balance in blocks (%1).', formatAmount(spendable, prefs.unit));
+  }
 
   function addRecipient() {
     recipients = [...recipients, { key: nextKey++, address: '', valid: false, kind: '', amount: null }];
@@ -127,13 +137,24 @@
   }
   function payAll() {
     if (recipients.length !== 1) return;
-    recipients[0].amount = available;
+    recipients[0].amount = spendable;
     payKey++;
   }
 
   async function pay() {
     if (wallet === null || !payReady) return;
+    const amounts: Record<string, string> = {};
+    for (const x of recipients) amounts[x.address.trim()] = satsToCoins(x.amount ?? 0n);
+    // The fee first (audit 7 E-ZS3): shown, then paid as shown.
+    let estimate;
+    try {
+      estimate = await estimatePayment(wallet, amounts, false, customFee ? fee : null);
+    } catch (e) {
+      await inform(t('Pay privately'), errorText(e), 'error');
+      return;
+    }
     const lines = recipients.map((r) => `${formatAmount(r.amount ?? 0n, prefs.unit)} ${t('to')} ${r.address.trim()}${r.kind === 'transparent' ? ` (${t('public')})` : ''}`);
+    lines.push(`${t('Fee')}: ${formatAmount(estimate.fee, prefs.unit)}`, `${t('Total out of the shielded balance')}: ${formatAmount(estimate.total, prefs.unit)}`);
     const r = await ask({
       title: anyTransparent && !anyShielded ? t('Unshield') : t('Pay privately'),
       message: anyTransparent
@@ -148,10 +169,7 @@
       ],
     });
     if (r.choice !== 'yes') return;
-    const amounts: Record<string, string> = {};
-    for (const x of recipients) amounts[x.address.trim()] = satsToCoins(x.amount ?? 0n);
-    const params: unknown[] = [amounts, anyShielded ? memo : ''];
-    if (customFee && fee !== null) params.push(satsToCoins(fee));
+    const params: unknown[] = [amounts, anyShielded ? memo : '', satsToCoins(estimate.fee)];
     try {
       const done = await prove('pay', 'Proving the payment', () => walletRpc<{ txid: string }>(wallet, 'sendshielded', params));
       if (!done) return;
@@ -220,17 +238,17 @@
   let unshieldKey = $state(0);
   $effect(() => {
     // Typing another amount undoes "all".
-    if (unshieldEverything && unshieldAmount !== available) unshieldEverything = false;
+    if (unshieldEverything && unshieldAmount !== spendable) unshieldEverything = false;
   });
   const unshieldProblem = $derived.by(() => {
-    if (unshieldEverything) return available > 0n ? '' : t('Nothing in the shielded balance in blocks yet.');
+    if (unshieldEverything) return spendable > 0n ? '' : settling > 0n ? spendableProblem() : t('Nothing in the shielded balance in blocks yet.');
     if (unshieldAmount === null) return '';
     if (unshieldAmount <= 0n) return t('Enter an amount above zero.');
-    if (unshieldAmount > available) return t('More than the shielded balance in blocks (%1).', formatAmount(available, prefs.unit));
+    if (unshieldAmount > spendable) return spendableProblem();
     return '';
   });
   function unshieldAll() {
-    unshieldAmount = available;
+    unshieldAmount = spendable;
     unshieldEverything = true;
     unshieldKey++;
   }
@@ -238,11 +256,31 @@
     if (wallet === null || unshieldProblem || busy) return;
     if (!unshieldEverything && unshieldAmount === null) return;
     if (unshieldTo.trim() && !unshieldToValid) return;
-    const what = unshieldEverything ? t('the whole shielded balance in blocks (less the fee)') : formatAmount(unshieldAmount ?? 0n, prefs.unit);
+    const subtract = unshieldEverything || subtractFee;
+    // The address (a new one of the wallet, made now, when none is given) and the fee first (audit 7 E-ZS3): the
+    // confirmation shows the fee and what the address gets, and the unshielding pays exactly that.
+    let to = unshieldTo.trim();
+    let estimate;
+    try {
+      if (!to) to = await rpc.raw<string>('getnewaddress', ['unshielded', 'bech32'], { wallet });
+      estimate = await estimatePayment(wallet, { [to]: unshieldEverything ? 'all' : satsToCoins(unshieldAmount ?? 0n) }, subtract);
+    } catch (e) {
+      await inform(t('Unshield'), errorText(e), 'error');
+      return;
+    }
+    const gets = estimate.amounts[to] ?? 0n;
+    // What unshieldcoins is given: the gross amount when the fee comes out of it.
+    const gross = subtract ? gets + estimate.fee : gets;
+    const what = formatAmount(gross, prefs.unit);
     const r = await ask({
       title: simple ? t('Make public') : t('Unshield'),
       message: t('Move %1 out of the shielded balance?', what),
-      code: unshieldTo.trim() || undefined,
+      code: [
+        `${t('To')}: ${to}${unshieldTo.trim() ? '' : ` (${t('a new address of this wallet')})`}`,
+        `${t('Fee')}: ${formatAmount(estimate.fee, prefs.unit)}`,
+        subtract ? `${t('The address gets (the fee taken out)')}: ${formatAmount(gets, prefs.unit)}` : `${t('The address gets')}: ${formatAmount(gets, prefs.unit)}`,
+        `${t('Total out of the shielded balance')}: ${formatAmount(estimate.total, prefs.unit)}`,
+      ].join('\n'),
       informative: unshieldTo.trim()
         ? t('The amount and the address will be public; where the coins came from will not. For amounts nobody can link to what went in, use Melt & cast.')
         : t('To a new transparent address of this wallet. The amount and the address will be public; where the coins came from will not.'),
@@ -253,10 +291,9 @@
       ],
     });
     if (r.choice !== 'yes') return;
-    const amount = unshieldEverything ? 'all' : satsToCoins(unshieldAmount ?? 0n);
     try {
       const done = await prove('unshield', 'Proving the unshielding', () =>
-        walletRpc<{ txid: string; address: string; amount: number }>(wallet, 'unshieldcoins', [amount, unshieldTo.trim() || null, unshieldEverything || subtractFee]),
+        walletRpc<{ txid: string; address: string; amount: number }>(wallet, 'unshieldcoins', [satsToCoins(gross), to, subtract, satsToCoins(estimate.fee)]),
       );
       if (!done) return;
       toast('success', t('Unshielding %1', formatAmount(coinsToSats(done.amount), prefs.unit)), t('To %1, spendable after the next block.', shortHash(done.address, 12)));
@@ -408,6 +445,7 @@
           <span class="big"><Amount sats={available} /></span>
           <span class="sub">
             {#if pending > 0n}<Amount sats={pending} /> waiting for a block ·{/if}
+            {#if settling > 0n}<Amount sats={settling} /> spendable in a few blocks ·{/if}
             {#if simple}Only you can see it.{:else}{tn('%n note(s)', zs.balance?.notes ?? 0)}{/if}
             {#if watched > 0n}· <Amount sats={watched} /> watch-only{/if}
           </span>
@@ -473,9 +511,9 @@
                 <div class="recipient">
                   <ZAddressInput id={`zs-pay-to-${r.key}`} label={recipients.length > 1 ? t('Pay to (%1)', String(i + 1)) : t('Pay to')} bind:value={r.address} bind:valid={r.valid} bind:kind={r.kind} disabled={busy} />
                   <div class="amount-row">
-                    <AmountInput id={`zs-pay-amount-${r.key}`} label="Amount" bind:value={r.amount} max={available} disabled={busy} />
+                    <AmountInput id={`zs-pay-amount-${r.key}`} label="Amount" bind:value={r.amount} max={spendable} disabled={busy} />
                     {#if recipients.length === 1}
-                      <button type="button" class="btn small" disabled={busy || available <= 0n} onclick={payAll} title="The whole shielded balance in blocks; the fee is taken on top, so leave a little">All</button>
+                      <button type="button" class="btn small" disabled={busy || spendable <= 0n} onclick={payAll} title="The whole shielded balance that can be spent now; the fee is taken on top, so leave a little">All</button>
                     {:else}
                       <button type="button" class="btn ghost small" disabled={busy} onclick={() => removeRecipient(r.key)} aria-label="Remove this recipient" title="Remove this recipient"><Icon name="trash" size={15} /></button>
                     {/if}
@@ -502,6 +540,7 @@
               <div class="zs-note private"><Icon name="shield" size={18} /><span>Private: nobody but the recipient sees the amount, the memo, or that you paid.</span></div>
             {/if}
             {#if payProblem}<p class="error" role="alert">{payProblem}</p>{/if}
+            {#if settling > 0n}<p class="muted small zs-settling"><Amount sats={settling} /> arrived in the last blocks: it can be spent 3 blocks after it arrived, so that a payment never shows which block its notes came from.</p>{/if}
             <div class="zs-actions">
               <button type="button" id="zs-pay" class="btn primary" disabled={!payReady} onclick={pay}><Icon name="private" size={16} /> Prove and pay</button>
               <span class="muted small">{t('Total')}: <Amount sats={payTotal} /></span>
@@ -512,8 +551,9 @@
         <aside class="panel">
           <div class="panel-head"><h2>Spendable</h2><Privacy kind="private" /></div>
           <div class="panel-body facts-side">
-            <span class="big num"><Amount sats={available} /></span>
-            <p class="muted small">The shielded balance in blocks. Change goes back to the shielded account; the payment has no transparent inputs.</p>
+            <span class="big num"><Amount sats={spendable} /></span>
+            <p class="muted small">The shielded balance that can be spent now: notes 3 blocks deep, so that a payment never shows which block its notes came from. Change goes back to the shielded account; the payment has no transparent inputs.</p>
+            {#if settling > 0n}<p class="small"><Amount sats={settling} /> more 3 blocks after it arrived.</p>{/if}
             {#if pending > 0n}<p class="small"><Amount sats={pending} /> more once its block comes.</p>{/if}
             <p class="faint small">A payment proves its notes with Halo 2 (no trusted setup): it takes seconds, in the node, not in this window.</p>
           </div>
@@ -564,8 +604,8 @@
             {/if}
             {#key unshieldKey}
               <div class="amount-row">
-                <AmountInput id="zs-unshield-amount" label="Amount" bind:value={unshieldAmount} max={available} disabled={busy || watchOnly} />
-                <button type="button" class="btn small" disabled={busy || watchOnly || available <= 0n} onclick={unshieldAll} title="The whole shielded balance in blocks, the fee taken out of it">All</button>
+                <AmountInput id="zs-unshield-amount" label="Amount" bind:value={unshieldAmount} max={spendable} disabled={busy || watchOnly} />
+                <button type="button" class="btn small" disabled={busy || watchOnly || spendable <= 0n} onclick={unshieldAll} title="The whole shielded balance that can be spent now, the fee taken out of it">All</button>
               </div>
             {/key}
             {#if unshieldEverything}<span class="muted small">The whole shielded balance in blocks, the fee taken out of it.</span>{/if}

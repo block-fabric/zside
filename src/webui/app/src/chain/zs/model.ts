@@ -9,6 +9,8 @@ import { coinsToSats } from '../../lib/units';
 /** getshieldedbalance (amounts in coins). */
 export interface ShieldedBalanceRaw {
   available: number;
+  /** The part of available in notes 3 blocks deep: what a payment can spend now (audit 7 E-ZS1; absent before). */
+  spendable?: number;
   pending: number;
   notes: number;
   watchonly?: number;
