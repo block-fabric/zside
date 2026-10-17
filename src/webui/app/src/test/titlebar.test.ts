@@ -204,7 +204,7 @@ describe('every layout', () => {
       calls.length = 0;
       await fireEvent.mouseDown(bar, { button: 0, detail: 2 });
       // What the window was asked (the pages of a chain may read the node meanwhile).
-      expect(methods().filter((m) => m.startsWith('window.'))).toEqual(['window.toggleMaximize']);
+      expect(methods().filter((m) => m?.startsWith('window.'))).toEqual(['window.toggleMaximize']);
       unmount();
       // With the title bar of the system: none of it.
       applyWindowState({ frameless: false });
