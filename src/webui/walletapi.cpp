@@ -853,10 +853,11 @@ std::vector<dialog::Row> PaymentRows(interfaces::Wallet& wallet, const CTransact
     CAmount sum{0};
     for (size_t n{0}; n < paid.size(); ++n) {
         const CTxOut& out{tx.vout[paid[n]]};
-        if (paid.size() > 1) rows.push_back(confirm::Heading(strprintf("Recipient %u of %u", n + 1, paid.size())));
         CTxDestination dest;
         const auto label{ExtractDestination(out.scriptPubKey, dest) ? labels.find(EncodeDestination(dest)) : labels.end()};
-        OutputRows(rows, &wallet, out, label == labels.end() ? std::string{} : label->second);
+        // Of several, each named by its place on its destination's row (no row of its own: a part of Thunder's batch, 1500
+        // recipients with their amounts and labels, fits in one question, dialog::MAX_ROWS).
+        OutputRows(rows, &wallet, out, label == labels.end() ? std::string{} : label->second, paid.size() > 1 ? strprintf("Recipient %u of %u", n + 1, paid.size()) : "Pay to");
         sum += out.nValue;
     }
     rows.push_back(confirm::Amount("Network fee", fee));
