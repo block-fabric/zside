@@ -6,6 +6,8 @@
 // text. Elsewhere (vite dev in a browser, the tests) a transport can be set
 // by hand, see mock.ts.
 
+import { exactResult } from './exactjson';
+
 export type RequestKind = 'rpc' | 'host' | 'cancel';
 
 export interface BridgeRequest {
@@ -14,6 +16,8 @@ export interface BridgeRequest {
   method?: string;
   params?: unknown[] | Record<string, unknown>;
   wallet?: string;
+  /** The result as text, read with its numbers exact (exactjson.ts). */
+  exact?: boolean;
 }
 
 export interface BridgeEvent<T = unknown> {
@@ -86,6 +90,15 @@ export interface CallOptions {
   wallet?: string | null;
   /** Cancels the request: it rejects with ErrorCode.CANCELLED at once. */
   signal?: AbortSignal;
+  /** Read the result with its numbers exact (an amount past 2^53 units as the text of its digits): exactjson.ts. */
+  exact?: boolean;
+}
+
+/** The RPC methods whose results are always read exactly (a chain's own, with amounts past 2^53 units): setExactMethods. */
+const exactMethods = new Set<string>();
+/** A chain names the RPC methods whose results carry such amounts (BitAssets): read exactly wherever they are called. */
+export function setExactMethods(methods: Iterable<string>): void {
+  for (const m of methods) exactMethods.add(m);
 }
 
 /** Send a request to the host; resolves with the result, rejects with a BridgeError. */
@@ -94,11 +107,16 @@ export async function request<T>(kind: 'rpc' | 'host', method: string, params: u
   const rid = String(nextRid++);
   const body: BridgeRequest = { rid, kind, method, params };
   if (options.wallet != null) body.wallet = options.wallet;
+  // A method a chain named, called directly or through the host's confirmation (rpc.confirmed: what it ran answers).
+  const confirmedOf = kind === 'host' && method === 'rpc.confirmed' && params && !Array.isArray(params) ? params.method : undefined;
+  const exact = options.exact === true || (kind === 'rpc' && exactMethods.has(method)) || (typeof confirmedOf === 'string' && exactMethods.has(confirmedOf));
+  if (exact) body.exact = true;
   const { signal } = options;
   if (signal?.aborted) throw new BridgeError(ErrorCode.CANCELLED, 'Cancelled');
   let onAbort: (() => void) | undefined;
   try {
-    const pending = send(body);
+    const sent = send(body);
+    const pending = exact ? sent.then((r) => exactResult<T>(r)) : sent;
     if (!signal) return (await pending) as T;
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => {

@@ -290,6 +290,8 @@ struct Record {
 
 //! Number of confirmations recommended for accepting a transaction (TransactionRecord::RecommendedNumConfirmations).
 constexpr int RECOMMENDED_CONFIRMATIONS{6};
+//! The most addresses one wallet.owned call looks up (those of a page of the explorer).
+constexpr size_t MAX_OWNED_ASKED{500};
 
 /** TransactionRecord::decomposeTransaction. */
 std::vector<Record> Decompose(const interfaces::WalletTx& wtx, const std::vector<std::string>& roles = {})
@@ -1507,6 +1509,143 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file, guard::AskFn ask) : m_nod
             e.pushKV("mine", a.is_mine);
             out.push_back(std::move(e));
         }
+        return out;
+    });
+    Add("wallet.owned", [get_wallet](const UniValue& params) {
+        // Which of some addresses the explorer shows are the wallet's (it marks them "yours"): at most
+        // MAX_OWNED_ASKED a call, those of the page shown only, each looked up in the wallet's own scripts (no
+        // scan of the chain). Each one of the wallet: [address, label] (the label "" if it has none); the others
+        // and what is no address are left out.
+        auto w{get_wallet(params)};
+        wallet::CWallet* cw{w->wallet()};
+        if (!cw) throw HostError("No wallet behind this interface");
+        const UniValue list{Param(params, "addresses")};
+        if (!list.isArray() || list.size() > MAX_OWNED_ASKED) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("addresses: a list of %u addresses at most", MAX_OWNED_ASKED));
+        const auto labels{LabelsOf(*w)};
+        UniValue out{UniValue::VARR};
+        LOCK(cw->cs_wallet);
+        for (const UniValue& value : list.getValues()) {
+            if (!value.isStr()) throw HostError(BRIDGE_INVALID_REQUEST, "addresses: a list of addresses");
+            const CTxDestination dest{DecodeDestination(value.get_str())};
+            if (!IsValidDestination(dest) || !cw->IsMine(dest)) continue;
+            UniValue entry{UniValue::VARR};
+            entry.push_back(value.get_str());
+            const auto it{labels.find(EncodeDestination(dest))};
+            entry.push_back(it == labels.end() ? std::string{} : it->second);
+            out.push_back(std::move(entry));
+        }
+        return out;
+    });
+    Add("wallet.address", [get_wallet](const UniValue& params) {
+        // An address of the explorer, from what the wallet knows of it (no scan of the chain: of an address that is not
+        // the wallet's, only {mine: false}). Of one of the wallet: its label, what it received and what was spent of it,
+        // its coins now (unspent, immature included), its transactions newest first: `count` (1 to 100) after `skip`,
+        // each [txid, height (-1: not in a block), time, received, spent]; its coins likewise (`coinSkip`, `coinCount`),
+        // each [txid, vout, amount, height, immature]. Conflicted and abandoned transactions are left out.
+        auto w{get_wallet(params)};
+        wallet::CWallet* cw{w->wallet()};
+        if (!cw) throw HostError("No wallet behind this interface");
+        const CTxDestination dest{DecodeDestination(Str(params, "address"))};
+        if (!IsValidDestination(dest)) throw HostError(BRIDGE_INVALID_REQUEST, "address: an address of this chain is needed");
+        const auto page{[&](const char* skip_key, const char* count_key) {
+            const int64_t skip{OptInt(params, skip_key).value_or(0)};
+            const int64_t count{OptInt(params, count_key).value_or(25)};
+            if (skip < 0 || count < 1 || count > 100) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("%s: 1 to 100, %s: 0 or more", count_key, skip_key));
+            return std::pair<size_t, size_t>{static_cast<size_t>(skip), static_cast<size_t>(count)};
+        }};
+        const auto [skip, count]{page("skip", "count")};
+        const auto [coin_skip, coin_count]{page("coinSkip", "coinCount")};
+        std::string label;
+        w->getAddress(dest, &label, /*purpose=*/nullptr);
+        UniValue out{UniValue::VOBJ};
+        LOCK(cw->cs_wallet);
+        if (!cw->IsMine(dest)) {
+            out.pushKV("mine", false);
+            return out;
+        }
+        const CScript script{GetScriptForDestination(dest)};
+        struct Row {
+            const wallet::CWalletTx* wtx;
+            int height;
+            CAmount received{0}, spent{0};
+        };
+        struct Coin {
+            COutPoint outpoint;
+            CAmount amount;
+            int height;
+            bool immature;
+        };
+        std::vector<Row> rows;
+        std::vector<Coin> coins;
+        CAmount received{0}, spent{0}, balance{0}, immature{0};
+        for (const auto& [txid, wtx] : cw->mapWallet) {
+            if (wtx.isAbandoned() || cw->GetTxDepthInMainChain(wtx) < 0) continue;
+            const auto* confirmed{wtx.state<wallet::TxStateConfirmed>()};
+            Row row{&wtx, confirmed ? confirmed->confirmed_block_height : -1};
+            const bool young{cw->IsTxImmatureCoinBase(wtx)};
+            const CTransactionRef tx{wtx.GetTx()};
+            for (uint32_t n{0}; n < tx->vout.size(); ++n) {
+                const CTxOut& txout{tx->vout[n]};
+                if (txout.scriptPubKey != script) continue;
+                row.received += txout.nValue;
+                if (!cw->IsSpent(COutPoint{txid, n})) {
+                    coins.push_back({COutPoint{txid, n}, txout.nValue, row.height, young});
+                    (young ? immature : balance) += txout.nValue;
+                }
+            }
+            if (!wtx.IsCoinBase()) {
+                for (const CTxIn& txin : tx->vin) {
+                    const auto prev{cw->mapWallet.find(txin.prevout.hash)};
+                    if (prev == cw->mapWallet.end()) continue;
+                    const CTransactionRef prev_tx{prev->second.GetTx()};
+                    if (txin.prevout.n >= prev_tx->vout.size()) continue;
+                    const CTxOut& prevout{prev_tx->vout[txin.prevout.n]};
+                    if (prevout.scriptPubKey == script) row.spent += prevout.nValue;
+                }
+            }
+            if (row.received || row.spent) {
+                received += row.received;
+                spent += row.spent;
+                rows.push_back(row);
+            }
+        }
+        // Newest first: those not in a block yet, then by height, then by time.
+        const auto newer{[](int a_height, int64_t a_time, int b_height, int64_t b_time) {
+            if (a_height != b_height) return a_height < 0 || (b_height >= 0 && a_height > b_height);
+            return a_time > b_time;
+        }};
+        std::sort(rows.begin(), rows.end(), [&](const Row& a, const Row& b) { return newer(a.height, a.wtx->GetTxTime(), b.height, b.wtx->GetTxTime()); });
+        std::sort(coins.begin(), coins.end(), [&](const Coin& a, const Coin& b) { return a.height != b.height ? newer(a.height, 0, b.height, 0) : a.outpoint < b.outpoint; });
+        out.pushKV("mine", true);
+        out.pushKV("label", label);
+        out.pushKV("received", received);
+        out.pushKV("spent", spent);
+        out.pushKV("balance", balance);
+        out.pushKV("immature", immature);
+        out.pushKV("txCount", static_cast<int64_t>(rows.size()));
+        out.pushKV("coinCount", static_cast<int64_t>(coins.size()));
+        UniValue history{UniValue::VARR};
+        for (size_t i{skip}; i < rows.size() && i < skip + count; ++i) {
+            UniValue r{UniValue::VARR};
+            r.push_back(rows[i].wtx->GetHash().GetHex());
+            r.push_back(rows[i].height);
+            r.push_back(rows[i].wtx->GetTxTime());
+            r.push_back(rows[i].received);
+            r.push_back(rows[i].spent);
+            history.push_back(std::move(r));
+        }
+        out.pushKV("history", std::move(history));
+        UniValue held{UniValue::VARR};
+        for (size_t i{coin_skip}; i < coins.size() && i < coin_skip + coin_count; ++i) {
+            UniValue c{UniValue::VARR};
+            c.push_back(coins[i].outpoint.hash.GetHex());
+            c.push_back(static_cast<int64_t>(coins[i].outpoint.n));
+            c.push_back(coins[i].amount);
+            c.push_back(coins[i].height);
+            c.push_back(coins[i].immature);
+            held.push_back(std::move(c));
+        }
+        out.pushKV("coins", std::move(held));
         return out;
     });
     auto duplicate_warning{[](interfaces::Wallet& w, const std::string& address, bool sending) {

@@ -192,6 +192,13 @@ void Bridge::Reply(Request& request, int status, const std::string& json)
         const auto it{m_requests.find(request.rid)};
         if (it != m_requests.end() && it->second.get() == &request) m_requests.erase(it);
     }
+    if (status == 0 && request.exact) {
+        // The result as text: the page reads its numbers exactly (lib/exactjson.ts), not as the doubles of JSON.parse.
+        UniValue wrapped{UniValue::VOBJ};
+        wrapped.pushKV(std::string{EXACT_KEY}, ValidUtf8(json));
+        m_reply(request.call_id, status, wrapped.write());
+        return;
+    }
     m_reply(request.call_id, status, ValidUtf8(json));
 }
 
@@ -272,6 +279,7 @@ void Bridge::Handle(const std::string& call_id, const std::string& args_json)
         return;
     }
 
+    request->exact = body.find_value("exact").isTrue();
     // Requests without an id of their own cannot be cancelled; they are tracked under the call id.
     request->rid = rid.isStr() ? rid.get_str() : "\x01" + call_id;
     bool stopped{false}, duplicate{false};

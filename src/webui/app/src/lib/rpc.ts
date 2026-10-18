@@ -207,6 +207,8 @@ export const host = {
   hello: () => request<Hello>('host', 'app.hello', {}),
   info: () => request<AppInfo>('host', 'app.info', {}),
   quit: () => request<boolean>('host', 'app.quit', {}),
+  /** Text the host shows before a quit (work a quit would interrupt), or null: said again within a minute (lib/quitguard.ts). */
+  quitGuard: (message: string | null) => request<boolean>('host', 'app.quitGuard', { message }),
   restart: () => request<boolean>('host', 'app.restart', {}),
   help: () => request<{ usage: string; options: string }>('host', 'app.help', {}),
   about: () => request<{ name: string; version: string; license: string }>('host', 'app.about', {}),
@@ -263,6 +265,8 @@ export const host = {
    * Blocks of the active chain from the block index, newest first: `count` (1 to 10 000) from the height `from` down (the tip
    * by default): [height, hash, time, transactions, difficulty].
    */
+  /** What a block of this sidechain does with the peg (lib/explorer.ts BlockPeg). */
+  explorerPeg: (hash: string) => request<import('./explorer').BlockPeg>('host', 'explorer.peg', { hash }),
   explorerBlocks: (count: number, from?: number) => request<[number, string, number, number, number][]>('host', 'explorer.blocks', from === undefined ? { count } : { count, from }),
   hashFile: (path: string) => request<{ sha256: string; size: number }>('host', 'timestamp.hashFile', { path }),
   searchStamp: (payload: string, from: string, count: number, options?: CallOptions) =>

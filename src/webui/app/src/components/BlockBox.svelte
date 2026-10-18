@@ -63,7 +63,7 @@
     </span>
     {#if block.main}
       <!-- A sidechain: the block of the mainchain that merged mined it (every block of a sidechain is). -->
-      <span class="bmm" aria-hidden="true"><span class="badge accent" title="{t('Merged mined: committed to by block')} {formatCount(block.main.height)} {t('of')} {mainName}">{mainName} {formatCount(block.main.height)}</span></span>
+      <span class="bmm" aria-hidden="true"><span class="badge accent" title="{t('Merged mined: committed to by block')} {formatCount(block.main.height)} {t('of')} {mainName} ({block.main.hash}). {t('A block of %1: see it in the %1 wallet', mainName)}">{mainName} {formatCount(block.main.height)}</span></span>
     {:else if block.bmm.length}
       <span class="bmm" aria-hidden="true">
         {#each block.bmm.slice(0, 4) as slot (slot)}<span class="badge accent" title="{t('Merged mined: sidechain')} {slot}">BMM {slot}</span>{/each}

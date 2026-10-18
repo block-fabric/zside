@@ -165,7 +165,7 @@
           </div>
           <h3>Transactions</h3>
           <ul class="ids">
-            {#each block.tx.slice(0, 25) as txid (txid)}<li class="mono" title={txid}>{shortHash(txid, 12)}</li>{/each}
+            {#each block.tx.slice(0, 25) as txid (txid)}<li class="mono"><button type="button" class="mono linkish" title={txid} onclick={() => block && open('explorer', `tx:${txid}:${block.hash}`)}>{shortHash(txid, 12)}</button></li>{/each}
           </ul>
           {#if block.tx.length > 25}<p class="muted">and {formatCount(block.tx.length - 25)} more</p>{/if}
           <button type="button" class="btn" onclick={() => block && open('explorer', `search:${block.hash}`)}>Open in the block explorer</button>
@@ -316,5 +316,16 @@
       border-radius: 0;
       box-shadow: var(--shadow);
     }
+  }
+  .linkish {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--link);
+    cursor: pointer;
+  }
+  .linkish:hover,
+  .linkish:focus-visible {
+    text-decoration: underline;
   }
 </style>

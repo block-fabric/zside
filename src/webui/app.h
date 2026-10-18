@@ -8,6 +8,7 @@
 #include <sync.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <webui/quitguard.h>
 #include <webui/window.h>
 
 #include <atomic>
@@ -75,6 +76,11 @@ public:
 
     /** The user closes the window: the app stops, or the window is minimized (options). UI thread. */
     void CloseRequested() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * The user asks to quit (the window closed, Quit of the menu or the tray, Ctrl+Q): the app stops, after a question
+     * of the host when the page said a quit would interrupt work (QuitGuard, app.quitGuard). Any thread.
+     */
+    void QuitRequested() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
     void RegisterHostMethods();
@@ -136,6 +142,8 @@ private:
     void Inform(UniValue dialog) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Take back the changes of the options never applied (OptionsJournal), with the restart flag they set. */
+    /** QuitRequested on the UI thread: ask (the dialog window of the host, not waiting for it), or stop. */
+    void AskQuit() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void UndoOptions(interfaces::Node& node, const std::string& why) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Choose the language again (-lang, the option, the system), for the page and the node; an event if it changed. */
     void UpdateLanguage() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -168,6 +176,8 @@ private:
     std::unique_ptr<SidechainApi> m_sidechain_api;
     std::thread m_node_thread;
     std::atomic<bool> m_restart_requested{false};
+    //! Whether a quit asks first, as the page says (app.quitGuard).
+    QuitGuard m_quit_guard;
     //! Messages and questions of the node.
     std::vector<std::unique_ptr<interfaces::Handler>> m_node_handlers;
 

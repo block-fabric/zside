@@ -36,6 +36,9 @@ enum BridgeError : int {
     BRIDGE_HOST_ERROR = -1,
 };
 
+//! The key of the result of a request asked {exact: true}: {"$rawjson": "<the result as JSON text>"} (Bridge::Request::exact).
+inline constexpr std::string_view EXACT_KEY{"$rawjson"};
+
 //! What a host method throws to answer with an error of its own.
 struct HostError : std::runtime_error {
     int code;
@@ -166,6 +169,9 @@ private:
     struct Request {
         std::string call_id;
         std::string rid;
+        //! {exact: true}: the result goes back as its JSON text, {"$rawjson": text} (EXACT_KEY), for the page to read its numbers
+        //! itself (amounts past 2^53 units, which a JSON.parse of the web view would round).
+        bool exact{false};
         std::atomic<bool> answered{false};
     };
 

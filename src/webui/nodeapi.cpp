@@ -21,12 +21,19 @@
 #include <node/context.h>
 #include <rpc/blockchain.h>
 #include <validation.h>
+#include <node/blockstorage.h>
+#include <key_io.h>
+#include <addresstype.h>
+#if WEBUI_SIDECHAIN
+#include <sidechain/state.h>
+#endif
 #include <netbase.h>
 #include <tinyformat.h>
 #include <uint256.h>
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <webui/bridge.h>
+#include <webui/chainconfig.h>
 #include <webui/confirm.h>
 #include <webui/console.h>
 
@@ -72,7 +79,12 @@ constexpr int64_t MAX_EXPLORER_ROWS{10'000};
 const std::vector<std::string> METHODS{
     "console.check", "console.run", "peers.disconnect", "peers.ban", "bans.unban", "drivechain.depositAddress",
     "tools.hashes", "tools.merkle", "tools.decode", "timestamp.hashFile", "timestamp.search", "explorer.blocks",
+#if WEBUI_SIDECHAIN
+    "explorer.peg",
+#endif
 };
+//! The most rows of each kind explorer.peg gives (a block of a few thousand withdrawals is shown in part).
+constexpr size_t MAX_PEG_ROWS{1000};
 } // namespace
 
 UniValue HashesOf(const std::vector<unsigned char>& data)
@@ -315,6 +327,91 @@ UniValue NodeApi::Call(const std::string& method, const UniValue& params)
         }
         return rows;
     }
+#if WEBUI_SIDECHAIN
+    if (method == "explorer.peg") {
+        // What a block of this sidechain does with the peg, read from the block (no index, no scan): the payouts of its
+        // coinbase (outputs 1 and on: deposits from the mainchain, refunds, the chain's own payouts), the bundle it
+        // commits to, the withdrawals its transactions make and the refunds they ask; MAX_PEG_ROWS of each at most
+        // ("more" then). The explorer links each to its transaction and its address.
+        const node::NodeContext* context{m_node().context()};
+        if (!context || !context->chainman) throw HostError("The chain is not loaded yet");
+        const auto hash{uint256::FromHex(ParamStr(params, "hash"))};
+        if (!hash) throw HostError(BRIDGE_INVALID_REQUEST, "hash: a block hash is needed");
+        const CBlockIndex* index;
+        {
+            LOCK(::cs_main);
+            index = context->chainman->m_blockman.LookupBlockIndex(*hash);
+            if (!index) throw HostError(BRIDGE_INVALID_REQUEST, "No block with this hash");
+            if (!(index->nStatus & BLOCK_HAVE_DATA)) throw HostError("The block is not on disk (pruned)");
+        }
+        CBlock block;
+        if (!context->chainman->m_blockman.ReadBlock(block, *index)) throw HostError("The block cannot be read");
+        bool more{false};
+        UniValue payouts{UniValue::VARR};
+        UniValue bundle{UniValue::VNULL};
+        if (!block.vtx.empty()) {
+            const CTransaction& coinbase{*block.vtx[0]};
+            for (uint32_t n{0}; n < coinbase.vout.size(); ++n) {
+                const CTxOut& out{coinbase.vout[n]};
+                if (const auto commit{sidechain::ParseBundleCommitScript(out.scriptPubKey)}) {
+                    bundle = commit->GetHex();
+                    continue;
+                }
+                if (n == 0 || out.scriptPubKey.IsUnspendable() || out.nValue == 0) continue;
+                if (payouts.size() >= MAX_PEG_ROWS) {
+                    more = true;
+                    continue;
+                }
+                CTxDestination dest;
+                UniValue row{UniValue::VARR};
+                row.push_back(static_cast<int64_t>(n));
+                row.push_back(out.nValue);
+                row.push_back(ExtractDestination(out.scriptPubKey, dest) ? EncodeDestination(dest) : std::string{});
+                payouts.push_back(std::move(row));
+            }
+        }
+        UniValue withdrawals{UniValue::VARR};
+        UniValue refunds{UniValue::VARR};
+        for (size_t i{1}; i < block.vtx.size(); ++i) {
+            const CTransaction& tx{*block.vtx[i]};
+            for (uint32_t n{0}; n < tx.vout.size(); ++n) {
+                const CTxOut& out{tx.vout[n]};
+                if (const auto w{sidechain::IsWithdrawalScript(out.scriptPubKey) ? sidechain::ParseWithdrawalOutput(out) : std::nullopt}) {
+                    if (withdrawals.size() >= MAX_PEG_ROWS) {
+                        more = true;
+                        continue;
+                    }
+                    UniValue row{UniValue::VARR};
+                    row.push_back(tx.GetHash().GetHex());
+                    row.push_back(static_cast<int64_t>(n));
+                    row.push_back(w->amount);
+                    row.push_back(w->main_fee);
+                    row.push_back(HexStr(w->main_script));
+                    row.push_back(EncodeDestination(WitnessV0KeyHash{w->refund_keyhash}));
+                    withdrawals.push_back(std::move(row));
+                } else if (const auto r{sidechain::ParseRefundScript(out.scriptPubKey)}) {
+                    if (refunds.size() >= MAX_PEG_ROWS) {
+                        more = true;
+                        continue;
+                    }
+                    UniValue row{UniValue::VARR};
+                    row.push_back(tx.GetHash().GetHex());
+                    row.push_back(r->withdrawal.hash.GetHex());
+                    row.push_back(static_cast<int64_t>(r->withdrawal.n));
+                    refunds.push_back(std::move(row));
+                }
+            }
+        }
+        UniValue out{UniValue::VOBJ};
+        out.pushKV("coinbase", block.vtx.empty() ? std::string{} : block.vtx[0]->GetHash().GetHex());
+        out.pushKV("payouts", std::move(payouts));
+        out.pushKV("bundle", std::move(bundle));
+        out.pushKV("withdrawals", std::move(withdrawals));
+        out.pushKV("refunds", std::move(refunds));
+        out.pushKV("more", more);
+        return out;
+    }
+#endif
     if (method == "timestamp.search") {
         interfaces::Node& node{m_node()};
         const std::string payload{ToLower(ParamStr(params, "payload"))};

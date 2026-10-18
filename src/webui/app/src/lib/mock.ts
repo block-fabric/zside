@@ -25,6 +25,7 @@ export function installMock(options: MockOptions = {}): void {
     }),
     'app.help': () => ({ usage: 'Usage: chains-app [options] [URI]', options: 'Options:\n\n  -?\n       Print this help message and exit' }),
     'app.about': () => ({ name: 'Chains', version: 'preview', license: 'Distributed under the MIT software license.' }),
+    'app.quitGuard': () => true,
     'prefs.get': () => prefs,
     'prefs.set': (p) => Object.assign(prefs, p),
     'node.state': () => ({

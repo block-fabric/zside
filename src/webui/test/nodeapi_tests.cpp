@@ -24,6 +24,9 @@
 #include <webui/nodeapi.h>
 #include <webui/options.h>
 #include <webui/sidechainnodes.h>
+#if WEBUI_SIDECHAIN
+#include <sidechain/state.h>
+#endif
 
 #include <boost/test/unit_test.hpp>
 
@@ -410,6 +413,45 @@ BOOST_AUTO_TEST_CASE(node_api)
 }
 
 #if WEBUI_SIDECHAIN
+#if WEBUI_SIDECHAIN
+BOOST_AUTO_TEST_CASE(explorer_peg_of_a_block)
+{
+    // What a block does with the peg (explorer.peg), read from the block: a withdrawal of a transaction, with its amount,
+    // the fee for the mainchain, its script there and the address a refund pays; a block without any: nothing.
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    auto node{interfaces::MakeNode(m_node)};
+    webui::NodeApi api{[&]() -> interfaces::Node& { return *node; }, [](const std::string&) { return false; }, [](const webui::Window::ConfirmDialog&) { return false; }};
+    const CBlockIndex* tip{WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    const UniValue plain{api.Call("explorer.peg", Obj({{"hash", tip->GetBlockHash().GetHex()}}))};
+    BOOST_CHECK(plain["withdrawals"].empty());
+    BOOST_CHECK(plain["refunds"].empty());
+    BOOST_CHECK(plain["bundle"].isNull());
+    BOOST_CHECK(!plain["more"].get_bool());
+    BOOST_CHECK_EQUAL(plain["coinbase"].get_str(), m_coinbase_txns.back()->GetHash().GetHex());
+
+    const CScript main_script{CScript() << OP_0 << std::vector<unsigned char>(20, 0x42)};
+    const uint160 refund_keyhash{coinbaseKey.GetPubKey().GetID()};
+    const CAmount amount{COIN};
+    std::vector<CTxOut> outputs{CTxOut{amount, sidechain::WithdrawalScript(1000, refund_keyhash, main_script)},
+                                CTxOut{m_coinbase_txns[0]->vout[0].nValue - amount - 10000, GetScriptForDestination(WitnessV0KeyHash{coinbaseKey.GetPubKey()})}};
+    auto [tx, fee]{CreateValidTransaction({m_coinbase_txns[0]}, {COutPoint{m_coinbase_txns[0]->GetHash(), 0}}, 1, {coinbaseKey}, outputs, std::nullopt, std::nullopt)};
+    const CBlock block{CreateAndProcessBlock({tx}, GetScriptForDestination(WitnessV0KeyHash{coinbaseKey.GetPubKey()}))};
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == block.GetHash());
+    const UniValue peg{api.Call("explorer.peg", Obj({{"hash", block.GetHash().GetHex()}}))};
+    BOOST_REQUIRE_EQUAL(peg["withdrawals"].size(), 1U);
+    const UniValue& w{peg["withdrawals"][0]};
+    BOOST_CHECK_EQUAL(w[0].get_str(), tx.GetHash().GetHex());
+    BOOST_CHECK_EQUAL(w[1].getInt<int>(), 0);
+    // What the mainchain pays: the coins burned, less the fee for its miners.
+    BOOST_CHECK_EQUAL(w[2].getInt<int64_t>(), amount - 1000);
+    BOOST_CHECK_EQUAL(w[3].getInt<int64_t>(), 1000);
+    BOOST_CHECK_EQUAL(w[4].get_str(), HexStr(main_script));
+    BOOST_CHECK_EQUAL(w[5].get_str(), EncodeDestination(WitnessV0KeyHash{refund_keyhash}));
+    BOOST_CHECK_THROW(api.Call("explorer.peg", Obj({{"hash", std::string(64, '7')}})), webui::HostError);
+    BOOST_CHECK_THROW(api.Call("explorer.peg", Obj({{"hash", "nope"}})), webui::HostError);
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(mainchain_host_on_another_machine_asks_the_desktop)
 {
     // Audit port-1 #4: the node sends the credentials of the mainchain node to the host of mainchainConnect,

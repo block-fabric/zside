@@ -476,6 +476,33 @@ BOOST_AUTO_TEST_CASE(send_receive_and_history)
     CreateAndProcessBlock({CMutableTransaction{*bumped_tx}}, CScript{} << OP_TRUE);
     Sync();
 
+    // An address in the explorer, from what the wallet knows: alice's mining address received the reward and spent it
+    // whole (the bumped payment), newest first; bob's holds the 10 coins; another wallet's address is not known.
+    UniValue mined_at{Call("wallet.address", Obj({{"wallet", "alice"}, {"address", a1}}))};
+    BOOST_CHECK(mined_at["mine"].get_bool());
+    BOOST_CHECK_EQUAL(mined_at["label"].get_str(), "mining");
+    BOOST_CHECK_EQUAL(mined_at["received"].getInt<int64_t>(), reward);
+    BOOST_CHECK_EQUAL(mined_at["spent"].getInt<int64_t>(), reward);
+    BOOST_CHECK_EQUAL(mined_at["balance"].getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(mined_at["txCount"].getInt<int>(), 2);
+    BOOST_CHECK_EQUAL(mined_at["coinCount"].getInt<int>(), 0);
+    BOOST_REQUIRE_EQUAL(mined_at["history"].size(), 2U);
+    BOOST_CHECK_EQUAL(mined_at["history"][0][0].get_str(), bumped["txid"].get_str());
+    BOOST_CHECK_EQUAL(mined_at["history"][0][3].getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(mined_at["history"][0][4].getInt<int64_t>(), reward);
+    BOOST_CHECK_EQUAL(mined_at["history"][1][3].getInt<int64_t>(), reward);
+    BOOST_CHECK(mined_at["history"][0][1].getInt<int>() > mined_at["history"][1][1].getInt<int>());
+    BOOST_CHECK_EQUAL(Call("wallet.address", Obj({{"wallet", "alice"}, {"address", a1}, {"skip", 1}, {"count", 1}}))["history"][0][3].getInt<int64_t>(), reward);
+    UniValue bobs{Call("wallet.address", Obj({{"wallet", "bob"}, {"address", b1}}))};
+    BOOST_CHECK_EQUAL(bobs["balance"].getInt<int64_t>(), 10 * COIN);
+    BOOST_REQUIRE_EQUAL(bobs["coins"].size(), 1U);
+    BOOST_CHECK_EQUAL(bobs["coins"][0][2].getInt<int64_t>(), 10 * COIN);
+    BOOST_CHECK(!bobs["coins"][0][4].get_bool());
+    BOOST_CHECK(!Call("wallet.address", Obj({{"wallet", "alice"}, {"address", b1}}))["mine"].get_bool());
+    BOOST_CHECK(!Call("wallet.address", Obj({{"wallet", "alice"}, {"address", b1}})).exists("history"));
+    BOOST_CHECK_EQUAL(ErrorOf("wallet.address", Obj({{"wallet", "alice"}, {"address", a1}, {"count", 101}})), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(ErrorOf("wallet.address", Obj({{"wallet", "alice"}, {"address", "rchn1qnope"}})), webui::BRIDGE_INVALID_REQUEST);
+
     // Coin control: the coins of bob, the estimate of a transaction made of them.
     UniValue coins{Call("wallet.coins", Obj({{"wallet", "bob"}}))};
     BOOST_REQUIRE_EQUAL(coins.size(), 1U);
@@ -632,6 +659,21 @@ BOOST_AUTO_TEST_CASE(address_book_requests_and_messages)
     book.clear();
     for (const UniValue& e : Values(Call("wallet.addresses", Obj({{"wallet", "book"}})))) book[e["address"].get_str()] = e;
     BOOST_CHECK(!book.contains(theirs2));
+
+    // The explorer's "yours": which addresses of a page are the wallet's, with their labels; the others, an address
+    // book entry that is not the wallet's and what is no address left out; too many at once refused.
+    const std::string change{Call("wallet.newAddress", Obj({{"wallet", "book"}, {"type", "bech32"}})).get_str()};
+    const UniValue owned{Call("wallet.owned", Obj({{"wallet", "book"}, {"addresses", List({UniValue{mine}, UniValue{theirs}, UniValue{"rchn1qnope"}, UniValue{change}})}}))};
+    BOOST_REQUIRE_EQUAL(owned.size(), 2U);
+    BOOST_CHECK_EQUAL(owned[0][0].get_str(), mine);
+    BOOST_CHECK_EQUAL(owned[0][1].get_str(), "me too");
+    BOOST_CHECK_EQUAL(owned[1][0].get_str(), change);
+    BOOST_CHECK_EQUAL(owned[1][1].get_str(), "");
+    BOOST_CHECK_EQUAL(Call("wallet.owned", Obj({{"wallet", "other"}, {"addresses", List({UniValue{mine}})}})).size(), 0U);
+    UniValue too_many{UniValue::VARR};
+    for (int i{0}; i < 501; ++i) too_many.push_back(mine);
+    BOOST_CHECK_EQUAL(ErrorOf("wallet.owned", Obj({{"wallet", "book"}, {"addresses", too_many}})), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(ErrorOf("wallet.owned", Obj({{"wallet", "book"}})), webui::BRIDGE_INVALID_REQUEST);
 
     // Payment requests, kept in the wallet as chains-qt keeps them.
     UniValue r1{Call("wallet.requests.add", Obj({{"wallet", "book"}, {"address", mine}, {"label", "rent"}, {"amount", 150000000}, {"message", "June"}}))};

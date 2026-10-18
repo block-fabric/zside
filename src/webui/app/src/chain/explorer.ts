@@ -28,6 +28,8 @@ export interface ChainFact {
   dt: string;
   dd: string;
   mono?: boolean;
+  /** A block, transaction or address of this chain the fact names: a link to its view after the words. */
+  link?: { kind: 'block' | 'tx' | 'address'; id: string };
 }
 
 export interface ChainExplorer {

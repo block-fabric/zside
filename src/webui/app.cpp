@@ -37,6 +37,7 @@
 #include <webui/nodeapi.h>
 #include <webui/nodeevents.h>
 #include <webui/options.h>
+#include <webui/quitguard.h>
 #include <webui/rpcpolicy.h>
 #include <webui/local.h>
 #include <webui/sidechainapi.h>
@@ -338,7 +339,72 @@ void App::CloseRequested()
         m_window->Minimize();
         return;
     }
-    RequestShutdown();
+    AskQuit();
+}
+
+void App::QuitRequested()
+{
+    m_window->Post([this] { AskQuit(); });
+}
+
+void App::AskQuit()
+{
+    {
+        LOCK(m_mutex);
+        if (m_shutdown_requested) return;
+    }
+    const int64_t now{SteadySeconds()};
+    const std::optional<std::string> message{m_quit_guard.Message(now)};
+    if (m_quit_guard.OnQuit(now) == QuitGuard::Decision::QUIT || !message) {
+        RequestShutdown();
+        return;
+    }
+    // The page keeps work a quit would interrupt: the user decides, in the dialog of the host. Not waited for: a second
+    // quit meanwhile quits (QuitGuard), the end of the session of the desktop too.
+    Window::ConfirmDialog confirm{
+        .title = strprintf("Quit %s?", CLIENT_NAME),
+        .message = *message,
+        .accept = "Quit anyway",
+        .level = dialog::Level::WARNING,
+        .cancel = strprintf("Keep %s open", CLIENT_NAME),
+        .kind = "quit",
+    };
+    dialog::Request request{DialogRequest(confirm)};
+    const auto answered{[this](bool quit) {
+        --m_host_questions;
+        m_quit_guard.Answered();
+        if (quit) RequestShutdown();
+    }};
+    ++m_host_questions;
+    LogInfo("webui: quit asked while the page keeps work it would interrupt: the user is asked");
+#ifdef WEBUI_TEST_HOOKS
+    {
+        std::optional<TestAnswer> answer;
+        bool unexpected{false};
+        {
+            LOCK(m_mutex);
+            if (!m_test_confirms.empty()) {
+                answer = m_test_confirms.front();
+                m_test_confirms.pop_front();
+            } else if (m_test_confirm_always) {
+                answer = m_test_confirm_always;
+            } else if (!m_test_script.empty()) {
+                unexpected = true;
+            }
+            if (answer || unexpected) m_test_confirmed.push_back(confirm);
+        }
+        if (unexpected || (answer && (answer->kind == TestConfirm::YES || answer->kind == TestConfirm::NO))) {
+            const bool quit{answer && answer->kind == TestConfirm::YES};
+            m_window->Post([answered, quit] { answered(quit); });
+            return;
+        }
+        if (answer) request.test_fallback = answer->kind == TestConfirm::FALLBACK;
+    }
+#endif
+    m_window->Ask(request, [this, answered](dialog::Answer answer) {
+        const bool quit{answer.accepted};
+        m_window->Post([answered, quit] { answered(quit); });
+    });
 }
 
 UniValue App::WindowState()
@@ -930,7 +996,7 @@ void App::UpdateTray()
 void App::OnTrayMenu(const std::string& id)
 {
     if (id == "quit") {
-        RequestShutdown();
+        AskQuit();
         return;
     }
     if (id == "toggle") {
@@ -1040,7 +1106,15 @@ void App::RegisterHostMethods()
         return UniValue{m_language};
     });
     b.RegisterHost("app.quit", [this](const UniValue&) {
-        RequestShutdown();
+        QuitRequested();
+        return UniValue{true};
+    });
+    // The page keeps work a quit would interrupt (a market of Hivemind being created): {message} the text the host shows
+    // before a quit (said again within QuitGuard::TTL_S, else forgotten), {message: null} or "" none.
+    b.RegisterHost("app.quitGuard", [this](const UniValue& params) {
+        const UniValue message{Param(params, "message")};
+        if (!message.isNull() && !message.isStr()) throw HostError(BRIDGE_INVALID_REQUEST, "message must be text or null");
+        m_quit_guard.Set(message.isStr() ? message.get_str() : std::string{}, SteadySeconds());
         return UniValue{true};
     });
     // Stop, and start again with the same options (a change of the options needs it).

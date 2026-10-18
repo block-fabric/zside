@@ -1,6 +1,7 @@
 // The wallet functions of the host (src/webui/walletapi.h), typed, and what the wallet pages of
 // chains-qt compute from them: the texts of the transaction table, its filters, the CSV export.
 import { BridgeError, request } from './bridge';
+import type { AddressActivity } from './explorer';
 import { t, tn } from './i18n.svelte';
 import { formatAmount, type Unit } from './units';
 import { COINBASE_ROLES } from '../chain/roles';
@@ -239,6 +240,8 @@ export function walletApi(wallet: string) {
     depositInfo: (txid: string) => call<{ txid: string; slot: number; destination?: string; amount?: number; dropped: boolean }>('wallet.deposit.info', { ...w, txid }),
     bumpPsbt: (token: string) => call<{ psbt: string }>('wallet.bump.psbt', { ...w, token }),
     addresses: () => call<AddressEntry[]>('wallet.addresses', w),
+    /** An address of the explorer as this wallet knows it (no scan of the chain): of another wallet's, { mine: false }. */
+    address: (address: string, page: { skip: number; count: number; coinSkip: number; coinCount: number }) => call<AddressActivity>('wallet.address', { ...w, address, ...page }),
     addSending: (address: string, label: string) => call<string>('wallet.addressBook.add', { ...w, address, label }),
     editAddress: (address: string, label: string, newAddress?: string) =>
       call<{ address: string; changed: boolean }>('wallet.addressBook.edit', { ...w, address, label, ...(newAddress ? { newAddress } : {}) }),

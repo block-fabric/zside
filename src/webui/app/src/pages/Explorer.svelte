@@ -3,10 +3,18 @@
   // the latest blocks as a ribbon of boxes after the block being mined (components/BlockRibbon.svelte,
   // after the user's pool site), then the latest blocks and the transactions waiting in the mempool as
   // tables; a block with its transactions; a transaction with its inputs and outputs. The raw JSON of the
-  // node is there too.
+  // node is there too. Every hash, id and height links to its view (a block, a transaction, an address of this chain),
+  // the addresses of the open wallet are marked "yours", and Back returns along the views opened. An address is shown
+  // from what the open wallet knows of it (no record of addresses, no scan). A block of a sidechain shows the block of
+  // the mainchain that merged mined it and what it did with the peg (deposits paid, withdrawals, refunds), the hashes
+  // of the mainchain copied, never linked: they are no blocks of this chain.
   import { t } from '../lib/i18n.svelte';
   import Amount from '../components/Amount.svelte';
   import BlockRibbon from '../components/BlockRibbon.svelte';
+  import AddressLink from '../components/AddressLink.svelte';
+  import AddressView from '../components/AddressView.svelte';
+  import { mainBlockTip, mainchainName, mainTxTip, matchDeposits, mayBeAddress, type BlockPeg, type ScriptInfo } from '../lib/explorer';
+  import { depositsOf } from '../lib/side';
   import { coinbaseTag, TARGET_SPACING, type RibbonBlock } from '../lib/blocks';
   import { every } from '../lib/poll';
   import CopyButton from '../components/CopyButton.svelte';
@@ -75,13 +83,19 @@
     weight: number;
     locktime: number;
     version: number;
-    vin: { txid?: string; vout?: number; coinbase?: string; sequence: number }[];
+    vin: { txid?: string; vout?: number; coinbase?: string; sequence: number; prevout?: { height: number; value: number; scriptPubKey: { type: string; address?: string } } }[];
     vout: { value: number; n: number; scriptPubKey: { type: string; address?: string; asm: string; hex: string } }[];
     blockhash?: string;
     confirmations?: number;
     time?: number;
+    /** With the coins it spent (verbosity 2, block undo data read). */
+    fee?: number;
     [key: string]: unknown;
   }
+  /** What the explorer shows: Back returns along them. */
+  type View = { kind: 'block'; hash: string } | { kind: 'tx'; txid: string; blockHash: string | null; height?: number } | { kind: 'address'; address: string };
+  /** The most views Back goes back along. */
+  const MAX_TRAIL = 50;
 
   const TABS = [
     { id: 'blocks', label: 'Blocks' },
@@ -117,7 +131,8 @@
     void blockDir;
     blocksPage = 0;
   });
-  let shown = $state<{ kind: 'block'; block: Block } | { kind: 'tx'; tx: Tx; blockHash: string | null } | null>(null);
+  let shown = $state<{ kind: 'block'; block: Block } | { kind: 'tx'; tx: Tx; blockHash: string | null } | { kind: 'address'; address: string; info: ScriptInfo } | null>(null);
+  let trail = $state.raw<View[]>([]);
   let raw = $state(false);
   let loading = $state(false);
   const cache = new Map<string, BlockRow>();
@@ -342,31 +357,118 @@
   async function pickBlock(hash: string) {
     selectedBlock = hash;
     list = 'blocks';
-    if (!detail.follow && (await showBlock(hash))) {
-      document.getElementById('explorer-title')?.scrollIntoView({ block: 'nearest' });
-    }
+    if (!detail.follow) await open({ kind: 'block', hash });
   }
 
+  // --- Views, and Back along them ---
+  function viewShown(): View | null {
+    if (shown?.kind === 'block') return { kind: 'block', hash: shown.block.hash };
+    if (shown?.kind === 'tx') return { kind: 'tx', txid: shown.tx.txid, blockHash: shown.blockHash };
+    if (shown?.kind === 'address') return { kind: 'address', address: shown.address };
+    return null;
+  }
+  const sameView = (a: View, b: View) => (a.kind === 'block' && b.kind === 'block' ? a.hash === b.hash : a.kind === 'tx' && b.kind === 'tx' ? a.txid === b.txid : a.kind === 'address' && b.kind === 'address' && a.address === b.address);
+  function display(v: View): Promise<boolean> {
+    if (v.kind === 'block') return showBlock(v.hash);
+    if (v.kind === 'tx') return showTx(v.txid, v.blockHash, v.height);
+    return showAddress(v.address);
+  }
+  /** Open a view; the one shown before goes on the trail Back returns along. */
+  async function open(v: View): Promise<boolean> {
+    const from = viewShown();
+    if (!(await display(v))) return false;
+    if (from && !sameView(from, v)) trail = [...trail, from].slice(-MAX_TRAIL);
+    document.getElementById('explorer-title')?.scrollIntoView?.({ block: 'nearest' });
+    return true;
+  }
+  async function back() {
+    const v = trail[trail.length - 1];
+    if (!v) return;
+    trail = trail.slice(0, -1);
+    await display(v);
+  }
+  const openBlock = (hash: string) => open({ kind: 'block', hash });
+  const openTx = (txid: string, blockHash: string | null, height?: number) => open({ kind: 'tx', txid, blockHash, height });
+  const openAddress = (address: string) => open({ kind: 'address', address });
+  async function openHeight(height: number) {
+    try {
+      await openBlock(await rpc.call('getblockhash', [height]));
+    } catch (e) {
+      await inform(t('Block Explorer'), errorText(e));
+    }
+  }
+  /** A transaction of a wallet's address (its block's height known; -1 waiting). */
+  const openTxAt = (txid: string, height: number) => openTx(txid, null, height >= 0 ? height : undefined);
+
+  // What the block shown did with the peg (a sidechain: host explorer.peg); null until read, or if it cannot be.
+  let peg = $state<BlockPeg | null>(null);
   async function showBlock(hash: string): Promise<boolean> {
     try {
       const block = await rpc.raw<Block>('getblock', [hash, 1]);
       shown = { kind: 'block', block };
       selectedTx = null;
+      peg = null;
+      if (SIDECHAIN) {
+        host.explorerPeg(hash).then(
+          (p) => {
+            if (shown?.kind === 'block' && shown.block.hash === hash) peg = p;
+          },
+          () => undefined,
+        );
+      }
       return true;
     } catch {
       return false;
     }
   }
 
-  async function showTx(txid: string, blockHash: string | null): Promise<boolean> {
+  // Which transactions spend the outputs of the one shown (gettxspendingprevout: from the mempool, or from
+  // -txospenderindex if it is on); by output number.
+  let spenders = $state<Record<number, { txid: string; blockHash: string | null }>>({});
+  async function showTx(txid: string, blockHash: string | null, height?: number): Promise<boolean> {
     try {
-      const tx = await rpc.raw<Tx>('getrawtransaction', blockHash ? [txid, true, blockHash] : [txid, true]);
-      shown = { kind: 'tx', tx, blockHash };
+      // A transaction of a known block is read with it (no -txindex needed): from a coin's height when its block is not named.
+      if (!blockHash && height !== undefined) blockHash = await rpc.call('getblockhash', [height]).catch(() => null);
+      const at = blockHash ? [txid, 2, blockHash] : [txid, 2];
+      // Verbosity 2 adds the coins spent (block undo data); without it (pruned), the transaction alone.
+      const tx = await rpc.raw<Tx>('getrawtransaction', at).catch(() => rpc.raw<Tx>('getrawtransaction', blockHash ? [txid, 1, blockHash] : [txid, 1]));
+      shown = { kind: 'tx', tx, blockHash: blockHash ?? tx.blockhash ?? null };
+      spenders = {};
+      const outs = tx.vout.slice(0, 100).map((o) => ({ txid: tx.txid, vout: o.n }));
+      rpc.raw<{ txid: string; vout: number; spendingtxid?: string; blockhash?: string }[]>('gettxspendingprevout', [outs]).then(
+        (r) => {
+          if (shown?.kind !== 'tx' || shown.tx.txid !== tx.txid) return;
+          const found: Record<number, { txid: string; blockHash: string | null }> = {};
+          for (const x of r) if (x.spendingtxid) found[x.vout] = { txid: x.spendingtxid, blockHash: x.blockhash ?? null };
+          spenders = found;
+        },
+        () => undefined,
+      );
       return true;
     } catch {
       return false;
     }
   }
+
+  async function showAddress(address: string): Promise<boolean> {
+    try {
+      const info = await rpc.raw<ScriptInfo>('validateaddress', [address]);
+      if (!info.isvalid) return false;
+      shown = { kind: 'address', address: info.address ?? address, info };
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // The block of the mainchain that merged mined the block shown (a sidechain: from the events the app follows).
+  const mainOfShown = $derived(SIDECHAIN && shown?.kind === 'block' ? (mainOf.get(shown.block.hash) ?? null) : null);
+  // The deposits the coinbase of the block shown pays, by output: the transaction of the mainchain that made each.
+  const depositOf = $derived.by(() => {
+    if (!SIDECHAIN || !peg || shown?.kind !== 'block') return new Map<number, string>();
+    const recorded = depositsOf(side.main.events, Number.MAX_SAFE_INTEGER).map((d) => ({ txid: d.txid, destination: d.destination, sats: d.sats }));
+    return matchDeposits(peg.payouts, recorded.reverse());
+  });
 
   async function search(input = query) {
     const q = explorerQuery(input);
@@ -375,7 +477,7 @@
       if (q.kind === 'height') {
         try {
           const hash = await rpc.call('getblockhash', [q.height]);
-          await showBlock(hash);
+          await openBlock(hash);
           return;
         } catch (e) {
           await inform(t('Block Explorer'), errorText(e));
@@ -383,23 +485,32 @@
         }
       }
       if (q.kind === 'hash') {
-        if (await showBlock(q.hash)) return;
-        if (await showTx(q.hash, null)) return;
+        if (await openBlock(q.hash)) return;
+        if (await openTx(q.hash, null)) return;
         await inform(
           t('Block Explorer'),
           t('No block has this hash, and no transaction with this id is waiting to be mined. Finding a mined transaction by its id alone requires the node to run with -txindex.'),
         );
         return;
       }
-      await inform(t('Block Explorer'), t('Enter a block height, a block hash or a transaction id.'));
+      // An address of this chain (the node says), of any kind.
+      if (mayBeAddress(input) && (await openAddress(input.trim()))) return;
+      await inform(t('Block Explorer'), t('Enter a block height, a block hash, a transaction id or an address.'));
     } finally {
       loading = false;
     }
   }
 
-  // A search given with the page ("search:<hash>", from the overview and the transactions).
+  // A search given with the page ("search:<hash>", from the overview and the transactions), or a transaction of a
+  // block ("tx:<txid>:<block hash>", the detail panel: read with its block, no -txindex needed).
   $effect(() => {
     const t = nav.tab;
+    const of = /^tx:([0-9a-f]{64}):([0-9a-f]{64})$/.exec(t);
+    if (of) {
+      nav.tab = '';
+      void openTx(of[1], of[2]);
+      return;
+    }
     if (!t.startsWith('search:')) return;
     const q = t.slice('search:'.length);
     nav.tab = '';
@@ -454,7 +565,7 @@
   <form class="search row" onsubmit={(e) => { e.preventDefault(); search(); }}>
     <div class="box grow">
       <Icon name="search" size={17} />
-      <input id="explorer-search" type="search" class="mono" placeholder="Block height, block hash or transaction id" spellcheck="false" autocomplete="off" bind:value={query} aria-label="Search" />
+      <input id="explorer-search" type="search" class="mono" placeholder="Block height, block hash, transaction id or address" spellcheck="false" autocomplete="off" bind:value={query} aria-label="Search" />
     </div>
     <button type="submit" class="btn primary" disabled={loading}>Search</button>
     <label class="row count">
@@ -482,7 +593,7 @@
   {#if list === 'blocks'}
     <!-- As tall as the rows of the page (10 to 100, user decision): the page scrolls, not the list. -->
     <div class="table-box fit" use:css={{ height: `${(Math.max(1, blocksShown.length) + 1) * ROW + 2}px` }}>
-      <DataTable fit rows={blocksShown} columns={blockColumns} key={(b) => b.hash} bind:selected={selectedBlock} bind:sortKey={blockSort} bind:sortDir={blockDir} label="Blocks" empty="Loading…" onactivate={(b) => showBlock(b.hash)}>
+      <DataTable fit rows={blocksShown} columns={blockColumns} key={(b) => b.hash} bind:selected={selectedBlock} bind:sortKey={blockSort} bind:sortDir={blockDir} label="Blocks" empty="Loading…" onactivate={(b) => openBlock(b.hash)}>
         {#snippet cell(b, column)}
           {#if column.key.startsWith('chain:')}
             {@const c = chainColumnOf(column.key)}
@@ -494,24 +605,29 @@
           {:else if column.key === 'size'}{#if b.size === undefined}<span class="faint">…</span>{:else}{formatBytes(b.size)}{/if}
           {:else if column.key === 'weight' && b.weight === undefined}<span class="faint">…</span>
           {:else if column.key === 'difficulty'}{b.difficulty.toPrecision(8)}
-          {:else if column.key === 'height' || column.key === 'nTx' || column.key === 'weight'}{formatCount(Number(column.value(b)))}
-          {:else}{b.hash}{/if}
+          {:else if column.key === 'height'}<button type="button" class="mono linkish" onclick={() => openBlock(b.hash)}>{formatCount(b.height)}</button>
+          {:else if column.key === 'nTx' || column.key === 'weight'}{formatCount(Number(column.value(b)))}
+          {:else}<button type="button" class="mono linkish cell-link" onclick={() => openBlock(b.hash)}>{b.hash}</button>{/if}
         {/snippet}
       </DataTable>
     </div>
   {:else}
     <div class="table-box" use:fillHeight>
-      <DataTable rows={mempool} columns={mempoolColumns} key={(m) => m.txid} bind:selected={selectedTx} label="Waiting transactions" empty="No transaction is waiting" onactivate={(m) => showTx(m.txid, null)}>
+      <DataTable rows={mempool} columns={mempoolColumns} key={(m) => m.txid} bind:selected={selectedTx} label="Waiting transactions" empty="No transaction is waiting" onactivate={(m) => openTx(m.txid, null)}>
         {#snippet cell(m, column)}
           {#if column.key === 'time'}{formatTime(m.time)}
           {:else if column.key === 'fee'}<Amount sats={coinsToSats(m.fee)} masked={false} />
           {:else if column.key === 'vsize'}{formatCount(m.vsize)} vB
-          {:else}{m.txid}{/if}
+          {:else}<button type="button" class="mono linkish cell-link" onclick={() => openTx(m.txid, null)}>{m.txid}</button>{/if}
         {/snippet}
       </DataTable>
     </div>
   {/if}
-  <p class="faint hint">Double-click a block or a transaction to see its details.</p>
+  <p class="faint hint">Double-click a block or a transaction to see its details, or click a link.</p>
+
+  {#snippet backButton()}
+    {#if trail.length}<button type="button" class="btn small ghost" onclick={back} title={t('Back to what was shown before')}><Icon name="receive" size={14} /> Back</button>{/if}
+  {/snippet}
 
   {#if shown?.kind === 'block'}
     {@const b = shown.block}
@@ -519,8 +635,9 @@
       <div class="panel-head">
         <h2 id="explorer-title">Block {formatCount(b.height)}</h2>
         <div class="row">
-          {#if b.previousblockhash}<button type="button" class="btn small" onclick={() => showBlock(b.previousblockhash!)}><Icon name="receive" size={14} /> Previous</button>{/if}
-          {#if b.nextblockhash}<button type="button" class="btn small" onclick={() => showBlock(b.nextblockhash!)}>Next <Icon name="send" size={14} /></button>{/if}
+          {@render backButton()}
+          {#if b.previousblockhash}<button type="button" class="btn small" onclick={() => openBlock(b.previousblockhash!)}><Icon name="receive" size={14} /> Previous</button>{/if}
+          {#if b.nextblockhash}<button type="button" class="btn small" onclick={() => openBlock(b.nextblockhash!)}>Next <Icon name="send" size={14} /></button>{/if}
           <button type="button" class="btn small ghost" aria-pressed={raw} onclick={() => (raw = !raw)}>{raw ? 'Details' : 'Raw JSON'}</button>
         </div>
       </div>
@@ -529,13 +646,15 @@
       {:else}
         <div class="panel-body block-grid">
           <dl class="facts">
-            {#each EXPLORER.facts(b) as f (f.dt)}<dt>{f.dt}</dt><dd class:mono={f.mono} class="break">{f.dd}</dd>{/each}
+            {#each EXPLORER.facts(b) as f (f.dt)}<dt>{f.dt}</dt><dd class:mono={f.mono} class="break">{f.dd}{#if f.link}{@const l = f.link} <button type="button" class="mono linkish" title={l.id} onclick={() => (l.kind === 'block' ? openBlock(l.id) : l.kind === 'tx' ? openTx(l.id, null) : openAddress(l.id))}>{shortHash(l.id, 10)}</button>{/if}</dd>{/each}
             <dt>Hash</dt><dd class="mono break">{b.hash} <CopyButton text={b.hash} label="Copy the block hash" /></dd>
             <dt>Time</dt><dd>{formatTime(b.time)} <span class="faint">(median {formatTime(b.mediantime)})</span></dd>
             <dt>Confirmations</dt><dd class="num">{formatCount(b.confirmations)}</dd>
             <dt>Transactions</dt><dd class="num">{formatCount(b.tx.length)}</dd>
             <dt>Size</dt><dd>{formatBytes(b.size)} · weight {formatCount(b.weight)}</dd>
             <dt>Difficulty</dt><dd class="num">{b.difficulty.toPrecision(10)} <span class="faint mono">bits {b.bits}</span></dd>
+            {#if b.previousblockhash}<dt>Previous block</dt><dd class="mono break"><button type="button" class="mono linkish" onclick={() => openBlock(b.previousblockhash!)}><span class="faint">{formatCount(b.height - 1)} ·</span> {b.previousblockhash}</button></dd>{/if}
+            {#if mainOfShown}<dt>Merged mined in</dt><dd class="mono break main-ref" title={mainBlockTip()}><span class="faint">{mainchainName()} {formatCount(mainOfShown.height)} ·</span> {mainOfShown.hash} <CopyButton text={mainOfShown.hash} label={t('Copy the hash of the block of %1', mainchainName())} /></dd>{/if}
             <dt>Merkle root</dt><dd class="mono break">{b.merkleroot}</dd>
             <dt>Version / nonce</dt><dd class="mono">{b.version} / {b.nonce}</dd>
           </dl>
@@ -543,20 +662,75 @@
             <h3>Transactions of the block</h3>
             <ul class="txs" aria-label="Transactions of the block">
               {#each b.tx as txid, i (txid)}
-                <li><button type="button" class="mono" onclick={() => showTx(txid, b.hash)}><span class="faint">{i}</span> {txid}</button></li>
+                <li><button type="button" class="mono" onclick={() => openTx(txid, b.hash)}><span class="faint">{i}</span> {txid}</button></li>
               {/each}
             </ul>
           </div>
         </div>
       {/if}
     </section>
+    {#if SIDECHAIN && peg && !raw && (peg.payouts.length || peg.withdrawals.length || peg.refunds.length || peg.bundle)}
+      {@const pg = peg}
+      <section class="panel detail peg" aria-label="The peg in this block">
+        <div class="panel-head"><h3>The peg in this block</h3>{#if pg.more}<span class="faint small">{t('More than shown')}</span>{/if}</div>
+        <div class="panel-body peg-grid">
+          {#if pg.payouts.length}
+            <div>
+              <h4>{t('Paid by the coinbase')} ({formatCount(pg.payouts.length)})</h4>
+              <ul class="plain" aria-label="Paid by the coinbase">
+                {#each pg.payouts as [vout, sats, address] (vout)}
+                  {@const from = depositOf.get(vout)}
+                  <li>
+                    <button type="button" class="mono linkish" title={t('The coinbase, output %1', vout)} onclick={() => openTx(pg.coinbase, b.hash)}>#{vout}</button>
+                    <span class="io-what grow">
+                      {#if address}<AddressLink {address} onopen={openAddress} />{:else}<span class="faint">{t('a script')}</span>{/if}
+                      {#if from}<span class="badge accent" title={mainTxTip()}>{t('deposit')}</span> <span class="mono faint" title={mainTxTip()}>{shortHash(from, 8)}</span> <CopyButton text={from} label={t('Copy the transaction of %1', mainchainName())} />{:else}<span class="faint small">{t('deposit or refund')}</span>{/if}
+                    </span>
+                    <Amount sats={sats} masked={false} />
+                  </li>
+                {/each}
+              </ul>
+            </div>
+          {/if}
+          {#if pg.withdrawals.length || pg.refunds.length || pg.bundle}
+            <div>
+              {#if pg.bundle}<p class="small"><span class="muted">{t('Commits to the withdrawal bundle')}</span> <span class="mono" title={mainTxTip()}>{shortHash(pg.bundle, 10)}</span> <CopyButton text={pg.bundle} label="Copy the bundle" /></p>{/if}
+              {#if pg.withdrawals.length}
+                <h4>{t('Withdrawals')} ({formatCount(pg.withdrawals.length)})</h4>
+                <ul class="plain" aria-label="Withdrawals">
+                  {#each pg.withdrawals as [txid, vout, sats, fee, script, refund] (`${txid}:${vout}`)}
+                    <li>
+                      <span class="io-line grow">
+                        <button type="button" class="mono linkish" title={txid} onclick={() => openTx(txid, b.hash)}>{shortHash(txid, 10)}:{vout}</button>
+                        <span class="io-what"><span class="faint small">{t('to %1', mainchainName())}</span> <span class="mono small break" title={mainTxTip()}>{shortHash(script, 12)}</span> <CopyButton text={script} label={t('Copy the script on %1', mainchainName())} /></span>
+                        <span class="io-what"><span class="faint small">{t('refund to')}</span> <AddressLink address={refund} short={10} onopen={openAddress} /></span>
+                      </span>
+                      <span class="end"><Amount sats={sats} masked={false} />{#if fee}<br /><span class="faint small">{t('fee')} <Amount sats={fee} masked={false} /></span>{/if}</span>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if pg.refunds.length}
+                <h4>{t('Refunds asked')} ({formatCount(pg.refunds.length)})</h4>
+                <ul class="plain" aria-label="Refunds asked">
+                  {#each pg.refunds as [txid, wtxid, wvout] (txid + wtxid + wvout)}
+                    <li><button type="button" class="mono linkish" title={txid} onclick={() => openTx(txid, b.hash)}>{shortHash(txid, 10)}</button> <span class="faint small">{t('takes back')}</span> <button type="button" class="mono linkish" title={wtxid} onclick={() => openTx(wtxid, null)}>{shortHash(wtxid, 8)}:{wvout}</button></li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      </section>
+    {/if}
   {:else if shown?.kind === 'tx'}
     {@const tx = shown.tx}
     <section class="panel detail" aria-label="Transaction">
       <div class="panel-head">
         <h2 id="explorer-title" class="break">Transaction <span class="mono">{shortHash(tx.txid, 12)}</span></h2>
         <div class="row">
-          {#if shown.blockHash}<button type="button" class="btn small" onclick={() => showBlock(shown!.kind === 'tx' && shown!.blockHash ? shown!.blockHash : '')}>Its block</button>{/if}
+          {@render backButton()}
+          {#if shown.blockHash}<button type="button" class="btn small" onclick={() => openBlock(shown!.kind === 'tx' && shown!.blockHash ? shown!.blockHash : '')}>Its block</button>{/if}
           <button type="button" class="btn small ghost" aria-pressed={raw} onclick={() => (raw = !raw)}>{raw ? 'Details' : 'Raw JSON'}</button>
         </div>
       </div>
@@ -567,8 +741,9 @@
           <dl class="facts">
             <dt>Transaction id</dt><dd class="mono break">{tx.txid} <CopyButton text={tx.txid} label="Copy the transaction id" /></dd>
             <dt>Status</dt><dd>{tx.confirmations ? `${formatCount(tx.confirmations)} confirmations` : 'Waiting to be mined'}{tx.time ? `, ${formatTime(tx.time)}` : ''}</dd>
+            {#if shown.blockHash}{@const at = tx.confirmations && node.tip ? node.tip.height - tx.confirmations + 1 : null}<dt>Block</dt><dd class="mono break"><button type="button" class="mono linkish" onclick={() => openBlock(shown!.kind === 'tx' && shown!.blockHash ? shown!.blockHash : '')}>{#if at !== null}<span class="faint">{formatCount(at)} ·</span> {/if}{shown.blockHash}</button></dd>{/if}
             <dt>Size</dt><dd>{formatCount(tx.size)} bytes · {formatCount(tx.vsize)} vB · weight {formatCount(tx.weight)}</dd>
-            <dt>Paid out</dt><dd><Amount sats={txValueOut} masked={false} /></dd>
+            <dt>Paid out</dt><dd><Amount sats={txValueOut} masked={false} />{#if tx.fee !== undefined} <span class="faint">· fee <Amount sats={coinsToSats(tx.fee)} masked={false} /></span>{/if}</dd>
           </dl>
           <div class="io">
             <div>
@@ -576,7 +751,13 @@
               <ul class="plain">
                 {#each tx.vin as input, i (i)}
                   <li class="mono break">
-                    {#if input.coinbase}<span class="badge accent">coinbase</span> {input.coinbase}{:else}<button type="button" class="mono linkish" onclick={() => { query = input.txid ?? ''; search(input.txid); }}>{input.txid}:{input.vout}</button>{/if}
+                    {#if input.coinbase}<span class="badge accent">coinbase</span> {input.coinbase}
+                    {:else}
+                      <span class="io-line">
+                        <button type="button" class="mono linkish" title={t('The transaction of the coin spent')} onclick={() => openTx(input.txid ?? '', null, input.prevout?.height)}>{input.txid}:{input.vout}</button>
+                        {#if input.prevout}<span class="io-what">{#if input.prevout.scriptPubKey.address}<AddressLink address={input.prevout.scriptPubKey.address} onopen={openAddress} />{:else}<span class="faint">{input.prevout.scriptPubKey.type}</span>{/if} <Amount sats={coinsToSats(input.prevout.value)} masked={false} /></span>{/if}
+                      </span>
+                    {/if}
                   </li>
                 {/each}
               </ul>
@@ -587,7 +768,7 @@
                 {#each tx.vout as out (out.n)}
                   <li>
                     <span class="faint">{out.n}</span>
-                    <span class="mono break">{out.scriptPubKey.address ?? out.scriptPubKey.type}</span>
+                    <span class="mono break">{#if out.scriptPubKey.address}<AddressLink address={out.scriptPubKey.address} onopen={openAddress} />{:else}{out.scriptPubKey.type}{/if}{#if spenders[out.n]}{@const by = spenders[out.n]}<br /><span class="faint spent">spent by</span> <button type="button" class="mono linkish" title={by.txid} onclick={() => openTx(by.txid, by.blockHash)}>{shortHash(by.txid, 8)}</button>{/if}</span>
                     <Amount sats={coinsToSats(out.value)} masked={false} />
                   </li>
                 {/each}
@@ -597,6 +778,9 @@
         </div>
       {/if}
     </section>
+  {:else if shown?.kind === 'address'}
+    {@const a = shown}
+    <AddressView address={a.address} info={a.info} ontx={(txid, height) => openTxAt(txid, height)} onblock={openHeight} actions={backButton} />
   {/if}
 </div>
 
@@ -688,6 +872,46 @@
     display: inline;
     width: auto;
   }
+  .linkish:hover,
+  .linkish:focus-visible {
+    text-decoration: underline;
+  }
+  .cell-link {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+  .io-line {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+  .io-what {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: baseline;
+  }
+  .grow {
+    flex: 1;
+    min-width: 0;
+  }
+  .main-ref {
+    cursor: help;
+  }
+  .peg-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 1.5rem;
+  }
+  .peg h4 {
+    margin: 0 0 0.3rem;
+    font-size: 0.9rem;
+  }
+  .peg .end {
+    text-align: right;
+  }
   .txs button:hover {
     background: var(--raised);
   }
@@ -722,6 +946,7 @@
   }
   @media (max-width: 1000px) {
     .block-grid,
+    .peg-grid,
     .io {
       grid-template-columns: minmax(0, 1fr);
     }

@@ -37,6 +37,8 @@ const std::map<std::string, Bridge::Thread>& Methods()
         {"getrawmempool", WORKER},
         {"getrawtransaction", WORKER},
         {"gettxout", WORKER},
+        // Which transactions spend the outputs of one shown (the explorer): from the mempool, or from -txospenderindex if on.
+        {"gettxspendingprevout", WORKER},
         {"help", WORKER},
         {"listbanned", WORKER},
         {"uptime", WORKER},

@@ -17,6 +17,7 @@ add_executable(test_chains-app
   i18n_tests.cpp
   nodeapi_tests.cpp
   nodeevents_tests.cpp
+  quitguard_tests.cpp
   singleinstance_tests.cpp
   windowframe_tests.cpp
   $<$<BOOL:${ENABLE_WALLET}>:walletapi_tests.cpp>
@@ -83,6 +84,27 @@ if(WEBUI_SIDECHAIN)
         --js-var SIMPLE=true
     )
     set_tests_properties(webui_e2e_sidechain_simple PROPERTIES TIMEOUT 2400 RUN_SERIAL TRUE)
+    # The block explorer of a sidechain (explorer_side.js): the peg of a block, the links of a transaction, an address of
+    # the wallet and a foreign one, Back.
+    add_test(NAME webui_e2e_explorer
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_sidechain.py
+        --app $<TARGET_FILE:chains-app>
+        --mainchain-bin ${WEBUI_MAINCHAIN_BIN_DIR}
+        --tmp ${CMAKE_CURRENT_BINARY_DIR}/e2e-explorer
+        --shots ${CMAKE_CURRENT_BINARY_DIR}/e2e-shots
+        --port 41660
+        --script explorer_side.js
+    )
+    set_tests_properties(webui_e2e_explorer PROPERTIES TIMEOUT 2400 RUN_SERIAL TRUE)
+    # The confirmation before a quit (run_quit.py, quit.js: app.quitGuard): no mainchain needed. A chain whose page asks
+    # it itself runs it with --prepare and --expect in e2e/local.cmake (Hivemind).
+    add_test(NAME webui_e2e_quit
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_quit.py
+        --app $<TARGET_FILE:chains-app>
+        --tmp ${CMAKE_CURRENT_BINARY_DIR}/e2e-quit
+        --shots ${CMAKE_CURRENT_BINARY_DIR}/e2e-shots
+    )
+    set_tests_properties(webui_e2e_quit PROPERTIES TIMEOUT 1200 RUN_SERIAL TRUE)
     # The page scripts of the chain's own pages, the same way: e2e/local.cmake calls
     # webui_local_e2e(<name> <port> [options of run_sidechain.py]) for each e2e/<name>.js, so that a merge of
     # the template never conflicts with them. The template has none.

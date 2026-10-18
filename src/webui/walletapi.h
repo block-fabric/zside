@@ -70,6 +70,8 @@ class Bridge;
  *   wallet.abandon       {wallet, txid}
  *   wallet.bump.prepare / wallet.bump.commit / wallet.bump.psbt
  *   wallet.addresses     {wallet}; [{address, label, purpose, mine}]
+ *   wallet.owned         {wallet, addresses (500 at most)}; [[address, label]] of those that are the wallet's (the explorer's "yours")
+ *   wallet.address       {wallet, address, skip?, count?, coinSkip?, coinCount?}; what the wallet knows of an address (no scan of the chain)
  *   wallet.addressBook.add / .edit / .delete
  *   wallet.newAddress    {wallet, label, type}; address
  *   wallet.displayAddress {wallet, address}

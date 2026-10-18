@@ -228,6 +228,39 @@ BOOST_AUTO_TEST_CASE(rpc_calls)
     BOOST_CHECK(std::find(seen.begin(), seen.end(), "getblockcount [] /") != seen.end());
 }
 
+BOOST_AUTO_TEST_CASE(exact_results)
+{
+    // {exact: true}: the result as its JSON text, the numbers as the node wrote them (2^60 + 1 units of an asset with 8
+    // decimals: no double holds it), for the page to read them itself; errors as always; without it, as always.
+    Replies replies;
+    UiQueue ui;
+    webui::Bridge bridge{replies.Fn(), ui.Fn(), 2};
+    bridge.SetRpc([](const std::string& method, const UniValue&, const std::string&) -> UniValue {
+        if (method == "fails") throw JSONRPCError(RPC_INVALID_PARAMETER, "bad parameter");
+        UniValue result{UniValue::VOBJ};
+        UniValue big;
+        big.setNumStr("11529215046.06846977");
+        result.pushKV("balance", big);
+        result.pushKV("label", "x");
+        return result;
+    });
+    const auto exact{[](std::string method) {
+        return strprintf(R"([{"kind":"rpc","method":"%s","params":[],"exact":true}])", method);
+    }};
+    bridge.Handle("a", exact("listmyassets"));
+    auto a{replies.Wait("a")};
+    BOOST_CHECK_EQUAL(a.status, 0);
+    BOOST_REQUIRE(a.value.isObject());
+    BOOST_CHECK_EQUAL(a.value.size(), 1U);
+    BOOST_CHECK_EQUAL(a.value.find_value(std::string{webui::EXACT_KEY}).get_str(), R"({"balance":11529215046.06846977,"label":"x"})");
+    bridge.Handle("b", exact("fails"));
+    BOOST_CHECK_EQUAL(ErrorCode(replies.Wait("b")), RPC_INVALID_PARAMETER);
+    bridge.Handle("c", Request("rpc", "listmyassets"));
+    auto c{replies.Wait("c")};
+    BOOST_CHECK_EQUAL(c.value.find_value("balance").getValStr(), "11529215046.06846977");
+    BOOST_CHECK(c.value.find_value(std::string{webui::EXACT_KEY}).isNull());
+}
+
 BOOST_AUTO_TEST_CASE(host_calls)
 {
     Replies replies;
