@@ -741,7 +741,7 @@
           <dl class="facts">
             <dt>Transaction id</dt><dd class="mono break">{tx.txid} <CopyButton text={tx.txid} label="Copy the transaction id" /></dd>
             <dt>Status</dt><dd>{tx.confirmations ? `${formatCount(tx.confirmations)} confirmations` : 'Waiting to be mined'}{tx.time ? `, ${formatTime(tx.time)}` : ''}</dd>
-            {#if shown.blockHash}{@const at = tx.confirmations && node.tip ? node.tip.height - tx.confirmations + 1 : null}<dt>Block</dt><dd class="mono break"><button type="button" class="mono linkish" onclick={() => openBlock(shown!.kind === 'tx' && shown!.blockHash ? shown!.blockHash : '')}>{#if at !== null}<span class="faint">{formatCount(at)} ·</span> {/if}{shown.blockHash}</button></dd>{/if}
+            {#if shown.blockHash}{@const bh = shown.blockHash}{@const at = blocks.find((r) => r.hash === bh)?.height ?? (typeof tx.blockheight === 'number' ? tx.blockheight : null)}<dt>Block</dt><dd class="mono break"><button type="button" class="mono linkish" onclick={() => openBlock(shown!.kind === 'tx' && shown!.blockHash ? shown!.blockHash : '')}>{#if at !== null}<span class="faint">{formatCount(at)} ·</span>{' '}{/if}{shown.blockHash}</button></dd>{/if}
             <dt>Size</dt><dd>{formatCount(tx.size)} bytes · {formatCount(tx.vsize)} vB · weight {formatCount(tx.weight)}</dd>
             <dt>Paid out</dt><dd><Amount sats={txValueOut} masked={false} />{#if tx.fee !== undefined} <span class="faint">· fee <Amount sats={coinsToSats(tx.fee)} masked={false} /></span>{/if}</dd>
           </dl>

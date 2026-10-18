@@ -185,6 +185,9 @@ describe.runIf(SIDECHAIN)('the links of the explorer', () => {
     expect(viewRead()).toEqual([CB, 2, hashOf(30)]);
     await waitFor(() => expect(tx.textContent).toContain('spent by'));
     expect(within(tx).getAllByRole('button').some((b) => b.textContent?.includes(hashOf(30)))).toBe(true);
+    // Its block's height from the list of blocks, never worked out from confirmations read at another tip.
+    const blockRow = [...tx.querySelectorAll('dt')].find((d) => d.textContent === 'Block')?.nextElementSibling;
+    expect(blockRow?.textContent?.replace(/\s+/g, ' ').trim()).toBe(`30 · ${hashOf(30)}`);
     await fireEvent.click(within(tx).getByRole('button', { name: OTHER }));
     const view = await waitFor(() => screen.getByRole('region', { name: 'Address' }));
     await waitFor(() => expect(view.textContent).toContain('Not an address of this wallet. The explorer keeps no record of other addresses.'));
