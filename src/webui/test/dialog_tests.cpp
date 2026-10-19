@@ -410,6 +410,31 @@ BOOST_AUTO_TEST_CASE(rows_of_facts)
     BOOST_CHECK(text.find("Pay to: rchn1q evil") < text.find("Amount: 1.00000000 CHN"));
 }
 
+BOOST_AUTO_TEST_CASE(image_rows)
+{
+    // A picture: a data: URL of PNG or JPEG bytes in base64, whole; anything else is said not to be shown.
+    const std::string png{"data:image/png;base64,iVBORw0KGgo="};
+    BOOST_CHECK(dialog::IsImageDataUrl(png));
+    BOOST_CHECK(dialog::IsImageDataUrl("data:image/jpeg;base64,/9j/2Q=="));
+    for (const std::string bad : {"data:image/svg+xml;base64,PHN2Zz4=", "data:text/html;base64,PGI+", "data:image/png,<svg>", "javascript:alert(1)",
+                                  "data:image/png;base64,", "data:image/png;base64,ab=c", "data:image/png;base64,abc", "data:image/png;base64,ab\"c",
+                                  "https://example.com/x.png", " data:image/png;base64,iVBO"}) {
+        BOOST_CHECK_MESSAGE(!dialog::IsImageDataUrl(bad), bad);
+    }
+    BOOST_CHECK(!dialog::IsImageDataUrl("data:image/png;base64," + std::string(dialog::MAX_IMAGE_URL, 'A')));
+    dialog::Request request{Sample()};
+    request.rows = {{"Logo", png, dialog::Row::Kind::IMAGE}, {"Logo", "data:image/svg+xml;base64,PHN2Zz4=", dialog::Row::Kind::IMAGE}};
+    const UniValue page{dialog::PageData(request)};
+    BOOST_CHECK_EQUAL(page["rows"][0]["kind"].get_str(), "image");
+    BOOST_CHECK_EQUAL(page["rows"][0]["value"].get_str(), png);
+    BOOST_CHECK_EQUAL(page["rows"][1]["kind"].get_str(), "text");
+    BOOST_CHECK_EQUAL(page["rows"][1]["value"].get_str(), "(a picture that cannot be shown)");
+    // The dialog of the system cannot show it: it says so, never the URL.
+    const std::string text{dialog::FallbackText(page)};
+    BOOST_CHECK(text.find("Logo: (a picture") != std::string::npos);
+    BOOST_CHECK(text.find("base64") == std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(hidden_characters)
 {
     // Audit 7 #11: the set of what is written out is the page's (revealBidi): every format character, the Hangul fillers,

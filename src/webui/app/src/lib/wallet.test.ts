@@ -11,6 +11,7 @@ import {
   filterRecords,
   isEmptyRoleOutput,
   isoLocal,
+  mergeByTxid,
   nearestConfTarget,
   parseRecords,
   plainText,
@@ -42,6 +43,26 @@ const raw: unknown[][] = [
 
 describe('transaction records', () => {
   const records = parseRecords(raw);
+
+  it('merges the halves of a transaction the chain knows more of into one row: the net, the fee included', () => {
+    // A send of a token: the output to another (0, the fee paid), and the wallet's own token change (0): one transaction.
+    const halves = parseRecords([
+      ['99'.repeat(32), 0, 'send', 'rchn1qother', '', 1_700_600_000, 0, -14_100, 'confirming', 1, 0, true, 'h1'],
+      ['99'.repeat(32), 1, 'recv', 'rchn1qme', '', 1_700_600_000, 0, 0, 'confirming', 1, 0, true, 'h2'],
+      ['99'.repeat(32), 2, 'recv', 'rchn1qme2', '', 1_700_600_000, 0, 0, 'confirming', 1, 0, true, 'h3'],
+    ]);
+    const all = [...records, ...halves];
+    const merged = mergeByTxid(all, (txid) => txid === '99'.repeat(32));
+    expect(merged).toHaveLength(records.length + 1);
+    const one = merged.filter((r) => r.txid === '99'.repeat(32));
+    expect(one).toHaveLength(1);
+    expect(one[0]).toMatchObject({ key: halves[0].key, type: 'send', address: 'rchn1qother', amount: -14_100n });
+    // Others as they were, in their order; nothing merged when the chain knows nothing more.
+    expect(merged.slice(0, records.length)).toEqual(records);
+    expect(mergeByTxid(all, () => false)).toEqual(all);
+    // A transaction of one record stays itself.
+    expect(mergeByTxid(records, () => true)).toEqual(records);
+  });
 
   it('reads the arrays of the host', () => {
     expect(records).toHaveLength(6);

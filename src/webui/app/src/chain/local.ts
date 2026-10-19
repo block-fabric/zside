@@ -32,6 +32,13 @@ export interface LocalPage {
   simpleTitle?: string;
   /** Only in the navigation of Advanced mode (lib/uimode.svelte.ts): Simple mode reaches it by the palette and links. */
   advanced?: boolean;
+  /**
+   * One of the chain's main features, in the navigation of Simple mode (at most three pages; the rule is in
+   * doc/webui.md, "Simple and Advanced modes"). It then needs a `simpleSummary`.
+   */
+  simple?: boolean;
+  /** What it is for in Simple mode, in a few plain words (under its name in the sidebar of Simple mode). */
+  simpleSummary?: string;
 }
 
 export const LOCAL_PAGES = [

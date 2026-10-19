@@ -11,8 +11,10 @@
 #include <webui/guard.h>
 #include <webui/window.h>
 
+#include <chrono>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -46,6 +48,8 @@ dialog::Row Amount(std::string label, CAmount amount);
 dialog::Row Total(std::string label, CAmount amount);
 dialog::Row Heading(std::string label, std::string value = {});
 dialog::Row Note(std::string text);
+//! A picture (dialog::Row::Kind::IMAGE): `data_url` a data: URL of PNG or JPEG bytes the host checked; else the dialog says it cannot show it.
+dialog::Row Image(std::string label, std::string data_url);
 
 /** The rows every confirmation of a wallet starts with: the wallet, the network. */
 std::vector<dialog::Row> WalletRows(const std::string& wallet);
@@ -89,6 +93,40 @@ std::string ValueText(const UniValue& value);
 std::vector<dialog::Row> ParamRows(const Call& call, const std::vector<std::string>& destinations = {}, const std::vector<std::string>& amounts = {});
 
 /**
+ * The second step of an operation in two (a commitment, then its reveal once the commitment is deep enough: reserve a
+ * name, then register it), confirmed with the first: the question of the first step shows both, with their fees, and
+ * once the first ran the host keeps a one-time authorization of the second, bound to exactly what was shown (see
+ * Authorizations). The method of the first step declares it (Method::reveal).
+ */
+struct Reveal {
+    //! The method of the second step, of the same wallet (it must be in Methods() itself, with its describer).
+    std::string method;
+    //! The title and the button of the one question for both, and what each step is called in it.
+    std::string title;
+    std::string accept;
+    std::string first_label;
+    std::string second_label;
+    //! What the two steps do, said first in the question.
+    std::string what;
+    //! Whether the parameters of the second step go with those of the first (both canonical arrays): the same name.
+    std::function<bool(const UniValue& first, const UniValue& second)> matches;
+    //! About how large each transaction is (virtual bytes), for the fees the question says.
+    int64_t first_vsize{250};
+    std::function<int64_t(const UniValue& second)> second_vsize;
+    //! When the second step runs, as the question says it ("once the reservation is 3 blocks deep: about 45 s").
+    std::function<std::string(const Call& first)> when;
+};
+
+/**
+ * When a second step runs, from the chain's own info (`info_method`, its field `depth_field`: how deep the first must be):
+ * "once the reservation is 3 blocks deep (about 3 min)", with the chain's block time.
+ */
+std::function<std::string(const Call&)> AfterDepth(std::string info_method, std::string depth_field);
+
+/** The parameters of two calls name the same thing: their first parameters are the same string. */
+bool SameFirstParam(const UniValue& first, const UniValue& second);
+
+/**
  * How a call is confirmed. A describer gives the question (nothing for a call that needs none: turning something off).
  *  - NODE: a method of the node (a vote, an ack, mining): asked always.
  *  - SPEND: a method of a wallet that pays or signs: asked always, with the passphrase in the same question when the
@@ -106,6 +144,8 @@ struct Method {
     size_t required{0};
     //! Whether several calls may be confirmed in one question (rpc.confirmed {calls}): never for what moves coins.
     bool batch{false};
+    //! The second step of this one, confirmed with it (rpc.confirmed {then}).
+    std::optional<Reveal> reveal{};
 };
 
 /** A describer of the generic kind: the title and the button, and which parameters are destinations and amounts. */
@@ -126,10 +166,65 @@ using KeysFn = std::function<UniValue(const std::string& wallet, Window::Confirm
 using FeeFn = std::function<std::optional<CAmount>(const std::string& wallet, int64_t vsize)>;
 
 /**
+ * The one-time authorizations of second steps (Reveal), kept by the host alone, in memory (an app that starts again asks
+ * again). One is made only when the user accepted the question of both steps and the first ran; it is bound to the wallet,
+ * the method and the parameters of the second step exactly as shown (canonical, compared as JSON), to the transaction of
+ * the first step (still in the wallet, not replaced, when the second comes), to the network fee the question said at most
+ * (the wallet's fee for it then must not be more) and to a time (EXPIRY). It is taken by the call that matches it, one
+ * at a time; given back when that call failed without making a transaction. Once the second step made its transaction,
+ * the method never runs again under it: the same call then only broadcasts that very transaction again if it left the
+ * mempool without a block (what the pages resend), at most MAX_REBROADCASTS times; while it waits in the mempool nothing
+ * happens; in a block, conflicted, abandoned, gone, or not taken back by the mempool, the authorization is used up and the
+ * call is asked as any other. One transaction, however often the page asks. The page never sees nor names one: it can neither make, nor widen, nor reuse it.
+ */
+class Authorizations
+{
+public:
+    struct Entry {
+        std::string wallet;
+        std::string method;
+        //! The canonical parameters of the second step, as JSON.
+        std::string params;
+        //! The transaction of the first step.
+        std::string commit_txid;
+        //! The most the second step's network fee may be (at the wallet's fee rate when it runs), and its size for that.
+        CAmount fee_cap{0};
+        int64_t vsize{0};
+        std::chrono::steady_clock::time_point expires;
+        //! The transaction the second step made, once it ran: that very transaction is broadcast again (never a new one)
+        //! if it left the mempool without a block, at most MAX_REBROADCASTS times.
+        std::string reveal_txid{};
+        int rebroadcasts{0};
+    };
+    static constexpr int MAX_REBROADCASTS{3};
+    //! How long one lasts: an hour (a reservation is deep enough in a few blocks).
+    static constexpr std::chrono::seconds EXPIRY{3600};
+    //! At most so many kept (the oldest goes).
+    static constexpr size_t MAX{32};
+
+    void Add(Entry entry);
+    /** The one of these exactly, taken (not there any more), if it is there and not expired; expired ones go. */
+    std::optional<Entry> Take(const std::string& wallet, const std::string& method, const std::string& params, std::chrono::steady_clock::time_point now);
+    /** One taken back (its call failed before it made anything), unless expired. */
+    void GiveBack(Entry entry, std::chrono::steady_clock::time_point now);
+    size_t Size() const;
+
+private:
+    mutable std::mutex m_mutex;
+    std::vector<Entry> m_entries;
+};
+
+/**
  * The host methods:
  *   rpc.confirmed {method, params, wallet?}       one call, confirmed as Methods() says; its result (its error as the RPC's)
  *   rpc.confirmed {calls: [{method, params}], wallet}  several calls of one method of a wallet, confirmed once (proofs of
  *                                                 funds sign one message with each address): [{result} or {error}]
+ *   rpc.confirmed {method, params, wallet, then: {method, params}}  a first step and its second (Method::reveal), in one
+ *                                                 question; accepted, the first runs, and the second is authorized once
+ *                                                 (Authorizations): its result, with "authorized" (seconds the second may
+ *                                                 come in) when it is
+ *   rpc.confirmed {method, params, wallet, authorizedOnly: true}  only what needs no question (a second step authorized,
+ *                                                 the wallet not locked): else BRIDGE_AUTH_NEEDED, nothing asked or run
  *   rpc.confirmedMethods {}                       the names of Methods(), and of the wallet methods of the page's policy that
  *                                                 need the keys (rpcpolicy.h KeyedWalletRpc), confirmed as KEYS
  */
@@ -146,12 +241,26 @@ public:
 
     /** At most this many calls in one rpc.confirmed. */
     static constexpr size_t MAX_CALLS{100};
+    /** The cap of a second step's network fee: its fee when confirmed, times this (fees may rise meanwhile, not more). */
+    static constexpr int FEE_CAP_FACTOR{2};
+
+    /** The tests: other methods than Methods(), another clock. */
+    void SetMethodsForTest(std::map<std::string, Method> methods) { m_test_methods = std::move(methods); }
+    void SetClockForTest(std::function<std::chrono::steady_clock::time_point()> now) { m_now = std::move(now); }
+    const Authorizations& authorizations() const { return m_authorizations; }
 
 private:
+    const std::map<std::string, Method>& AllMethods() const { return m_test_methods ? *m_test_methods : Methods(); }
+    UniValue TwoSteps(interfaces::Node& node, const std::string& wallet, const std::string& name, const Method& method, UniValue params, const UniValue& then);
+    std::optional<UniValue> Authorized(interfaces::Node& node, const std::string& wallet, const std::string& name, const Method& method, const UniValue& params, bool only);
+
     NodeFn m_node;
     guard::AskFn m_ask;
     KeysFn m_keys;
     FeeFn m_fee;
+    Authorizations m_authorizations;
+    std::optional<std::map<std::string, Method>> m_test_methods;
+    std::function<std::chrono::steady_clock::time_point()> m_now{[] { return std::chrono::steady_clock::now(); }};
 };
 
 } // namespace webui::confirm

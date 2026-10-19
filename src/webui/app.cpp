@@ -1612,6 +1612,12 @@ void App::RegisterHostMethods()
         m_window->Post([this, title, body, level] { m_window->Notify(title, body, level); });
         return UniValue{true};
     });
+    // The page is about to ask for a confirmation (the review of a payment, of a registration): the dialog window is made
+    // ahead, so that it shows at once (Window::PrepareDialog). Nothing is asked.
+    b.RegisterHost("dialog.prepare", [this](const UniValue&) {
+        m_window->Post([this] { m_window->PrepareDialog(); });
+        return UniValue{true};
+    });
     b.RegisterHost("tray.state", [this](const UniValue&) {
         UniValue out{UniValue::VOBJ};
         out.pushKV("available", m_window->TrayAvailable());

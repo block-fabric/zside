@@ -220,7 +220,8 @@ if(NOT WIN32 AND NOT APPLE)
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
     COMPONENT chains-app
   )
-  install(FILES ${PROJECT_SOURCE_DIR}/share/pixmaps/bitcoin256.png
+  # The chain's own mark (app/scripts/appicon.py), as the window and the tray show it.
+  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/app/public/icon-256.png
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps
     RENAME ${CLIENT_BIN_NAME}.png
     COMPONENT chains-app

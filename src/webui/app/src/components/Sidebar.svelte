@@ -3,6 +3,10 @@
   // first; on a narrow window a drawer (open). At its top a card of the wallet shown (its name, its
   // lock, the unit); the pages in groups; at its foot the theme, the text
   // size, then Close wallet and Quit, apart. The current page is a filled pill.
+  //
+  // It folds into a rail of icons (user feedback 2026-10-19): the button at its foot, Ctrl+B, or the
+  // palette; remembered in the preferences (prefs.sidebarCollapsed). Folded, every item says its name and
+  // what it is for in its tooltip. A narrow window keeps the drawer, never folded.
   import { t } from '../lib/i18n.svelte';
   import { CHAIN } from '../chain/config';
   import Brand from './Brand.svelte';
@@ -10,23 +14,23 @@
   import MenuButton from './MenuButton.svelte';
   import WalletPicker from './WalletPicker.svelte';
   import { buildCommands, pageAvailable, pageDisabled } from '../lib/commands.svelte';
-  import { NAV_SECTIONS, pageIcon } from '../lib/layout';
+  import { navSections, pageIcon } from '../lib/layout';
   import { go, nav, PAGES, type PageId } from '../lib/nav.svelte';
   import { prefs, savePrefs, statusTip, wallets } from '../lib/state.svelte';
   import { pendingNow } from '../lib/settingsdraft.svelte';
   import { clampFontAdjust, THEMES } from '../lib/themes';
   import ThemePicker from './ThemePicker.svelte';
   import ModeSwitch from './ModeSwitch.svelte';
-  import { pageShown, pageTitle } from '../lib/uimode.svelte';
+  import { pageShown, pageSummary, pageTitle, simpleMode } from '../lib/uimode.svelte';
   import { isThemeChoice } from '../lib/customthemes';
   import { frame } from '../lib/windowframe.svelte';
 
   let { open = $bindable(false) }: { open?: boolean } = $props();
 
-  const sections = $derived([
-    { title: '', pages: ['home'] as PageId[] },
-    ...NAV_SECTIONS.map((s) => ({ title: s.title, pages: s.pages.filter((id) => pageAvailable(id) && pageShown(id)) })).filter((s) => s.pages.length > 0),
-  ]);
+  const sections = $derived(navSections().map((s) => ({ title: s.title, pages: s.pages.filter((id) => pageAvailable(id) && pageShown(id)) })).filter((s) => s.pages.length > 0));
+  // Folded into a rail of icons (never the drawer of a narrow window: the CSS keeps it whole there).
+  const collapsed = $derived(prefs.sidebarCollapsed && !open);
+  const simple = $derived(simpleMode());
   const all = $derived(buildCommands());
 
   const shownWallet = $derived(wallets.list.find((w) => w.name === wallets.current) ?? null);
@@ -59,10 +63,10 @@
   }}
 />
 
-<nav class="sidebar" class:open aria-label="Pages">
+<nav class="sidebar" class:open class:collapsed aria-label="Pages">
   {#if !frame.integrated}
     <!-- The name of the app is in the integrated title bar, when there is one. -->
-    <Brand onclick={() => visit('home')} />
+    <Brand name={!collapsed} onclick={() => visit('home')} />
   {/if}
 
   {#if wallets.list.length > 0}
@@ -76,14 +80,20 @@
           {#if wallets.list.length > 1}<WalletPicker />{:else}<span class="name" translate="no" title={shownName}>{shownName}</span>{/if}
         </div>
       </div>
-      {#if lock}<div class="wc-foot"><span class="badge {lock.tone}" title={t(lock.title)}><Icon name={lock.icon} size={12} /> {t(lock.label)}</span></div>{/if}
+      <div class="wc-foot">
+        {#if lock}<span class="badge {lock.tone}" title={t(lock.title)}><Icon name={lock.icon} size={12} /> {t(lock.label)}</span>{:else}<span></span>{/if}
+        {#if pageAvailable('wallets') && nav.page !== 'wallets'}
+          <!-- The page of the wallets, from the card (in Simple mode, where it is not in the list). -->
+          <button type="button" class="btn ghost small manage" onclick={() => visit('wallets')}>Manage wallets</button>
+        {/if}
+      </div>
     </section>
   {/if}
 
   <div class="scroll">
-    {#each sections as section (section.title)}
-      <div class="section" role="group" aria-label={t(section.title || 'Home')}>
-        {#if section.title}<div class="caption caps">{t(section.title)}</div>{/if}
+    {#each sections as section, i (i)}
+      <div class="section" role="group" aria-label={t(section.title || (i === 0 ? 'Home' : 'More'))}>
+        {#if section.title}<div class="caption caps">{t(section.title)}</div>{:else if i > 0}<div class="caption gap" aria-hidden="true"></div>{/if}
         {#each section.pages as id (id)}
           {@const page = PAGES[id]}
           <button
@@ -92,13 +102,18 @@
             class:current={nav.page === id}
             aria-current={nav.page === id ? 'page' : undefined}
             disabled={pageDisabled(id)}
-            title={page.summary}
+            class:described={simple}
+            title={collapsed ? `${pageTitle(id)}: ${pageSummary(id)}` : pageSummary(id)}
+            aria-label={collapsed ? pageTitle(id) : undefined}
             onclick={() => visit(id)}
             onpointerenter={() => (statusTip.text = page.summary)}
             onpointerleave={() => (statusTip.text = '')}
           >
             <Icon name={pageIcon(id)} size={19} />
-            <span class="grow">{pageTitle(id)}</span>
+            <span class="text">
+              <span class="grow">{pageTitle(id)}</span>
+              {#if simple && page.simpleSummary}<small class="what">{t(page.simpleSummary)}</small>{/if}
+            </span>
             {#if !page.ready}<span class="soon" title="Being rebuilt">•</span>{/if}
             {#if id === 'settings' && pendingNow() > 0}<span class="pending" title="Changes of the settings wait for Apply" aria-label="Changes wait for Apply"></span>{/if}
           </button>
@@ -108,7 +123,20 @@
   </div>
 
   <div class="foot">
-    <div class="row">
+    <!-- Fold the sidebar into a rail of icons, or unfold it (Ctrl+B). -->
+    <button
+      type="button"
+      class="entry fold"
+      aria-expanded={!collapsed}
+      aria-label={collapsed ? t('Expand the sidebar') : undefined}
+      aria-keyshortcuts="Control+B"
+      title={collapsed ? t('Expand the sidebar (Ctrl+B)') : t('Collapse the sidebar (Ctrl+B)')}
+      onclick={() => savePrefs({ sidebarCollapsed: !prefs.sidebarCollapsed })}
+    >
+      <Icon name={collapsed ? 'chevron-right' : 'chevron-left'} size={18} />
+      <span class="grow">Collapse</span>
+    </button>
+    <div class="row wide">
       <!-- The app's own list, opening upwards (user decision: the native one opened past the window). -->
       <ThemePicker
         value={prefs.theme}
@@ -119,7 +147,7 @@
         onpick={(v) => { if (isThemeChoice(v, prefs.customThemes)) savePrefs({ theme: v }); }}
       />
     </div>
-    <div class="row">
+    <div class="row wide">
       <!-- Simple or Advanced (user decision: here, beside the size of the text). -->
       <ModeSwitch />
       <button type="button" class="btn ghost small size" title="Smaller text (Ctrl+-)" aria-label="Smaller text" onclick={() => savePrefs({ fontAdjust: clampFontAdjust(prefs.fontAdjust - 1) })}>A−</button>
@@ -131,7 +159,8 @@
           type="button"
           class="entry leave-entry"
           disabled={c.disabled}
-          title={c.shortcut ? `${c.label} (${c.shortcut})` : c.label}
+          title={c.shortcut ? `${t(c.label)} (${c.shortcut})` : t(c.label)}
+          aria-label={collapsed ? (c.id === 'node.exit' ? t('Quit %1', CHAIN.name) : t('Close wallet')) : undefined}
           onclick={() => c.run()}
         >
           <Icon name={c.id === 'node.exit' ? 'power' : 'logout'} size={18} />
@@ -147,16 +176,22 @@
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
+    --side-pad-r: 0.6rem;
     width: 15rem;
     flex: none;
-    padding: 0.7rem 0.6rem 0.6rem;
+    padding: 0.7rem var(--side-pad-r) 0.6rem 0.6rem;
     min-height: 0;
   }
+  /* The list scrolls with its bar flush at the right edge of the sidebar (user feedback 2026-10-19: it
+     floated inside, a padding away from the edge): the scroller takes the sidebar's right padding into
+     itself, so the items keep their place and the bar sits at the edge, folded or not. */
   .scroll {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    width: 100%;
+    width: auto;
+    margin-right: calc(-1 * var(--side-pad-r));
+    padding-right: var(--side-pad-r);
   }
   .caption {
     padding: 0.9rem 0.75rem 0.3rem;
@@ -226,6 +261,12 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.4rem;
+  }
+  .manage {
+    flex: none;
+    margin-left: auto;
+    padding-inline: 0.5rem;
+    font-size: 0.78rem;
   }
   .wc-foot .badge {
     min-width: 0;
@@ -314,7 +355,89 @@
   .scrim {
     display: none;
   }
+  .text {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+  }
+  /* Simple mode: what each page is for, under its name. */
+  .entry.described {
+    padding-block: 0.4rem;
+  }
+  .what {
+    display: block;
+    margin-top: 0.05rem;
+    font-size: 0.74rem;
+    font-weight: 450;
+    line-height: 1.25;
+    color: var(--text-faint);
+    white-space: normal;
+  }
+  .entry.current .what {
+    color: inherit;
+    opacity: 0.85;
+  }
+  .caption.gap {
+    padding: 0.45rem 0 0;
+  }
+  .fold {
+    color: var(--text-faint);
+    font-size: 0.88rem;
+  }
+  /* Folded into a rail of icons (a wide window only: a narrow one keeps the drawer, whole). */
+  @media (min-width: 761px) {
+    .sidebar {
+      transition: width 140ms ease-out;
+    }
+    .sidebar.collapsed {
+      --side-pad-r: 0.45rem;
+      width: 4.1rem;
+      padding-inline: 0.45rem;
+      align-items: stretch;
+    }
+    .collapsed .entry {
+      justify-content: center;
+      gap: 0;
+      padding: 0.6rem 0;
+    }
+    .collapsed .grow,
+    .collapsed .text,
+    .collapsed .wide,
+    .collapsed .wc-name,
+    .collapsed .wc-foot {
+      display: none;
+    }
+    /* A section is a line between the icons. */
+    .collapsed .caption {
+      height: 0;
+      margin: 0.4rem 0.35rem;
+      padding: 0;
+      overflow: hidden;
+      border-top: 1px solid var(--line);
+    }
+    .collapsed .wallet-card {
+      align-items: center;
+      padding: 0.45rem 0;
+    }
+    .collapsed .pending {
+      position: absolute;
+      top: 0.35rem;
+      right: 0.55rem;
+    }
+    .collapsed .scroll {
+      overflow-x: hidden;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar {
+      transition: none;
+    }
+  }
   @media (max-width: 760px) {
+    .fold {
+      display: none;
+    }
     .sidebar {
       position: fixed;
       z-index: 36;

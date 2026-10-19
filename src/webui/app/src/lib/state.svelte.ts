@@ -120,6 +120,8 @@ export const prefs = $state({
   uiMode: 'advanced' as 'simple' | 'advanced',
   /** The first-run tips of Home were dismissed (components/FirstRunTips.svelte). */
   tipsDone: false,
+  /** The navigation folded into icons: the dashboard's sidebar a rail, the workspace's areas without their names (Ctrl+B). */
+  sidebarCollapsed: false,
   loaded: false,
 });
 
@@ -305,7 +307,7 @@ export function applyPrefs(raw: Record<string, unknown>): void {
   if (raw.layout !== undefined) prefs.layout = isLayout(raw.layout) ? raw.layout : DEFAULT_LAYOUT;
   if (typeof raw.lastWallet === 'string') prefs.lastWallet = raw.lastWallet;
   if (raw.uiMode === 'simple' || raw.uiMode === 'advanced') prefs.uiMode = raw.uiMode;
-  for (const key of ['coinControl', 'psbtControls', 'subtractFeeDefault', 'feeMinimized', 'coinTree', 'showTray', 'minimizeToTray', 'minimizeOnClose', 'tipsDone'] as const) {
+  for (const key of ['coinControl', 'psbtControls', 'subtractFeeDefault', 'feeMinimized', 'coinTree', 'showTray', 'minimizeToTray', 'minimizeOnClose', 'tipsDone', 'sidebarCollapsed'] as const) {
     if (typeof raw[key] === 'boolean') prefs[key] = raw[key];
   }
   if (raw.feeMode === 'smart' || raw.feeMode === 'custom') prefs.feeMode = raw.feeMode;

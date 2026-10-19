@@ -41,7 +41,7 @@
       await check(`${theme}: three first steps on Home`, $$('.tips li').length === 3);
       await waitFor('merged mining in a line', () => $('[data-testid="bmm-line"]'), 20000);
       const sidebar = text('nav.sidebar .scroll');
-      await check(`${theme}: the sidebar without the pages of Advanced`, !sidebar.includes('Advanced transactions') && !sidebar.includes('Node window') && sidebar.includes('Drivechains'), sidebar);
+      await check(`${theme}: the sidebar without the pages of Advanced`, !sidebar.includes('Advanced transactions') && !sidebar.includes('Node window') && sidebar.includes('Move coins') && sidebar.includes('Activity'), sidebar);
       await check(`${theme}: the switch in the sidebar's foot`, !!$('nav.sidebar .foot [role="radiogroup"]'));
       await shot(`simple-home-${theme}`);
 
@@ -66,12 +66,14 @@
       await shot(`simple-send-${theme}`);
 
       // Every other page of the sidebar: the kit's and the chain's own, as Simple mode shows them.
-      const seen = new Set(['Home', 'Drivechains', 'Send', 'Settings']);
+      // (Drivechains is "Move coins" in Simple mode; each entry has a line under its name: .grow is the name.)
+      const seen = new Set(['Home', 'Move coins', 'Send', 'Settings']);
       const entries = () => $$('nav.sidebar .scroll .entry').filter((e) => !e.disabled);
-      for (const name of entries().map((e) => e.textContent.trim())) {
+      const nameOf = (e) => (e.querySelector('.grow') ?? e).textContent.trim();
+      for (const name of entries().map(nameOf)) {
         if (seen.has(name)) continue;
         seen.add(name);
-        const entry = entries().find((e) => e.textContent.trim() === name);
+        const entry = entries().find((e) => nameOf(e) === name);
         if (!entry) continue;
         entry.click();
         await sleep(1200);

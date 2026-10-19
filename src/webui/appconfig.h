@@ -30,8 +30,19 @@ class AppConfig
 public:
     explicit AppConfig(fs::path path);
 
-    /** Where the file is kept on this system: <config dir>/Chains/chains-app.json. */
+    /**
+     * Where the file is kept on this system: <config dir>/<name>/<stem>-app.json; on Windows
+     * %LOCALAPPDATA%\<name>\<stem>-app.json, beside the data the node uses by default (an older
+     * file in %APPDATA%\<name> is moved there, see MoveLegacy).
+     */
     static fs::path DefaultPath();
+
+    /**
+     * If there is no file at current but there is one at legacy, write its content to current,
+     * then remove legacy, and its folder if that is then empty (nothing else is removed).
+     * Returns whether the file was moved.
+     */
+    static bool MoveLegacy(const fs::path& legacy, const fs::path& current);
 
     /** Read the file. A missing file is an empty configuration; an unreadable one too, with a warning. */
     void Load() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);

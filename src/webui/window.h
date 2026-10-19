@@ -232,6 +232,12 @@ public:
     virtual void Ask(const dialog::Request& request, std::function<void(dialog::Answer)> done) = 0;
 
     /**
+     * A question is likely soon (the page shows the review of what it would ask): the dialog window may be made ahead,
+     * its page loaded, so that it shows at once. Nothing on a platform where it is quick anyway.
+     */
+    virtual void PrepareDialog() {}
+
+    /**
      * For the tests (WEBUI_TEST_HOOKS) only, on the dialog shown now: "kind" (JSON "themed", "native" or "none"),
      * "eval" (run `arg` in the page of the themed dialog: its result as JSON), "snapshot" (a picture of the themed
      * dialog in the PNG file `arg`: true or false), "native" (the dialog of the system: `arg` "accept" or "cancel"

@@ -857,6 +857,19 @@ bool HasTestOption(const ArgsManager& args, const std::string& test_option)
     });
 }
 
+fs::path ChooseWindowsDataDir(const fs::path& legacy, const fs::path& local, const std::function<bool(const fs::path&)>& exists)
+{
+    // The roaming folder counts only if it holds data of a node, not merely because it
+    // exists: something else (an app keeping its own settings there, an installer, a
+    // half-removed old install) may create it, and switching the node to an empty
+    // folder on the next start would look as if the chain and the wallet were gone.
+    for (const char* name : {"blocks", "chainstate", "wallets", "testnet", "signet", "regtest",
+                             BITCOIN_CONF_FILENAME, BITCOIN_SETTINGS_FILENAME, ".lock"}) {
+        if (exists(legacy / fs::u8path(name))) return legacy;
+    }
+    return local;
+}
+
 fs::path GetDefaultDataDir()
 {
     // Windows:
@@ -866,12 +879,10 @@ fs::path GetDefaultDataDir()
     // Unix-like: ~/.<name> (~/.chains, ~/.thunder...)
 #ifdef WIN32
     // Windows
-    // Check for existence of datadir in old location and keep it there
-    fs::path legacy_path = GetSpecialFolderPath(CSIDL_APPDATA) / CLIENT_NAME;
-    if (fs::exists(legacy_path)) return legacy_path;
-
-    // Otherwise, fresh installs can start in the new, "proper" location
-    return GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / CLIENT_NAME;
+    // Keep a datadir in the old location there; fresh installs start in the new, "proper" one.
+    return ChooseWindowsDataDir(GetSpecialFolderPath(CSIDL_APPDATA) / CLIENT_NAME,
+                                GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / CLIENT_NAME,
+                                [](const fs::path& p) { return fs::exists(p); });
 #else
     fs::path pathRet;
     char* pszHome = getenv("HOME");

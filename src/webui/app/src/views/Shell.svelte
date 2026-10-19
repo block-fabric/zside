@@ -7,6 +7,7 @@
   import CommandPalette from '../components/CommandPalette.svelte';
   import TitleStrip from '../components/TitleStrip.svelte';
   import TxNotifier from '../components/TxNotifier.svelte';
+  import LocalBackground from '../chain/LocalBackground.svelte';
   import { closeDetail, detail } from '../lib/detail.svelte';
   import { go, nav } from '../lib/nav.svelte';
   import { prefs, wallets } from '../lib/state.svelte';
@@ -52,6 +53,7 @@
 </div>
 <CommandPalette />
 <TxNotifier />
+<LocalBackground />
 
 <style>
   .frame {

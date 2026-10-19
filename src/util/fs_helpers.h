@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <ios>
 #include <limits>
 #include <optional>
@@ -91,6 +92,14 @@ void ReleaseDirectoryLocks();
 
 bool TryCreateDirectories(const fs::path& p);
 fs::path GetDefaultDataDir();
+
+/**
+ * The default data directory on Windows: the legacy roaming folder (legacy) only if it
+ * holds data of a node (a block or wallet folder, a network folder, the config, the
+ * settings or the lock), else the local one (local). exists(path) tells whether a path
+ * exists; the choice depends on nothing else, so it can be tested anywhere.
+ */
+fs::path ChooseWindowsDataDir(const fs::path& legacy, const fs::path& local, const std::function<bool(const fs::path&)>& exists);
 
 /** Convert fs::perms to symbolic string of the form 'rwxrwxrwx'
  *

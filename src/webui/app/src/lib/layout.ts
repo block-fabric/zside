@@ -2,7 +2,7 @@
 // (doc/webui-layouts.md). Only data here; the shells are in views/layouts.
 import type { IconName } from '../components/Icon.svelte';
 import { PAGES, type PageId } from './nav.svelte';
-import { pageTitleSource } from './uimode.svelte';
+import { pageTitleSource, SIMPLE_END, SIMPLE_MOVE, simpleFeatures, simpleMode } from './uimode.svelte';
 import { SIDECHAIN } from '../chain/config';
 import { LOCAL_PAGES, type LocalPage } from '../chain/local';
 
@@ -258,3 +258,25 @@ export const NAV_SECTIONS: readonly NavSection[] = [
   { title: 'Tools', pages: ['tools', ...localPages('tools')] },
   { title: 'Node', pages: ['node', 'settings', 'kit'] },
 ];
+
+/**
+ * The sections of the dashboard's sidebar in the mode shown, Home first. Simple mode has its own short list,
+ * the same in every app (lib/uimode.svelte.ts, doc/webui.md): Home; your money (Send, Receive, Activity);
+ * moving coins and the chain's main features; Settings.
+ */
+export function navSections(): NavSection[] {
+  if (!simpleMode()) return [{ title: '', pages: ['home'] }, ...NAV_SECTIONS];
+  return [
+    { title: '', pages: ['home'] },
+    { title: 'Your money', pages: ['send', 'receive', 'transactions'] },
+    { title: 'Features', pages: [SIMPLE_MOVE, ...simpleFeatures()] },
+    { title: '', pages: [...SIMPLE_END] },
+  ];
+}
+
+/** The section of the sidebar a page is in, in the mode shown (the breadcrumbs): '' for none or an untitled one. */
+export function navSectionOf(page: PageId): string {
+  const into = PAGES[page].tabOf;
+  if (into) return navSectionOf(into.page);
+  return (navSections().find((s) => s.pages.includes(page)) ?? NAV_SECTIONS.find((s) => s.pages.includes(page)))?.title ?? '';
+}

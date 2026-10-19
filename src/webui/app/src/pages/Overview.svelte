@@ -13,6 +13,7 @@
   import TxStatusIcon from '../components/TxStatusIcon.svelte';
   import { nav } from '../lib/nav.svelte';
   import { addressText, typeText, walletApi, type TxRecord } from '../lib/wallet';
+  import LocalOverview from '../chain/LocalOverview.svelte';
 
   /** The number of transactions shown (NUM_ITEMS of the overview of chains-qt). */
   const NUM_ITEMS = 5;
@@ -217,6 +218,10 @@
   </section>
 
   {#if wallets.current !== null}
+    <div class="local"><LocalOverview /></div>
+  {/if}
+
+  {#if wallets.current !== null}
     <section class="recent panel" aria-labelledby="recent-title">
       <div class="panel-head">
         <h2 id="recent-title">Recent transactions</h2>
@@ -297,6 +302,14 @@
 </div>
 
 <style>
+  /* The chain's own (chain/LocalOverview.svelte): across the page, nothing when it has none. */
+  .local {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+  .local:empty {
+    display: none;
+  }
   .overview {
     display: grid;
     grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);

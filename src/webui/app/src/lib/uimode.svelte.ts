@@ -8,6 +8,8 @@
 import { t } from './i18n.svelte';
 import { PAGES, type PageId } from './nav.svelte';
 import { prefs, savePrefs } from './state.svelte';
+import { SIDECHAIN } from '../chain/config';
+import { LOCAL_PAGES, type LocalPage } from '../chain/local';
 
 export type UiMode = 'simple' | 'advanced';
 
@@ -50,7 +52,51 @@ export function pageTitle(id: PageId): string {
   return t(source);
 }
 
+// The navigation of Simple mode: the same short list in every app (user feedback 2026-10-19; the rule is
+// in doc/webui.md, "Simple and Advanced modes", and test/simple-nav.test.ts holds every app to it):
+//   Home · Send · Receive · Activity · Move coins · at most three main features of the chain · Settings
+// Each in plain words with a line saying what it is for (simpleTitle, simpleSummary). Everything else is
+// in Advanced, and still reached in Simple mode by the palette and by links.
+
+/** The most pages of a chain's own a Simple navigation holds (chain/local.ts `simple: true`). */
+export const SIMPLE_MAX_FEATURES = 3;
+
+/** What every app's Simple navigation starts with (Activity is the Transactions page). */
+export const SIMPLE_START: readonly PageId[] = ['home', 'send', 'receive', 'transactions'];
+
+/** Moving coins between the chains: the peg of a sidechain, the Sidechains page (Move coins) of Chains. */
+export const SIMPLE_MOVE: PageId = SIDECHAIN ? 'peg' : 'sidechains';
+
+/** What every app's Simple navigation ends with. */
+export const SIMPLE_END: readonly PageId[] = ['settings'];
+
+/** The chain's main features in Simple mode: its pages marked `simple`, in their order (at most three). */
+export function simpleFeatures(): PageId[] {
+  return (LOCAL_PAGES as readonly LocalPage[])
+    .filter((p) => p.simple)
+    .slice(0, SIMPLE_MAX_FEATURES)
+    .map((p) => p.id as PageId);
+}
+
+/** The pages of Simple mode's navigation, in their order. */
+export function simpleNavPages(): PageId[] {
+  return [...SIMPLE_START, SIMPLE_MOVE, ...simpleFeatures(), ...SIMPLE_END];
+}
+
 /** Whether a page is in the navigation (sidebar, workspace tabs, quick actions) in the mode shown. */
 export function pageShown(id: PageId): boolean {
-  return !(simpleMode() && PAGES[id]?.advanced);
+  if (!simpleMode()) return true;
+  return simpleNavPages().includes(id);
+}
+
+/** What a page is for, in the mode shown, in the language shown. */
+export function pageSummary(id: PageId): string {
+  const source = pageSummarySource(id);
+  return t(source);
+}
+
+/** What a page is for, in the mode shown, in English (t() translates it where it is shown). */
+export function pageSummarySource(id: PageId): string {
+  const page = PAGES[id];
+  return simpleMode() && page?.simpleSummary ? page.simpleSummary : (page?.summary ?? '');
 }

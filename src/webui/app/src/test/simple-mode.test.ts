@@ -95,9 +95,13 @@ describe('the switch in the sidebar', () => {
     await waitFor(() => expect(titles()).toContain('Advanced transactions'));
   });
 
-  it('keeps the pages a beginner needs in Simple mode', () => {
+  it('keeps the pages a beginner needs in Simple mode (the rule of doc/webui.md), the others in Advanced', () => {
     prefs.uiMode = 'simple';
-    for (const id of ['home', 'overview', 'send', 'receive', 'transactions', 'wallets', 'settings'] as PageId[]) expect(pageShown(id)).toBe(true);
+    for (const id of ['home', 'send', 'receive', 'transactions', 'settings'] as PageId[]) expect(pageShown(id)).toBe(true);
+    // The Overview is Home's again, the wallets are managed from the wallet's card: not in Simple's list.
+    for (const id of ['overview', 'wallets', 'explorer', 'node'] as PageId[]) expect(pageShown(id)).toBe(false);
+    prefs.uiMode = 'advanced';
+    for (const id of ['overview', 'wallets', 'explorer', 'node'] as PageId[]) expect(pageShown(id)).toBe(true);
   });
 });
 
@@ -240,10 +244,13 @@ describe('the names of pages in Simple mode', () => {
     prefs.uiMode = 'simple';
     render(Sidebar);
     const names = () => [...document.querySelectorAll('nav.sidebar .scroll .entry .grow')].map((e) => e.textContent?.trim());
-    expect(names()).toContain('My money');
+    expect(names()).toContain('Activity');
+    expect(names()).not.toContain('Transactions');
     expect(buildCommands().find((c) => c.id === 'page.overview')?.label).toBe('My money');
+    expect(buildCommands().find((c) => c.id === 'page.transactions')?.label).toBe('Activity');
     prefs.uiMode = 'advanced';
     await waitFor(() => expect(names()).toContain('Overview'));
+    expect(names()).toContain('Transactions');
     expect(buildCommands().find((c) => c.id === 'page.overview')?.label).toBe('Overview');
   });
 });

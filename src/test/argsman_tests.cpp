@@ -10,12 +10,15 @@
 #include <univalue.h>
 #include <util/chaintype.h>
 #include <util/fs.h>
+#include <util/fs_helpers.h>
 #include <util/strencodings.h>
 
 #include <array>
 #include <optional>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <set>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -1123,6 +1126,33 @@ BOOST_AUTO_TEST_CASE(util_ReadWriteSettings)
         args2.WriteSettingsFile();
         fs::remove(args1.GetDataDirBase() / "settings.json");
     }
+}
+
+BOOST_AUTO_TEST_CASE(util_ChooseWindowsDataDir)
+{
+    const fs::path roaming{fs::u8path("Roaming") / "Chains"};
+    const fs::path local{fs::u8path("Local") / "Chains"};
+    std::set<fs::path> present;
+    const auto exists{[&](const fs::path& p) { return present.count(p) > 0; }};
+    // Nothing, or the folder alone, or the folder with only the app's settings: the local folder.
+    BOOST_CHECK(ChooseWindowsDataDir(roaming, local, exists) == local);
+    present = {roaming};
+    BOOST_CHECK(ChooseWindowsDataDir(roaming, local, exists) == local);
+    present = {roaming, roaming / "chains-app.json"};
+    BOOST_CHECK(ChooseWindowsDataDir(roaming, local, exists) == local);
+    // Any data of a node: the roaming folder stays the data directory.
+    for (const char* name : {"blocks", "chainstate", "wallets", "testnet", "signet", "regtest", BITCOIN_CONF_FILENAME, "settings.json", ".lock"}) {
+        present = {roaming, roaming / fs::u8path(name)};
+        BOOST_CHECK_MESSAGE(ChooseWindowsDataDir(roaming, local, exists) == roaming, name);
+    }
+    // On the file system: a folder with only the app's settings, then with a wallet folder.
+    const fs::path base{m_args.GetDataDirBase() / "choose"};
+    const auto on_disk{[](const fs::path& p) { return fs::exists(p); }};
+    fs::create_directories(base / roaming);
+    std::ofstream{static_cast<const std::filesystem::path&>(base / roaming / "chains-app.json")} << "{}";
+    BOOST_CHECK(ChooseWindowsDataDir(base / roaming, base / local, on_disk) == base / local);
+    fs::create_directories(base / roaming / "wallets");
+    BOOST_CHECK(ChooseWindowsDataDir(base / roaming, base / local, on_disk) == base / roaming);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyDialogLook, ARM_MS, DIALOG_TOKENS, dialogColors, legible, MIN_TEXT_CONTRAST, MIN_UI_CONTRAST, readData, render, start, TEXT_PAIRS, UI_PAIRS, wire, type DialogData, type DialogToken } from './dialog';
+import { applyDialogLook, ARM_MS, DIALOG_TOKENS, dialogColors, isImageDataUrl, legible, MIN_TEXT_CONTRAST, MIN_UI_CONTRAST, readData, render, start, TEXT_PAIRS, UI_PAIRS, wire, type DialogData, type DialogToken } from './dialog';
 import { BASE_THEMES, contrastOf, parseColor } from '../lib/customthemes';
 
 function data(over: Partial<DialogData> = {}): DialogData {
@@ -75,6 +75,29 @@ describe('the facts the host decoded (audit 7 #1)', () => {
     const kinds = [...rows.children].map((c) => (c as HTMLElement).className);
     expect(kinds).toEqual(['row text', 'row heading', 'row address', 'row amount', 'row total', 'row note', 'row text']);
     expect(rows.querySelector('script, b, i')).toBeNull();
+  });
+
+  it('shows a picture of the host as an image only, of PNG or JPEG bytes', () => {
+    const png = 'data:image/png;base64,iVBORw0KGgo=';
+    const d = data({
+      rows: [
+        { label: 'Logo', value: png, kind: 'image' },
+        { label: 'Bad', value: 'data:image/svg+xml;base64,PHN2Zz4=', kind: 'image' },
+        { label: 'Bad', value: 'javascript:alert(1)', kind: 'image' },
+        { label: 'Bad', value: 'data:image/png;base64,iVBO"><script>', kind: 'image' },
+      ] as unknown as DialogData['rows'],
+    });
+    expect(d.rows.map((r) => r.kind)).toEqual(['image', 'text', 'text', 'text']);
+    expect(d.rows[1].value).toBe('(a picture that cannot be shown)');
+    expect(isImageDataUrl(png)).toBe(true);
+    expect(isImageDataUrl('data:image/png;base64,' + 'A'.repeat(44 * 1024))).toBe(false);
+    const r = render(document, d);
+    document.body.append(r.root);
+    const imgs = [...r.root.querySelectorAll('img')];
+    expect(imgs.length).toBe(1);
+    expect(imgs[0].getAttribute('src')).toBe(png);
+    expect(imgs[0].alt).toBe('Logo');
+    expect(r.root.querySelector('#dialog-rows')!.querySelector('script, svg, object, iframe')).toBeNull();
   });
 
   it('shows the error of a wrong passphrase at the field', () => {

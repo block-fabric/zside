@@ -178,6 +178,7 @@ export function buildCommands(): Command[] {
     ...LAYOUTS.map((l): Command => ({ id: `layout.${l.id}`, group: 'Layout', label: `Layout: ${l.name}`, icon: l.icon, run: () => setLayout(l.id), checked: prefs.layout === l.id, keywords: l.summary })),
     // Simple or Advanced (lib/uimode.svelte.ts): the switch of the sidebar's foot, here for every layout.
     { id: 'display.uiMode', group: 'Display', label: switchModeLabel(), icon: simpleMode() ? 'tool' : 'home', run: toggleUiMode, keywords: 'simple advanced mode beginner expert interface easy full' },
+    { id: 'display.sidebar', group: 'Display', label: prefs.sidebarCollapsed ? 'Expand the sidebar' : 'Collapse the sidebar', icon: 'sidebar', shortcut: 'Ctrl+B', run: () => savePrefs({ sidebarCollapsed: !prefs.sidebarCollapsed }), keywords: 'navigation menu fold unfold icons rail hide show compact' },
     { id: 'display.tips', group: 'Display', label: 'Show the first steps again', run: () => { savePrefs({ tipsDone: false, uiMode: 'simple' }); go('home'); }, keywords: 'tips intro help beginner tour', page: 'home' },
     ...UNITS.map((u): Command => ({ id: `display.unit.${u.id}`, group: 'Display', label: `Show amounts in ${u.short}`, run: () => savePrefs({ unit: u.id }), checked: prefs.unit === u.id, keywords: `unit ${u.long}` })),
     { id: 'network.peers', group: 'Network', label: 'Show peers', run: to('node', 'peers'), keywords: 'connections' },

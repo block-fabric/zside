@@ -67,7 +67,11 @@ AppConfig::AppConfig(fs::path path) : m_path(std::move(path)) {}
 fs::path AppConfig::DefaultPath()
 {
 #ifdef WIN32
-    return GetSpecialFolderPath(CSIDL_APPDATA) / CLIENT_NAME / FileName();
+    // In the local folder, as the node's default data directory and WebView2's profile: a file in
+    // the roaming one would create %APPDATA%\<name>, which older nodes took for a data directory.
+    const fs::path path{GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / CLIENT_NAME / FileName()};
+    MoveLegacy(GetSpecialFolderPath(CSIDL_APPDATA) / CLIENT_NAME / FileName(), path);
+    return path;
 #else
     fs::path home;
     if (const char* h{std::getenv("HOME")}; h && *h) home = fs::PathFromString(h);
@@ -81,6 +85,42 @@ fs::path AppConfig::DefaultPath()
     return config / CLIENT_NAME / FileName();
 #endif
 #endif
+}
+
+bool AppConfig::MoveLegacy(const fs::path& legacy, const fs::path& current)
+{
+    std::error_code ec;
+    if (std::filesystem::exists(current, ec) || !std::filesystem::is_regular_file(legacy, ec)) return false;
+    std::ifstream in{static_cast<const std::filesystem::path&>(legacy), std::ios::binary};
+    if (!in.is_open()) return false;
+    std::stringstream text;
+    text << in.rdbuf();
+    in.close();
+    fs::create_directories(current.parent_path(), ec);
+    fs::path temp{current};
+    temp += ".new";
+    {
+        std::ofstream out{static_cast<const std::filesystem::path&>(temp), std::ios::binary | std::ios::trunc};
+        if (!out.is_open()) return false;
+        out << text.str();
+        out.flush();
+        if (!out.good()) {
+            out.close();
+            fs::remove(temp, ec);
+            return false;
+        }
+    }
+    if (!RenameOver(temp, current)) {
+        fs::remove(temp, ec);
+        return false;
+    }
+    fs::remove(legacy, ec);
+    // Only an empty folder: fs::remove does not remove a folder that holds anything.
+    if (std::filesystem::is_directory(legacy.parent_path(), ec) && std::filesystem::is_empty(legacy.parent_path(), ec)) {
+        fs::remove(legacy.parent_path(), ec);
+    }
+    LogInfo("webui: moved the app settings from %s to %s", fs::PathToString(legacy), fs::PathToString(current));
+    return true;
 }
 
 void AppConfig::Load()

@@ -89,4 +89,39 @@ BOOST_AUTO_TEST_CASE(default_path)
     BOOST_CHECK_EQUAL(fs::PathToString(path.parent_path().filename()), std::string{webui::chain::NAME});
 }
 
+BOOST_AUTO_TEST_CASE(move_legacy)
+{
+    const fs::path base{m_args.GetDataDirBase() / "move"};
+    const fs::path roaming{base / "Roaming" / "Chains"};
+    const fs::path local{base / "Local" / "Chains"};
+    const fs::path legacy{roaming / "chains-app.json"};
+    const fs::path current{local / "chains-app.json"};
+    // Nothing to move.
+    BOOST_CHECK(!webui::AppConfig::MoveLegacy(legacy, current));
+    BOOST_CHECK(!fs::exists(current));
+    // The file alone: moved, the emptied folder removed.
+    fs::create_directories(roaming);
+    { std::ofstream f{static_cast<const std::filesystem::path&>(legacy)}; f << "{\"datadir\": \"D:\\\\chain\"}"; }
+    BOOST_CHECK(webui::AppConfig::MoveLegacy(legacy, current));
+    BOOST_CHECK(!fs::exists(legacy));
+    BOOST_CHECK(!fs::exists(roaming));
+    webui::AppConfig config{current};
+    config.Load();
+    BOOST_CHECK_EQUAL(config.DataDir().value_or(""), "D:\\chain");
+    // Beside other files: only the file goes, the folder and the rest stay.
+    fs::create_directories(roaming / "wallets");
+    { std::ofstream f{static_cast<const std::filesystem::path&>(legacy)}; f << "{}"; }
+    fs::remove(current);
+    BOOST_CHECK(webui::AppConfig::MoveLegacy(legacy, current));
+    BOOST_CHECK(!fs::exists(legacy));
+    BOOST_CHECK(fs::exists(roaming / "wallets"));
+    // A file already in the new place wins; the old one is left alone.
+    { std::ofstream f{static_cast<const std::filesystem::path&>(legacy)}; f << "{\"datadir\": \"old\"}"; }
+    BOOST_CHECK(!webui::AppConfig::MoveLegacy(legacy, current));
+    BOOST_CHECK(fs::exists(legacy));
+    webui::AppConfig kept{current};
+    kept.Load();
+    BOOST_CHECK(!kept.DataDir());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

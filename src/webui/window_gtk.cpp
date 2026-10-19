@@ -81,6 +81,10 @@ class GtkWindowImpl final : public Window
 public:
     GtkWindowImpl(const Options& options, Callbacks callbacks) : m_callbacks(std::move(callbacks)), m_devtools(options.devtools)
     {
+        // The name of the program, which GTK gives the window as its class (X11 WM_CLASS) and its app id
+        // (Wayland): the desktop matches it to the desktop entry <bin>-app.desktop (StartupWMClass), so that
+        // the taskbar and the dock show the chain's icon, not a generic one (user feedback 2026-10-19).
+        g_set_prgname((std::string{chain::STEM} + "-app").c_str());
         if (!gtk_init_check(nullptr, nullptr)) throw std::runtime_error("Cannot open the display (GTK init failed)");
 
         WebKitWebContext* context{webkit_web_context_get_default()};
@@ -210,6 +214,12 @@ public:
 
     ~GtkWindowImpl() override
     {
+        if (m_spare) {
+            if (m_spare->spare_timer) g_source_remove(m_spare->spare_timer);
+            GtkWidget* window{m_spare->window};
+            m_spare.reset();
+            gtk_widget_destroy(window);
+        }
         if (m_themed) {
             if (m_themed->timer) g_source_remove(m_themed->timer);
             GtkWidget* window{m_themed->window};
@@ -525,6 +535,10 @@ private:
         WebKitWebView* web{nullptr};
         Done done;
         guint timer{0};
+        //! A window made ahead (PrepareDialog): its page waits for a question; the hello it sent meanwhile, answered then.
+        bool spare{false};
+        std::optional<std::pair<std::string, std::string>> held_hello;
+        guint spare_timer{0};
     };
 
     static void SnapshotView(WebKitWebView* view, const std::string& png_path, std::function<void(bool ok)> done)
@@ -572,8 +586,73 @@ private:
 
     void ShowDialog(const dialog::Request& request, Done done)
     {
-        if (!request.test_fallback && OpenThemed(request, done)) return;
+        if (!request.test_fallback && (UseSpare(request, done) || OpenThemed(request, done))) return;
         OpenNative(request, std::move(done));
+    }
+
+    /**
+     * A dialog window made ahead, its page loaded (a web process started, its files and fonts read), for a question the
+     * page expects soon (dialog.prepare: the review of a payment or a registration): on a slow or busy computer making
+     * one takes seconds, which looked like a frozen app, and past READY_TIMEOUT_MS gave the dialog of the system. It
+     * waits for its question at most SPARE_MS, then goes.
+     */
+    static constexpr int SPARE_MS{180000};
+    void PrepareDialog() override
+    {
+        if (m_spare || m_themed) return;
+        auto spare{MakeThemed()};
+        if (!spare) return;
+        spare->spare = true;
+        const uint64_t id{spare->id};
+        spare->spare_timer = g_timeout_add_full(
+            G_PRIORITY_DEFAULT, SPARE_MS,
+            +[](gpointer data) -> gboolean {
+                auto* t{static_cast<DialogTag*>(data)};
+                if (t->self->m_spare && t->self->m_spare->id == t->id) {
+                    t->self->m_spare->spare_timer = 0;
+                    t->self->DropSpare();
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new DialogTag{this, id}, +[](gpointer data) { delete static_cast<DialogTag*>(data); });
+        m_spare = std::move(spare);
+        m_spare->view->navigate(std::string{dialog::ORIGIN} + std::string{dialog::PAGE});
+    }
+
+    void DropSpare()
+    {
+        if (!m_spare) return;
+        std::unique_ptr<Themed> spare{std::move(m_spare)};
+        if (spare->spare_timer) g_source_remove(spare->spare_timer);
+        spare->spare_timer = 0;
+        Themed* raw{spare.release()};
+        Post([raw] {
+            std::unique_ptr<Themed> gone{raw};
+            GtkWidget* window{gone->window};
+            gone.reset();
+            gtk_widget_destroy(window);
+        });
+    }
+
+    /** The question in the window made ahead, if there is one: false when there is none. */
+    bool UseSpare(const dialog::Request& request, const Done& done)
+    {
+        if (!m_spare) return false;
+        std::unique_ptr<Themed> themed{std::move(m_spare)};
+        if (themed->spare_timer) g_source_remove(themed->spare_timer);
+        themed->spare_timer = 0;
+        themed->spare = false;
+        themed->session = std::make_unique<dialog::Session>(request);
+        themed->done = done;
+        gtk_window_set_title(GTK_WINDOW(themed->window), request.title.c_str());
+        auto held{std::move(themed->held_hello)};
+        themed->held_hello.reset();
+        const uint64_t id{themed->id};
+        m_themed = std::move(themed);
+        StartReadyTimer(id);
+        // Its page said hello already: answered now, with this question.
+        if (held) OnDialogCall(id, held->first, held->second);
+        return true;
     }
 
     /** The dialog shown is answered: its answer, then the next dialog asked meanwhile, if any. */
@@ -588,13 +667,44 @@ private:
     /** The dialog window, with the page of the dialogs. False when it cannot be made (then the dialog of GTK). */
     bool OpenThemed(const dialog::Request& request, const Done& done)
     {
-        auto themed{std::make_unique<Themed>()};
-        themed->id = ++m_dialog_serial;
+        auto themed{MakeThemed()};
+        if (!themed) return false;
         themed->session = std::make_unique<dialog::Session>(request);
         themed->done = done;
+        gtk_window_set_title(GTK_WINDOW(themed->window), request.title.c_str());
+        const uint64_t id{themed->id};
+        m_themed = std::move(themed);
+        StartReadyTimer(id);
+        m_themed->view->navigate(std::string{dialog::ORIGIN} + std::string{dialog::PAGE});
+        return true;
+    }
+
+    /** The page says nothing in time: the dialog of the system instead. */
+    void StartReadyTimer(uint64_t id)
+    {
+        m_themed->timer = g_timeout_add_full(
+            G_PRIORITY_DEFAULT, dialog::READY_TIMEOUT_MS,
+            +[](gpointer data) -> gboolean {
+                auto* t{static_cast<DialogTag*>(data)};
+                if (t->self->m_themed && t->self->m_themed->id == t->id) {
+                    t->self->m_themed->timer = 0;
+                    if (!t->self->m_themed->session->Shown()) {
+                        LogWarning("webui: the dialog window did not show in time: the dialog of the system instead");
+                        t->self->Fallback(t->id);
+                    }
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new DialogTag{this, id}, +[](gpointer data) { delete static_cast<DialogTag*>(data); });
+    }
+
+    /** A dialog window with its web view, not shown, its page not loaded yet; null when it cannot be made. */
+    std::unique_ptr<Themed> MakeThemed()
+    {
+        auto themed{std::make_unique<Themed>()};
+        themed->id = ++m_dialog_serial;
         GtkWidget* window{gtk_window_new(GTK_WINDOW_TOPLEVEL)};
         GtkWindow* gw{GTK_WINDOW(window)};
-        gtk_window_set_title(gw, request.title.c_str());
         // Modal to the main window, over it and centred on it, without the frame of the system (the page draws it).
         gtk_window_set_transient_for(gw, GTK_WINDOW(m_window));
         gtk_window_set_modal(gw, TRUE);
@@ -614,7 +724,7 @@ private:
             LogWarning("webui: the dialog window cannot be made (%s): the dialog of the system instead", e.what());
             themed->view.reset();
             gtk_widget_destroy(window);
-            return false;
+            return nullptr;
         }
         WebKitWebView* web{themed->web};
         WebKitSettings* settings{webkit_web_view_get_settings(web)};
@@ -705,24 +815,7 @@ private:
             // The answer may hold a passphrase: not left in freed memory.
             memory_cleanse(args.data(), args.size());
         }, nullptr);
-        // The page says nothing in time: the dialog of the system instead.
-        themed->timer = g_timeout_add_full(
-            G_PRIORITY_DEFAULT, dialog::READY_TIMEOUT_MS,
-            +[](gpointer data) -> gboolean {
-                auto* t{static_cast<DialogTag*>(data)};
-                if (t->self->m_themed && t->self->m_themed->id == t->id) {
-                    t->self->m_themed->timer = 0;
-                    if (!t->self->m_themed->session->Shown()) {
-                        LogWarning("webui: the dialog window did not show in time: the dialog of the system instead");
-                        t->self->Fallback(t->id);
-                    }
-                }
-                return G_SOURCE_REMOVE;
-            },
-            new DialogTag{this, id}, +[](gpointer data) { delete static_cast<DialogTag*>(data); });
-        m_themed = std::move(themed);
-        m_themed->view->navigate(std::string{dialog::ORIGIN} + std::string{dialog::PAGE});
-        return true;
+        return themed;
     }
 
     struct DialogTag {
@@ -732,6 +825,15 @@ private:
 
     void OnDialogCall(uint64_t id, const std::string& call_id, const std::string& args)
     {
+        if (m_spare && m_spare->id == id) {
+            // The window made ahead: its hello waits for the question (one call only; anything else is refused).
+            if (!m_spare->held_hello && args.starts_with("[\"hello\"")) {
+                m_spare->held_hello = std::make_pair(call_id, args);
+            } else {
+                m_spare->view->resolve(call_id, 1, UniValue{"Not now"}.write());
+            }
+            return;
+        }
         if (!m_themed || m_themed->id != id) return;
         dialog::Session::Reply reply{m_themed->session->Call(args)};
         if (reply.step == dialog::Session::Step::ANSWER) {
@@ -802,6 +904,11 @@ private:
     /** The dialog window failed before an answer: the same question in the dialog of the system. */
     void Fallback(uint64_t id)
     {
+        // The window made ahead failed: gone, and the next question makes its own.
+        if (m_spare && m_spare->id == id) {
+            DropSpare();
+            return;
+        }
         if (!m_themed || m_themed->id != id || m_themed->session->Answered()) return;
         const dialog::Request request{m_themed->session->request()};
         Done done{m_themed->done};
@@ -928,6 +1035,7 @@ private:
     //! The dialogs of the host: the window shown now (or the dialog of GTK instead), the ones waiting their turn.
     dialog::Pending m_pending;
     std::unique_ptr<Themed> m_themed;
+    std::unique_ptr<Themed> m_spare;
     uint64_t m_dialog_serial{0};
     GtkWidget* m_native{nullptr};
     std::string m_native_title;

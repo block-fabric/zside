@@ -57,6 +57,8 @@ export class BridgeError extends Error {
 /** Codes of the bridge itself (src/webui/bridge.h). */
 export const ErrorCode = {
   CANCELLED: -32800,
+  /** What was asked needs the user's word, and the page asked for no question (rpc.confirmed authorizedOnly). */
+  AUTH_NEEDED: -32801,
   INVALID_REQUEST: -32600,
   METHOD_NOT_FOUND: -32601,
   NOT_READY: -28,

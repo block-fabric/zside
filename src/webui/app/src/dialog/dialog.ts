@@ -14,13 +14,19 @@ import { applyTheme, clampFontAdjust, DEFAULT_THEME, isTheme, resolveTheme, type
 export type Level = 'info' | 'warning' | 'danger';
 
 /** A fact the host decoded (dialog.h Row): a destination, whole, before its amount; the fee; the total; what a vote changes. */
-export type RowKind = 'text' | 'address' | 'amount' | 'total' | 'heading' | 'note';
+export type RowKind = 'text' | 'address' | 'amount' | 'total' | 'heading' | 'note' | 'image';
 export interface Row {
   label: string;
   value: string;
   kind: RowKind;
 }
-const ROW_KINDS: readonly RowKind[] = ['text', 'address', 'amount', 'total', 'heading', 'note'];
+const ROW_KINDS: readonly RowKind[] = ['text', 'address', 'amount', 'total', 'heading', 'note', 'image'];
+/** The longest picture (dialog.h MAX_IMAGE_URL), and the only pictures shown: PNG or JPEG bytes in base64, as the host checked them. */
+const MAX_IMAGE_URL = 44 * 1024;
+const IMAGE_URL = /^data:image\/(png|jpeg);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+export function isImageDataUrl(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 'data:image/png;base64,'.length && value.length <= MAX_IMAGE_URL && IMAGE_URL.test(value);
+}
 /** At most so many facts, and so long (the host cuts them so already). */
 const MAX_ROWS = 81;
 
@@ -91,6 +97,8 @@ export function readData(raw: unknown): DialogData {
           if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
           const r = raw as Record<string, unknown>;
           const kind = ROW_KINDS.includes(r.kind as RowKind) ? (r.kind as RowKind) : 'text';
+          // A picture whole and of the one form, or a line that says it is not shown: never another URL, never cut.
+          if (kind === 'image') return [isImageDataUrl(r.value) ? { label: str(r.label, 60), value: r.value, kind } : { label: str(r.label, 60), value: '(a picture that cannot be shown)', kind: 'text' }];
           return [{ label: str(r.label, 60), value: str(r.value, 2000), kind }];
         })
       : [],
@@ -339,6 +347,27 @@ function renderRows(doc: Document, rows: Row[]): HTMLElement {
       const n = el(doc, 'div', { className: 'row note', text: revealBidi(row.value) });
       n.dir = 'auto';
       box.append(n);
+      continue;
+    }
+    if (row.kind === 'image') {
+      // Only as an image (never markup), only of the form checked again here; its label as its text alternative.
+      const line = el(doc, 'div', { className: 'row image' });
+      line.dataset.kind = 'image';
+      const dt = el(doc, 'dt', { text: revealBidi(row.label) });
+      const dd = el(doc, 'dd');
+      if (isImageDataUrl(row.value)) {
+        const img = doc.createElement('img');
+        img.alt = row.label;
+        img.width = 128;
+        img.height = 128;
+        img.decoding = 'async';
+        img.referrerPolicy = 'no-referrer';
+        img.draggable = false;
+        img.src = row.value;
+        dd.append(img);
+      }
+      line.append(dt, dd);
+      box.append(line);
       continue;
     }
     const line = el(doc, 'div', { className: `row ${row.kind}` });

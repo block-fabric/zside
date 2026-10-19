@@ -12,14 +12,14 @@
   import TopActions from '../../components/TopActions.svelte';
   import { detail } from '../../lib/detail.svelte';
   import { closeQuick } from '../../lib/quick.svelte';
-  import { NAV_SECTIONS } from '../../lib/layout';
+  import { navSectionOf } from '../../lib/layout';
   import { go, nav } from '../../lib/nav.svelte';
   import { pageTitle } from '../../lib/uimode.svelte';
   import SyncOverlay from '../../components/SyncOverlay.svelte';
   import PageView from '../PageView.svelte';
 
   let drawer = $state(false);
-  const section = $derived(NAV_SECTIONS.find((s) => s.pages.includes(nav.page))?.title ?? '');
+  const section = $derived(navSectionOf(nav.page));
 
   // One panel at the right: a row opened in the detail panel closes Send/Receive; so does a new page.
   $effect(() => {
@@ -41,7 +41,7 @@
         {:else}
           <button type="button" class="link" onclick={() => go('home')}><Icon name="home" size={15} /> Home</button>
           <span class="sep" aria-hidden="true">/</span>
-          {#if section}<span class="muted">{section}</span><span class="sep" aria-hidden="true">/</span>{/if}
+          {#if section}<span class="muted">{t(section)}</span><span class="sep" aria-hidden="true">/</span>{/if}
           <span class="here" aria-current="page">{pageTitle(nav.page)}</span>
         {/if}
       </nav>

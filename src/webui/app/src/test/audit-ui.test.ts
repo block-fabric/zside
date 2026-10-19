@@ -79,7 +79,7 @@ describe('a node without wallets (-disablewallet, C1)', () => {
     expect(screen.queryByRole('button', { name: /^Send/ })).toBeNull();
     // The Wallets page, if reached, says why instead of calling the wallet functions.
     go('wallets', 'create');
-    await waitFor(() => screen.getByRole('heading', { name: 'Wallets' }));
+    await waitFor(() => screen.getByRole('heading', { name: 'Manage wallets' }));
     expect(document.body.textContent).toContain('-disablewallet');
     expect(calls.some((c) => c.method?.startsWith('wallets.'))).toBe(false);
   });

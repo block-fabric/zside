@@ -187,3 +187,49 @@ export async function walletRpc<T>(wallet: string, method: string, params: unkno
     throw e;
   }
 }
+
+/**
+ * A first step and its second in one question of the host (rpc.confirmed {then}, src/webui/confirm.h): a reservation
+ * and its registration, say. Accepted, the first runs and the host keeps a one-time authorization of exactly that second
+ * step (walletRpcIfAuthorized runs it without a question). The first's result, with `authorized` (the seconds the second
+ * may come in) when the host keeps one; null when declined.
+ */
+export async function walletRpcTwoSteps<T extends object>(
+  wallet: string,
+  method: string,
+  params: unknown[],
+  then: { method: string; params: unknown[] },
+): Promise<(T & { authorized?: number }) | null> {
+  try {
+    return await request<T & { authorized?: number }>('host', 'rpc.confirmed', { wallet, method, params, then });
+  } catch (e) {
+    if (declined(e)) return null;
+    throw e;
+  }
+}
+
+/**
+ * A call that runs only if it needs no question (a second step the user accepted with its first, the wallet not
+ * locked): its result, or `needed` (why the user's word is needed) when the host would have to ask. Never a dialog.
+ */
+export async function walletRpcIfAuthorized<T>(wallet: string, method: string, params: unknown[]): Promise<{ result: T } | { needed: string }> {
+  try {
+    return { result: await request<T>('host', 'rpc.confirmed', { wallet, method, params, authorizedOnly: true }) };
+  } catch (e) {
+    const err = BridgeError.from(e);
+    if (err.code === ErrorCode.AUTH_NEEDED) return { needed: err.message };
+    throw e;
+  }
+}
+
+let prepared = 0;
+/**
+ * A confirmation of the host is likely soon (the page shows the review of what it would ask): the host makes its dialog
+ * window ahead, so that it shows at once even on a busy computer (dialog.prepare). At most once in 30 seconds.
+ */
+export function prepareConfirm(): void {
+  const now = Date.now();
+  if (now - prepared < 30_000) return;
+  prepared = now;
+  request('host', 'dialog.prepare', {}).catch(() => undefined);
+}

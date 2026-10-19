@@ -412,7 +412,7 @@
 
 <div class="page wallets">
   <header class="page-head">
-    <h1>Wallets</h1>
+    <h1>Manage wallets</h1>
     <div class="row">
       <button type="button" class="btn primary" onclick={openCreate}><Icon name="plus" size={16} /> Create wallet…</button>
       <button type="button" class="btn" onclick={restore}><Icon name="upload" size={16} /> Restore wallet…</button>

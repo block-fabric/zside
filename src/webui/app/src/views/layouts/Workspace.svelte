@@ -18,10 +18,11 @@
   import { buildCommands, menuSections, pageAvailable, pageDisabled } from '../../lib/commands.svelte';
   import { AREAS, areaOf, isAt, placeLabel, type Area, type Place } from '../../lib/layout';
   import { go, nav, PAGES } from '../../lib/nav.svelte';
+  import { prefs } from '../../lib/state.svelte';
   import { frame, titleBarDoubleClick, titleBarMouseDown } from '../../lib/windowframe.svelte';
   import SyncOverlay from '../../components/SyncOverlay.svelte';
   import PageView from '../PageView.svelte';
-  import { pageShown, pageTitle } from '../../lib/uimode.svelte';
+  import { pageShown, pageTitle, simpleMode } from '../../lib/uimode.svelte';
 
   // The top bar is the integrated title bar too: its empty part moves the window, the buttons of
   // the window at its right.
@@ -73,7 +74,8 @@
     ondblclick={(e) => top && titleBarDoubleClick(e, top)}
   >
     <Brand onclick={() => go('home')} />
-    <nav class="areas" aria-label="Areas">
+    <!-- Folded (Ctrl+B, prefs.sidebarCollapsed): the areas but the current one show their icon only, named in their tooltip. -->
+    <nav class="areas" class:folded={prefs.sidebarCollapsed} aria-label="Areas">
       {#each areas as a, i (a.id)}
         <button type="button" class="area" aria-label={t(a.label)} title={t(a.label)} aria-current={area.id === a.id ? 'true' : undefined} onclick={() => enter(a)} onkeydown={(e) => areaKey(e, i)}>
           <Icon name={a.icon} size={18} />
@@ -100,7 +102,8 @@
         title={PAGES[tb.page].shortcut ? `${t(PAGES[tb.page].summary)} (${PAGES[tb.page].shortcut})` : t(PAGES[tb.page].summary)}
         onclick={() => go(tb.page, tb.tab ?? '')}
       >
-        {tb.label ? t(tb.label) : pageTitle(tb.page)}
+        <!-- Simple mode: the page's plain name (Activity) over the short label of the tab (History). -->
+        {tb.label && !(simpleMode() && PAGES[tb.page].simpleTitle) ? t(tb.label) : pageTitle(tb.page)}
         {#if !PAGES[tb.page].ready}<span class="soon" aria-label="(being rebuilt)">•</span>{/if}
       </button>
     {/each}
@@ -240,6 +243,12 @@
   .tools :global(.wallet),
   .tools :global(.palette-button) {
     flex: none;
+  }
+  .areas.folded .area:not([aria-current='true']) .label {
+    display: none;
+  }
+  .areas.folded .area:not([aria-current='true']) {
+    padding: 0 0.7rem;
   }
   /* Home and five areas take room: on a smaller window only the current area keeps its name (the
      others their icon, named in their tooltip and for screen readers). */

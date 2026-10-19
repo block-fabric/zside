@@ -69,6 +69,11 @@ export function handleShortcut(e: KeyboardEvent): boolean {
     openPalette();
     return true;
   }
+  // Ctrl+B folds the navigation into icons, or unfolds it (the sidebar's button, the palette).
+  if (key === 'b') {
+    savePrefs({ sidebarCollapsed: !prefs.sidebarCollapsed });
+    return true;
+  }
   // Ctrl+W closes the dialog on top (GUIUtil::handleCloseWindowShortcut), or the node window.
   if (key === 'w') return closeTop();
   if (NODE_TABS[key]) {

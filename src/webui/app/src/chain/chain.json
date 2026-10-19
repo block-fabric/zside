@@ -7,7 +7,7 @@
   "uriScheme": "zside",
   "brand": {
     "color": "#f26b9c",
-    "iconHue": 307,
+    "iconHue": 0,
     "mark": ["M16 3.5l10 3.8v8.2c0 6.3-4.2 10.7-10 13-5.8-2.3-10-6.7-10-13V7.3z", "M11.5 11.5h9l-9 9h9"]
   },
   "networks": {

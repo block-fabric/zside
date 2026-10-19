@@ -24,6 +24,8 @@ namespace webui {
 enum BridgeError : int {
     //! The request was cancelled by the page.
     BRIDGE_CANCELLED = -32800,
+    //! What was asked needs the user's word first, and the page asked for nothing to be asked (rpc.confirmed authorizedOnly).
+    BRIDGE_AUTH_NEEDED = -32801,
     //! The request is not a bridge request (bad JSON, missing fields, unknown kind).
     BRIDGE_INVALID_REQUEST = -32600,
     //! No host method of that name.

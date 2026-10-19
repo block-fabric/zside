@@ -1,7 +1,9 @@
 // The icon, the version and the manifest of chains-app on Windows.
-1 ICON DISCARDABLE "icons/bitcoin.ico"
-2 ICON DISCARDABLE "icons/bitcoin_testnet.ico"
-3 ICON DISCARDABLE "icons/bitcoin_signet.ico"
+// The chain's own mark (app/scripts/appicon.py), not the coin of Bitcoin; the colours of a test
+// network are put on it as it runs (icontint.cpp).
+1 ICON DISCARDABLE "icons/app.ico"
+2 ICON DISCARDABLE "icons/app.ico"
+3 ICON DISCARDABLE "icons/app.ico"
 
 #include <windows.h>             // needed for VERSIONINFO
 #include "../../clientversion.h" // holds the needed client version information

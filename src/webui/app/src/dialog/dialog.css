@@ -311,3 +311,14 @@ body.loading {
   color: var(--negative);
   font-size: 0.92rem;
 }
+
+/* A picture the host checked (a logo): shown at half its size. */
+.rows .image dd img {
+  display: block;
+  width: 128px;
+  height: 128px;
+  object-fit: contain;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--text-muted);
+  background: var(--surface-2);
+}

@@ -11,7 +11,7 @@
   import { go } from '../lib/nav.svelte';
   import { markAllRead, noticeList } from '../lib/notices.svelte';
   import { prefs, wallets } from '../lib/state.svelte';
-  import { addressText, typeText, walletDisplayName } from '../lib/wallet';
+  import { addressText, noticeRecordOf, typeText, walletDisplayName } from '../lib/wallet';
   import { current } from '../lib/walletdata.svelte';
 
   let open = $state(false);
@@ -28,7 +28,8 @@
     open = false;
   }
   function record(wallet: string, txid: string) {
-    return wallet === wallets.current ? current.records.find((r) => r.txid === txid) : undefined;
+    // One per transaction: its halves to the wallet itself merged (a send with its own outputs is a send).
+    return wallet === wallets.current ? noticeRecordOf(current.records, txid) : undefined;
   }
   function visit(wallet: string, txid: string) {
     const r = record(wallet, txid);
