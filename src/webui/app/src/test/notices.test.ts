@@ -1,6 +1,7 @@
 // The notices of new transactions (user feedback 2026-10-19): a transaction that pays the wallet itself is
 // listed by the node as a send and a receive of (almost) nothing, as the Transactions page merges them
 // (mergeByTxid). One notice per transaction, with its net: never a "received 0.00000" beside the send.
+// (On a chain that knows more of its transactions, the notifier waits up to 3 s for what it knows.)
 import { render, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import TxNotifier from '../components/TxNotifier.svelte';
@@ -60,22 +61,22 @@ describe('the notices of new transactions', () => {
     records = [raw(TX, 0, 'send', 0, -12_000, 'rchn1qrecipient'), raw(TX, 1, 'recv', 0, 0, 'rchn1qmine')];
     render(TxNotifier);
     arrive(TX);
-    await waitFor(() => expect(toasts.list.length).toBeGreaterThan(0), { timeout: 3000 });
+    await waitFor(() => expect(toasts.list.length).toBeGreaterThan(0), { timeout: 8000 });
     await new Promise((r) => setTimeout(r, 300));
     expect(toasts.list.map((x) => x.title)).toEqual(['Sent transaction']);
     expect(toasts.list[0].message).toContain('-0.00012');
     const notify = calls.filter((c) => c.method === 'app.notify');
     expect(notify.length).toBe(1);
-  });
+  }, 15000);
 
   it('keep one notice for each of several transactions, and an income as an income', async () => {
     records = [raw(TX, 0, 'send', 0, -12_000), raw(TX, 1, 'recv', 0, 0), raw(OTHER, 0, 'recv', 50_000, 0)];
     render(TxNotifier);
     arrive(TX, OTHER);
-    await waitFor(() => expect(toasts.list.length).toBe(2), { timeout: 3000 });
+    await waitFor(() => expect(toasts.list.length).toBe(2), { timeout: 8000 });
     await new Promise((r) => setTimeout(r, 300));
     expect(toasts.list.map((x) => x.title).sort()).toEqual(['Incoming transaction', 'Sent transaction']);
-  });
+  }, 15000);
 
   it('call a move of the wallet to itself (net of only the fee) a send, never an income', () => {
     const recs = parseRecords([raw(TX, 0, 'send', 0, -500_000), raw(TX, 1, 'recv', 499_000, 0)]);

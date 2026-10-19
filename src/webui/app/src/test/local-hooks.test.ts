@@ -42,6 +42,8 @@ describe('the hooks of a chain of its own', () => {
     expect(src('pages/Send.svelte')).toMatch(/<LocalSend bind:active=\{sendingOwn\} \/>\s*\{#if !sendingOwn\}/);
     // The template's own hooks are empty.
     expect(src('chain/LocalSend.svelte')).toMatch(/active = \$bindable\(false\)/);
+    // The chain's part of the details of a transaction, above those of the coin.
+    expect(src('components/TxDetailsView.svelte')).toMatch(/<LocalTxDetails \{wallet\} txid=\{details\.txid\} \/>\s*<dl class="facts">/);
   });
 
   it('blocks are drawn against the weight the node says for its network (app.info.blockWeight)', async () => {

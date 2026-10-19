@@ -8,6 +8,7 @@
   import { formatTime } from '../lib/format';
   import { walletApi, type DetailRow, type TxDetails, type TxRecord } from '../lib/wallet';
   import { COINBASE_ROLES } from '../chain/roles';
+  import LocalTxDetails from '../chain/LocalTxDetails.svelte';
 
   let { wallet, record }: { wallet: string; record: Pick<TxRecord, 'txid' | 'idx' | 'address'> } = $props();
 
@@ -51,6 +52,8 @@
   <p class="muted">Loading…</p>
 {:else}
   <div class="details" data-txid={details.txid}>
+    <!-- What the chain knows of it beyond its coin (chain/LocalTxDetails.svelte: an asset moved...), first. -->
+    <LocalTxDetails {wallet} txid={details.txid} />
     <dl class="facts">
       {#each details.rows as row, i (i)}
         <dt>{t(row.k)}</dt>
