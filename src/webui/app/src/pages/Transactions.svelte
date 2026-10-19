@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { t } from '../lib/i18n.svelte';
+  import { t, tn } from '../lib/i18n.svelte';
   import { simpleMode } from '../lib/uimode.svelte';
   import { thirdPartyLinks } from '../lib/tools';
   // The history of the wallet (TransactionView, TransactionTableModel, TransactionFilterProxy):
@@ -45,6 +45,7 @@
   import { untrack } from 'svelte';
   import LocalTxCell from '../chain/LocalTxCell.svelte';
   import { CHAIN_TX_CSV, CHAIN_TX_FILTER, chainTxOf, refreshChainTx } from '../chain/txinfo.svelte';
+  import { chainTxHidden } from '../lib/chaintx';
 
   const wallet = $derived(wallets.current);
 
@@ -97,7 +98,11 @@
     return () => clearTimeout(t);
   });
   // One row per transaction the chain knows more of (an asset moved): its halves to the wallet itself merged (mergeByTxid).
-  const records = $derived(mergeByTxid(current.records, (txid) => !!chainTxOf(txid)));
+  const merged = $derived(mergeByTxid(current.records, (txid) => !!chainTxOf(txid)));
+  // The transactions the chain hides (an asset the wallet ignores: chainTxHidden), folded into one line that shows them.
+  let showHidden = $state(false);
+  const hiddenCount = $derived(merged.reduce((n, r) => n + (chainTxHidden(r.txid) ? 1 : 0), 0));
+  const records = $derived(hiddenCount && !showHidden ? merged.filter((r) => !chainTxHidden(r.txid)) : merged);
   const shown = $derived.by(() => {
     const type = typeFilter === 'chain' ? 'all' : typeFilter;
     const base = filterRecords(records, { ...range, type, search: searchApplied, minAmount, showInactive: true });
@@ -298,6 +303,12 @@
       <span>Net <Amount sats={totals.received + totals.sent} colored plus /></span>
     </div>
 
+    {#if hiddenCount}
+      <p class="hidden-line" data-testid="hidden-transactions">
+        <span class="muted">{tn('%n hidden transaction(s), of assets this wallet ignores', hiddenCount)}</span>
+        <button type="button" class="btn ghost small" aria-expanded={showHidden} onclick={() => (showHidden = !showHidden)}>{showHidden ? 'Hide them' : 'Show them'}</button>
+      </p>
+    {/if}
     <div class="holder">
       {#if current.recordsError}
         <p class="error">{current.recordsError}</p>
@@ -377,6 +388,14 @@
   }
   .range input {
     width: auto;
+  }
+  .hidden-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    font-size: 0.9rem;
   }
   .totals {
     display: flex;

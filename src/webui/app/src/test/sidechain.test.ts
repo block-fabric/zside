@@ -188,7 +188,7 @@ describe.runIf(SIDECHAIN)('the chain of a sidechain, in one place (chain.json)',
 
   it('has its peg and merged mining in the Chain section, before the tools, and Alt+5 opens the peg', () => {
     // The pages of the chain of its own (chain/local.ts) in the Chain section go between them and the explorer.
-    const own = (LOCAL_PAGES as readonly LocalPage[]).filter((p) => p.section === 'chain').map((p) => p.id);
+    const own = (LOCAL_PAGES as readonly LocalPage[]).filter((p) => p.section === 'chain' && !p.tabOf).map((p) => p.id);
     // Merged mining is a tab of Drivechains (user decision, 2026-10-15), not a page of the sidebar.
     expect(NAV_SECTIONS.find((s) => s.title === 'Chain')!.pages).toEqual(['peg', ...own, 'explorer']);
     expect(AREAS.find((a) => a.id === 'chain')!.tabs.map((t) => t.page)).toEqual(['peg', ...own, 'explorer']);

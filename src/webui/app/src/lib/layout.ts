@@ -8,7 +8,8 @@ import { LOCAL_PAGES, type LocalPage } from '../chain/local';
 
 /** The pages of the chain of its own in a section (chain/local.ts). */
 function localPages(section: LocalPage['section']): PageId[] {
-  return (LOCAL_PAGES as readonly LocalPage[]).filter((p) => p.section === section).map((p) => p.id as PageId);
+  // A page that is a tab of another (tabOf) is reached through it.
+  return (LOCAL_PAGES as readonly LocalPage[]).filter((p) => p.section === section && !p.tabOf).map((p) => p.id as PageId);
 }
 
 export type LayoutId = 'workspace' | 'dashboard';

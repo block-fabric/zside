@@ -39,6 +39,11 @@ export interface LocalPage {
   simple?: boolean;
   /** What it is for in Simple mode, in a few plain words (under its name in the sidebar of Simple mode). */
   simpleSummary?: string;
+  /**
+   * Not a page of its own in the navigation: a tab of another page of the chain (BitAssets: Register new asset
+   * under My assets). go('<id>') and its commands lead there (to `tab`, then the tab asked for, "issue/…").
+   */
+  tabOf?: { page: string; tab: string };
 }
 
 export const LOCAL_PAGES = [

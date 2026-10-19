@@ -283,7 +283,7 @@ export function subscribe(): void {
     else wallets.progress[p.name] = { title: p.title, progress: p.progress };
   });
   on<{ name: string; txid: string; change: string }>('wallet.tx', ({ name, txid, change }) => {
-    if (name === wallets.current) wallets.txVersion++;
+    if (name === wallets.current) bumpLater('txVersion');
     if (change === 'new') {
       wallets.newTxTotal++;
       wallets.newTxs.push({ wallet: name, txid });
@@ -291,8 +291,24 @@ export function subscribe(): void {
     }
   });
   on<{ name: string }>('wallet.addressbook', ({ name }) => {
-    if (name === wallets.current) wallets.addressVersion++;
+    if (name === wallets.current) bumpLater('addressVersion');
   });
+}
+
+/**
+ * A burst of transactions of the wallet (a script making a thousand assets, a rescan) is one change for the pages:
+ * what reads the wallet again on a change (its history, its addresses, the home) does it once per BURST_MS, not once
+ * per transaction. User feedback 2026-10-19 (item 10): the history read again and redrawn for each of 2,000
+ * transactions in a few minutes took frames.
+ */
+export const BURST_MS = 150;
+const bumping: Partial<Record<'txVersion' | 'addressVersion', ReturnType<typeof setTimeout>>> = {};
+function bumpLater(key: 'txVersion' | 'addressVersion'): void {
+  if (bumping[key] !== undefined) return;
+  bumping[key] = setTimeout(() => {
+    bumping[key] = undefined;
+    wallets[key]++;
+  }, BURST_MS);
 }
 
 // --- Preferences (kept by the app, per network) ---

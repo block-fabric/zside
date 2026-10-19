@@ -62,6 +62,7 @@ describe('the navigation of Simple mode (the rule of doc/webui.md)', () => {
     for (const p of own) {
       expect(p.advanced, `${p.id} is marked simple and advanced`).toBeFalsy();
       expect(p.section, `${p.id}: a main feature is a page of the chain`).not.toBe('tools');
+      expect(p.tabOf, `${p.id}: a main feature is a page of its own, not a tab of another`).toBeUndefined();
     }
   });
 

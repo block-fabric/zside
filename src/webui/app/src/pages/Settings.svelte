@@ -21,6 +21,8 @@
   import ThemeEditor from '../components/ThemeEditor.svelte';
   import { effectiveColors } from '../lib/customthemes';
   import { frame } from '../lib/windowframe.svelte';
+  import { LOCAL_SETTINGS_TABS } from '../chain/settings';
+  import LocalSettings from '../chain/LocalSettings.svelte';
 
   // Appearance first: the look, the layout and the title bar (doc/webui-layouts.md).
   const TABS = [
@@ -32,6 +34,8 @@
     { id: 'window', label: 'Window' },
     // A sidechain: the connection to its mainchain node.
     ...(SIDECHAIN ? [{ id: 'mainchain', label: CHAIN.mainchain?.name ?? 'Mainchain' }] : []),
+    // The chain's own (chain/settings.ts): BitAssets' Asset filters.
+    ...LOCAL_SETTINGS_TABS,
   ];
   const tab = $derived(TABS.some((t) => t.id === nav.tab) ? nav.tab : 'display');
 
@@ -245,7 +249,9 @@
   {/if}
   {#if loadError}<p class="error">{loadError}</p>{/if}
 
-  {#if tab === 'mainchain' && options}
+  {#if LOCAL_SETTINGS_TABS.some((x) => x.id === tab)}
+    <LocalSettings {tab} />
+  {:else if tab === 'mainchain' && options}
     <MainchainSettings {options} {set} changed={(next) => { options = next; changedNow = true; }} />
   {:else if tab === 'main' && options}
     <section class="panel">
