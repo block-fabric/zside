@@ -302,13 +302,19 @@ export function subscribe(): void {
  * transactions in a few minutes took frames.
  */
 export const BURST_MS = 150;
+/** While transactions keep coming (a script), at most one change a STREAM_MS. */
+export const STREAM_MS = 1000;
 const bumping: Partial<Record<'txVersion' | 'addressVersion', ReturnType<typeof setTimeout>>> = {};
+const bumped: Record<'txVersion' | 'addressVersion', number> = { txVersion: 0, addressVersion: 0 };
 function bumpLater(key: 'txVersion' | 'addressVersion'): void {
   if (bumping[key] !== undefined) return;
+  // A moment after the first of a burst; a second after the last change while they keep coming.
+  const wait = Math.max(BURST_MS, bumped[key] + STREAM_MS - Date.now());
   bumping[key] = setTimeout(() => {
     bumping[key] = undefined;
+    bumped[key] = Date.now();
     wallets[key]++;
-  }, BURST_MS);
+  }, wait);
 }
 
 // --- Preferences (kept by the app, per network) ---

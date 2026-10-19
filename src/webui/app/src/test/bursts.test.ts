@@ -4,7 +4,7 @@
 import { waitFor } from '@testing-library/svelte';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { dispatch } from '../lib/bridge';
-import { BURST_MS, subscribe, wallets } from '../lib/state.svelte';
+import { BURST_MS, STREAM_MS, subscribe, wallets } from '../lib/state.svelte';
 
 vi.mock('../chain/txinfo.svelte', async (importOriginal) => {
   const real = await importOriginal<Record<string, unknown>>();
@@ -28,9 +28,11 @@ describe('a burst of transactions of the wallet', () => {
     expect(wallets.txVersion).toBe(before);
     await waitFor(() => expect(wallets.txVersion).toBe(before + 1));
     expect(Date.now() - t0).toBeGreaterThanOrEqual(BURST_MS - 20);
-    // Another later is another change.
+    // Another later is another change; while they keep coming, at most one a second.
+    const t1 = Date.now();
     dispatch([{ type: 'wallet.tx', data: { name: 'w', txid: 'ff'.repeat(32), change: 'new' } }]);
-    await waitFor(() => expect(wallets.txVersion).toBe(before + 2));
+    await waitFor(() => expect(wallets.txVersion).toBe(before + 2), { timeout: 3000 });
+    expect(Date.now() - t1).toBeGreaterThanOrEqual(STREAM_MS - 300);
     // Another wallet's change no change of the one shown.
     dispatch([{ type: 'wallet.tx', data: { name: 'other', txid: 'ee'.repeat(32), change: 'new' } }]);
     await new Promise((r) => setTimeout(r, BURST_MS + 50));
