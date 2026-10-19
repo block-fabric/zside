@@ -42,7 +42,7 @@ export interface LocalPage {
 }
 
 export const LOCAL_PAGES = [
-  { id: 'private', title: 'Private', icon: 'private', section: 'chain', summary: 'The shielded balance: pay privately with a memo, shield and unshield, shielded addresses, viewing keys', wallet: true, shortcut: 'Alt+6', keywords: 'shielded zside orchard pay privately shield unshield memo address viewing key', quick: { label: 'Pay privately', icon: 'private', tab: 'pay', simpleLabel: 'Send privately' } },
+  { id: 'private', title: 'Private', simpleTitle: 'Private payments', simple: true, simpleSummary: 'Pay and get paid without being seen', icon: 'private', section: 'chain', summary: 'The shielded balance: pay privately with a memo, shield and unshield, shielded addresses, viewing keys', wallet: true, shortcut: 'Alt+6', keywords: 'shielded zside orchard pay privately shield unshield memo address viewing key', quick: { label: 'Pay privately', icon: 'private', tab: 'pay', simpleLabel: 'Send privately' } },
   { id: 'memos', title: 'Memos', icon: 'memo', section: 'chain', summary: 'The memos the shielded account received, to read', wallet: true, keywords: 'inbox messages notes memo received', advanced: true },
   { id: 'zhistory', title: 'Private activity', icon: 'zhistory', section: 'chain', summary: 'The transactions and the notes of the shielded account', wallet: true, keywords: 'shielded history transactions notes bump fee', advanced: true },
   { id: 'meltcast', title: 'Melt & cast', icon: 'meltcast', section: 'chain', summary: 'Shield and unshield in steps that leave nothing to link', wallet: true, keywords: 'melt cast bills unlinkable plan schedule', advanced: true },
