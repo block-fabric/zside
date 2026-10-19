@@ -421,20 +421,20 @@ mode"). `lib/uimode.svelte.ts` holds it:
   | App | Main features in Simple mode |
   |---|---|
   | Chains, the template | none (Move coins is the chain's own) |
-  | Thunder | none (Batch pay stays Advanced's, user decision) |
+  | Thunder | Payments, How busy (Throughput); Batch pay stays Advanced's (user decision) |
   | BitNames | Get a name, My names |
-  | BitAssets | My assets, Create a token, Swap (Explore assets in Advanced) |
+  | BitAssets | My assets, Swap (Browse assets in Advanced; Create a token is a tab of My assets) |
   | zSide | Private payments (Private) |
   | Hivemind | Questions (Markets), My bets (Portfolio) |
   | FastBlocks | Stake and earn (Staking) |
-  | Layers | Stake and earn, My assets, Swap (Explore assets in Advanced) |
+  | Layers | Stake and earn, My assets, Swap (Browse assets in Advanced) |
 * Pages marked `advanced: true` in `PAGES` (the advanced transactions, the
   tools, the node window, solo mining, the kit) leave Home's quick actions in
   Simple mode as well.
 * **Names told apart** (user feedback 2026-10-19): the section is *Wallet*,
   the page that creates, opens, backs up and encrypts wallets is **Manage
   wallets** (id `wallets`); on BitAssets and Layers the market of every asset
-  is **Explore assets** (id `assets`), what the wallet holds **My assets**
+  is **Browse assets** (id `assets`), what the wallet holds **My assets**
   (`my-assets`). The ids, and so the links, shortcuts and `go()` calls that
   name them, are unchanged.
 * **The sidebar folds** into a rail of icons (user feedback 2026-10-19): the
