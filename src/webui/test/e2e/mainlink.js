@@ -10,6 +10,9 @@
   const MAIN = window.__E2E_MAINCHAIN;
   const banner = () => $('.mainchain-alert');
   const statusbar = () => ($('footer.statusbar .sync') || {}).textContent || '';
+  // The Network card of Home (it says "Waiting for Chains" while the link is down, not "Up to date").
+  const networkCard = () => ($$('section.card').find((s) => ($('h2', s) || {}).textContent === 'Network') || {}).textContent || '';
+  const oldWarning = () => $$('.out-of-sync').some((b) => /not reachable/.test(b.textContent));
   async function mode(m) {
     T().savePrefs({ uiMode: m });
     await waitFor(`${m} mode`, () => T().prefs.uiMode === m);
@@ -48,6 +51,8 @@
     await check('getmainchaininfo: down, refused, since and last_ok', down.error_kind === 'refused' && down.since > 0 && down.last_ok > 0 && !down.connected, JSON.stringify(down));
     await sleep(8000);
     await check('no banner before its delay (a restart of the mainchain node is no outage)', !banner() || Date.now() - stopped > 20000);
+    await check('Home: the Network card waits for the mainchain node at once, not "Up to date"', networkCard().includes(`Waiting for ${MAIN}`) && !networkCard().includes('Up to date'), networkCard());
+    await check('the status bar does not say "Up to date" either', !statusbar().includes('Up to date'), statusbar());
     await waitFor('the down banner', () => banner() && banner().classList.contains('down'), 60000);
     const seconds = Math.round((Date.now() - stopped) / 1000);
     await check(`the down banner within the timeout (${seconds} s)`, seconds <= 45, String(seconds));
@@ -55,6 +60,7 @@
     await check('the banner names the node, the reason in plain words, and when it was last reached', words.includes(`Cannot reach your ${MAIN} node (127.0.0.1:`) && words.includes('connection refused') && /Last reached .* ago/.test(words), words);
     await check('the banner is an alert', banner().getAttribute('role') === 'alert');
     await check('the status bar says so', statusbar().includes(`No link to ${MAIN}`), statusbar());
+    await check('Home says it once: the banner, no warning of its own', !oldWarning());
     await check('the bell has one notice of it', T() && $('.notices .dot') !== null);
     $$('button', banner()).find((b) => /How to fix/.test(b.textContent)).click();
     await waitFor('How to fix', () => banner().textContent.includes('server=1'));
@@ -72,6 +78,7 @@
     await mode('advanced');
     await shot('mainlink-restored-advanced');
     await check('the status bar no longer says so', !statusbar().includes('No link'), statusbar());
+    await waitFor('the Network card no longer waiting', () => !networkCard().includes('Waiting for'), 30000);
     await sleep(6000);
     await check('one toast only', $$('.toast').filter((t) => t.textContent.includes('again')).length <= 1);
 
@@ -83,6 +90,7 @@
     await waitFor('the syncing banner', () => banner() && banner().classList.contains('syncing'), 90000);
     await check('the syncing banner is a status, not an alert', banner().getAttribute('role') === 'status');
     await check('it says the mainchain node is syncing', banner().textContent.includes(`${MAIN} is still syncing`), banner().textContent);
+    await check('Home: the Network card says the mainchain node is syncing', networkCard().includes(`${MAIN} is syncing`), networkCard());
     await shot('mainlink-syncing-advanced');
     await mode('simple');
     await check('Simple mode: catching up', banner().textContent.includes('catching up'), banner().textContent);

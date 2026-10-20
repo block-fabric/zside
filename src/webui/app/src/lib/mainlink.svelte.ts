@@ -113,6 +113,21 @@ let tracker = newTracker();
 
 const mainName = () => CHAIN.mainchain?.name ?? 'the mainchain';
 
+/**
+ * What the indicators that would else say "Up to date" (the Network card of Home, the status bar) say of the
+ * link: down at once (the node cannot follow the mainchain, so it cannot know it is up to date), syncing only
+ * once its banner shows (the record a block behind for a moment, after each block of the mainchain, is not).
+ */
+export function linkHold(): Banner | null {
+  if (mainLink.banner) return mainLink.banner;
+  return badOf(mainLink.info) === 'down' ? 'down' : null;
+}
+
+/** Why not "Up to date" (linkHold; the pages say "Waiting for Chains" or "Chains is syncing"), for a tooltip. */
+export function holdDetail(hold: Banner): string {
+  return hold === 'down' ? t('This wallet cannot sync, nor confirm deposits and withdrawals, until %1 is back.', mainName()) : t('New blocks, deposits and withdrawals wait until it catches up.');
+}
+
 /** Why the link is down, in plain words (the kind the node gives). */
 export function reasonText(kind: LinkErrorKind | undefined): string {
   switch (kind) {

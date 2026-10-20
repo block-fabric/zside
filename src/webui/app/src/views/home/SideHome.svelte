@@ -32,6 +32,7 @@
   import FirstRunTips from '../../components/FirstRunTips.svelte';
   import Term from '../../components/Term.svelte';
   import { pageShown, simpleMode } from '../../lib/uimode.svelte';
+  import { holdDetail, linkHold } from '../../lib/mainlink.svelte';
 
   interface Peer {
     id: number;
@@ -124,6 +125,9 @@
         })
       : null,
   );
+  /** The link to the mainchain node down (or it syncing): this chain cannot be up to date (lib/mainlink.svelte.ts). */
+  const hold = $derived(linkHold());
+  const upToDate = $derived(!!status?.upToDate && !hold);
 
   $effect(() => {
     void node.connections;
@@ -218,7 +222,7 @@
     <div>
       <h1>Home</h1>
       <p class="muted sub">
-        {#if status}{#if status.upToDate}Up to date{:else}<SafeText text={status.label} />{/if}, block {formatCount(node.tip?.height ?? 0)}, {node.networkActive ? `${node.connections} peer${node.connections === 1 ? '' : 's'}` : 'network off'}{:else}Starting…{/if}
+        {#if status}{#if hold}{hold === 'down' ? t('Waiting for %1', mainName) : t('%1 is syncing', mainName)}{:else if status.upToDate}Up to date{:else}<SafeText text={status.label} />{/if}, block {formatCount(node.tip?.height ?? 0)}, {node.networkActive ? `${node.connections} peer${node.connections === 1 ? '' : 's'}` : 'network off'}{:else}Starting…{/if}
       </p>
     </div>
     <nav class="quick" aria-label="Quick actions">
@@ -234,12 +238,6 @@
   {#if node.tip?.ibd}
     <button type="button" class="out-of-sync" onclick={() => go('node', 'info')}>
       <Icon name="alert" size={16} /> Out of sync: balances and activity may be out of date until the node has caught up with the network.
-    </button>
-  {/if}
-
-  {#if info && !connected}
-    <button type="button" class="out-of-sync" onclick={() => go('bmm')}>
-      <Icon name="alert" size={16} /> {mainName} is not reachable: this node cannot tell which new blocks are valid, nor mine. <SafeText text={info.error ?? ''} />
     </button>
   {/if}
 
@@ -272,14 +270,18 @@
     <Card title="Network" icon="peers" open={() => go('node', 'info')} openLabel="Open the node window" stat>
       <span class="value">
         {#if status}
-          <span class="state" class:ok={status.upToDate}><Icon name={status.upToDate ? 'check' : 'history'} size={16} /> {#if status.upToDate}Up to date{:else}<SafeText text={status.label} />{/if}</span>
+          {#if hold}
+            <span class="state warn" title={holdDetail(hold)}><Icon name={hold === 'down' ? 'offline' : 'history'} size={16} /> {hold === 'down' ? t('Waiting for %1', mainName) : t('%1 is syncing', mainName)}</span>
+          {:else}
+            <span class="state" class:ok={status.upToDate}><Icon name={status.upToDate ? 'check' : 'history'} size={16} /> {#if status.upToDate}Up to date{:else}<SafeText text={status.label} />{/if}</span>
+          {/if}
         {:else}<span class="muted">Starting…</span>{/if}
       </span>
-      {#if status && !status.upToDate}<progress max="1" value={status.progress} aria-label="Verification progress"></progress>{/if}
+      {#if status && !status.upToDate && !hold}<progress max="1" value={status.progress} aria-label="Verification progress"></progress>{/if}
       <dl class="pairs">
         <dt>Height</dt><dd class="num">{formatCount(node.tip?.height ?? 0)}</dd>
         <dt>Peers</dt><dd class="num">{node.networkActive ? node.connections : 'network off'}</dd>
-        <dt>Sync</dt><dd class="num">{status ? (status.upToDate ? '100%' : `${(status.progress * 100).toFixed(1)}%`) : '–'}</dd>
+        <dt>Sync</dt><dd class="num">{status ? (upToDate ? '100%' : hold && status.upToDate ? '–' : `${(status.progress * 100).toFixed(1)}%`) : '–'}</dd>
         <dt>Mempool</dt><dd class="num">{mining ? `${formatCount(mining.pooledtx)} tx` : '–'}</dd>
       </dl>
       {#snippet actions()}
@@ -643,6 +645,9 @@
   }
   .state.bad {
     color: var(--negative);
+  }
+  .state.warn {
+    color: var(--warning);
   }
   .trend {
     display: flex;

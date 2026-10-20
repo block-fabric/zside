@@ -48,7 +48,7 @@
           {:else}
             <strong class="title">{t('Cannot reach your %1 node (%2): %3', mainName, info?.node ?? '', reasonText(info?.error_kind))}</strong>
             <span class="text">
-              {t('This wallet cannot sync, nor confirm deposits and withdrawals, until it is back.')}
+              {t('This wallet cannot sync, mine, nor confirm deposits and withdrawals, until it is back.')}
               {#if lastOk}{t('Last reached %1 ago.', lastOk)}{:else}{t('Not reached since this app started.')}{/if}
             </span>
           {/if}

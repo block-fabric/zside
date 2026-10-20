@@ -23,6 +23,8 @@ import { FIRST_STEPS } from '../lib/firststeps';
 import type { NodeOptions } from '../lib/rpc';
 import { bmmBlocks, bmmShare, bundleHistory, depositsOf, depositTarget, EventLog, voteProgress, type SideEvent } from '../lib/side';
 import { noteBmm, side, stopSide } from '../lib/sidestate.svelte';
+import { checkLink, stopMainLink, SYNC_DELAY_MS } from '../lib/mainlink.svelte';
+import StatusBar from '../components/StatusBar.svelte';
 import { app, node, prefs, wallets } from '../lib/state.svelte';
 import { UNITS } from '../lib/units';
 import { parsePaymentUri } from '../lib/uri';
@@ -52,13 +54,16 @@ const EVENTS: SideEvent[] = Array.from({ length: 6 }, (_, i) => {
 
 const calls: BridgeRequest[] = [];
 let mining = false;
+/** The link of the fake to its mainchain node (getmainchaininfo's state). */
+let linkState: 'ok' | 'syncing' | 'down' = 'ok';
 
 async function fakeNode(r: BridgeRequest): Promise<unknown> {
   calls.push(r);
   const p = (r.params ?? {}) as Record<string, unknown>;
   switch (r.method) {
     case 'getmainchaininfo':
-      return { slot: SLOT, connected: true, node: '127.0.0.1:29554', height: 101, bestblockhash: 'h101', tipheight: 100 };
+      if (linkState === 'down') return { slot: SLOT, connected: false, node: '127.0.0.1:29554', height: 101, tipheight: 100, state: 'down', error_kind: 'refused', error: 'Cannot reach the mainchain node at 127.0.0.1:29554: connection refused' };
+      return { slot: SLOT, connected: true, node: '127.0.0.1:29554', height: 101, bestblockhash: 'h101', tipheight: 100, state: linkState, ...(linkState === 'syncing' ? { error_kind: 'not-synced', behind_blocks: 40 } : {}) };
     case 'getbmminfo':
       return mining ? { mining: true, address: ownAddress, always: false, idle: false, lastfees: 0.001, lastoffer: 0.00099, requests: 4, blocks: 3, outbid: 1, candidates: 1 } : { mining: false, requests: 4, blocks: 3, outbid: 1, candidates: 0 };
     case 'getwithdrawalbundle':
@@ -139,11 +144,13 @@ beforeEach(() => {
   wallets.balances.w = { trusted: 100_000_000n, untrustedPending: 0n, immature: 0n };
   calls.length = 0;
   mining = false;
+  linkState = 'ok';
   setTransport(fakeNode);
 });
 
 afterEach(() => {
   stopSide();
+  stopMainLink();
   side.log = [];
   side.main.events = [];
   side.main.height = -1;
@@ -371,6 +378,44 @@ describe.runIf(SIDECHAIN)('the pages of a sidechain', () => {
     expect([nav.page, nav.tab]).toEqual(['peg', 'deposit']);
     const tabs = screen.getByRole('tablist', { name: 'Activity' });
     expect(within(tabs).getAllByRole('tab').map((t) => t.textContent?.replace(/\d+/g, '').trim())).toEqual(['Transactions', 'Blocks', 'Peers']);
+  });
+
+  it('the home with the mainchain node down: the banner only says it (no card of its own); the network waits for it', async () => {
+    // User request 2026-10-20: the outage said twice on Home, and "Up to date" while Chains was unreachable.
+    const main = CHAIN.mainchain?.name;
+    node.tip = { ...node.tip!, time: Math.floor(Date.now() / 1000) };
+    linkState = 'down';
+    go('home');
+    render(SideHome);
+    render(StatusBar);
+    await checkLink(Date.now());
+    const network = screen.getByRole('heading', { name: 'Network' }).closest('section')!;
+    await waitFor(() => expect(network.textContent).toContain(`Waiting for ${main}`));
+    expect(network.textContent).not.toContain('Up to date');
+    expect(network.querySelector('.state.warn')).toBeTruthy();
+    expect(network.querySelector('progress')).toBeNull();
+    expect(document.querySelector('.hero .sub')?.textContent).toContain(`Waiting for ${main}`);
+    // The status bar does not claim it either, nor its tooltip (before the banner shows, 20 s on).
+    const bar = document.querySelector('.statusbar .sync') as HTMLElement;
+    expect(bar.textContent).toContain(`Waiting for ${main}`);
+    expect(bar.title).not.toMatch(/Up to date/);
+    // The Drivechains card keeps saying it; the old warning of Home is gone (the banner at the top says it).
+    const peg = screen.getByRole('heading', { name: 'Drivechains' }).closest('section')!;
+    await waitFor(() => expect(within(peg).getByText('Not reachable')).toBeTruthy());
+    expect(document.body.textContent).not.toMatch(/cannot tell which new blocks are valid/);
+    expect(document.body.textContent).not.toContain('connection refused');
+    // The mainchain node syncing (once its banner shows): "is syncing".
+    linkState = 'syncing';
+    const t0 = Date.now();
+    await checkLink(t0);
+    await checkLink(t0 + SYNC_DELAY_MS);
+    await waitFor(() => expect(network.textContent).toContain(`${main} is syncing`));
+    // Back: up to date again.
+    linkState = 'ok';
+    await checkLink(t0 + SYNC_DELAY_MS + 4000);
+    await waitFor(() => expect(network.textContent).toContain('Up to date'));
+    expect(network.querySelector('.state.ok')).toBeTruthy();
+    expect(bar.textContent).toContain('Up to date');
   });
 
   it('Settings → the mainchain: its address, port and wallet; its files from the file chooser only', async () => {

@@ -12,7 +12,7 @@
   import { syncStatus } from '../lib/sync';
   import { UNITS, type Unit } from '../lib/units';
   import { go, nav } from '../lib/nav.svelte';
-  import { mainLink } from '../lib/mainlink.svelte';
+  import { holdDetail, linkHold, mainLink } from '../lib/mainlink.svelte';
 
   const mainName = CHAIN.mainchain?.name ?? '';
 
@@ -39,6 +39,8 @@
         })
       : null,
   );
+  /** The link to the mainchain node down: not "Up to date" (before its banner shows, lib/mainlink.svelte.ts). */
+  const hold = $derived(linkHold());
   const wallet = $derived(wallets.list.find((w) => w.name === wallets.current) ?? null);
   const walletProgress = $derived(wallets.current ? wallets.progress[wallets.current] : undefined);
   const busy = $derived(app.progress ?? walletProgress ?? null);
@@ -71,7 +73,7 @@
 
 <footer class="statusbar">
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="sync" title={status?.detail} onclick={() => { if (status && !status.upToDate) nav.dialog = 'sync'; }}>
+  <div class="sync" title={hold ? holdDetail(hold) : status?.detail} onclick={() => { if (hold) mainLink.expanded = !!mainLink.banner; else if (status && !status.upToDate) nav.dialog = 'sync'; }}>
     {#if statusTip.text}
       <!-- The status tip of the menu item under the pointer (QStatusBar::showMessage of a status tip). -->
       <span class="label tip" role="status">{t(statusTip.text)}</span>
@@ -84,6 +86,8 @@
         <Icon name={mainLink.banner === 'down' ? 'offline' : 'history'} size={16} />
         <span class="label">{mainLink.banner === 'down' ? t('No link to %1', mainName) : t('%1 is still syncing', mainName)}</span>
       </button>
+    {:else if status && hold}
+      <span class="mainlink {hold}"><Icon name={hold === 'down' ? 'offline' : 'history'} size={16} /> <span class="label">{hold === 'down' ? t('Waiting for %1', mainName) : t('%1 is syncing', mainName)}</span></span>
     {:else if status && !status.upToDate}
       <Icon name="history" size={16} />
       <span class="label"><SafeText text={status.label} /></span>
