@@ -96,12 +96,24 @@ endif()
 find_program(CARGO cargo HINTS $ENV{HOME}/.cargo/bin REQUIRED)
 set(ZSIDE_RUST_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rust)
 set(ZSIDE_CARGO_JOBS 4 CACHE STRING "Jobs cargo builds the Orchard library with")
-set(ZSIDE_RUST_LIB ${ZSIDE_RUST_TARGET_DIR}/release/libzside_orchard.a)
+# Cross-compiled for Windows (mingw-w64), the library is built for the Rust target of the host
+# system (rustup target add x86_64-pc-windows-gnu).
+set(ZSIDE_RUST_TARGET "" CACHE STRING "Rust target triple of the Orchard library (default: the host's; x86_64-pc-windows-gnu when cross-compiling for Windows)")
+if(ZSIDE_RUST_TARGET STREQUAL "" AND WIN32 AND CMAKE_CROSSCOMPILING)
+  set(ZSIDE_RUST_TARGET x86_64-pc-windows-gnu)
+endif()
+if(ZSIDE_RUST_TARGET STREQUAL "")
+  set(ZSIDE_CARGO_TARGET_ARGS)
+  set(ZSIDE_RUST_LIB ${ZSIDE_RUST_TARGET_DIR}/release/libzside_orchard.a)
+else()
+  set(ZSIDE_CARGO_TARGET_ARGS --target ${ZSIDE_RUST_TARGET})
+  set(ZSIDE_RUST_LIB ${ZSIDE_RUST_TARGET_DIR}/${ZSIDE_RUST_TARGET}/release/libzside_orchard.a)
+endif()
 file(GLOB ZSIDE_RUST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rust/src/*.rs)
 add_custom_command(
   OUTPUT ${ZSIDE_RUST_LIB}
   COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${ZSIDE_RUST_TARGET_DIR} CARGO_BUILD_JOBS=${ZSIDE_CARGO_JOBS}
-          ${CARGO} build --release --locked --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml
+          ${CARGO} build --release --locked ${ZSIDE_CARGO_TARGET_ARGS} --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml
   DEPENDS ${ZSIDE_RUST_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml ${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.lock
   COMMENT "Building the Orchard library (Rust)"
   VERBATIM
@@ -109,7 +121,12 @@ add_custom_command(
 add_custom_target(zside_orchard_build DEPENDS ${ZSIDE_RUST_LIB})
 add_library(zside_orchard STATIC IMPORTED GLOBAL)
 set_target_properties(zside_orchard PROPERTIES IMPORTED_LOCATION ${ZSIDE_RUST_LIB})
-target_link_libraries(zside_orchard INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
+if(WIN32)
+  # What the Rust standard library and getrandom need on Windows (cargo rustc -- --print native-static-libs).
+  target_link_libraries(zside_orchard INTERFACE bcrypt advapi32 kernel32 ntdll userenv ws2_32 dbghelp)
+else()
+  target_link_libraries(zside_orchard INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
+endif()
 add_dependencies(zside_orchard zside_orchard_build)
 
 add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
