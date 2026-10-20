@@ -624,6 +624,32 @@ without private keys (so that what it sees is not mixed with an account the wall
 scans the blocks again from the height given. The key is kept with the keys of retired accounts
 (version `KEY_VIEW_ONLY`); its notes are watch-only (`viewonly` in `listshieldednotes`).
 
+## In the Chains app (the host over RPC)
+
+The Chains app can run this chain for its user and show these pages in its own window (Chains,
+`doc/unified-app.md`). Then the pages are a **pack** (`npm run pack -- --outDir <dir>`,
+`app/scripts/pack.mjs`: the interface built for `/packs/<bin>/`, with `pack.json`) built into that app
+at a pinned commit, and their host is the **daemon** of this chain, over RPC (`src/webui/remotehost.h`,
+only in `<bin>d`):
+
+- `webuihost {kind, method, params, wallet?} (token passphrase files)` runs one request of the pages: an
+  RPC method under the pages' own policy (`rpcpolicy.cpp`), or a host method of the kit or of the chain
+  (`wallet.*`, `rpc.confirmed`, `local.cpp`'s). What needs the user's word is never asked by the daemon:
+  the answer is `{confirm: <question>}` (the question of this chain's describers, `confirm.cpp`,
+  `walletapi.cpp`, `local.cpp`) with a one-time token. The app shows it in its own trusted dialog and,
+  accepted, sends exactly the same request with the token (and the passphrase typed there): it runs only
+  if the token is that of this request, this question and this wallet, unused and not expired
+  (5 minutes). One confirmation per request.
+- `describeconfirmation "method" [params] (wallet)` describes a confirmed RPC method and runs nothing.
+- `webuievents (since timeout)` gives the events of the node (tip, wallets) to the app, in order.
+- `webuichosenfile "path" (write)`: the app, right after its own native chooser answered, gets a one-time
+  token for that file (absolute and canonical paths only: no link, no `..`); a request names files only
+  by such tokens (`webuihost … files`), never by a path, so the pages cannot name a file of their own.
+
+A host method that keeps something for its question (a prepared send) keeps it while the question is
+carried out to the app unanswered (`WalletApi`, `once`). `HOST_API` (remotehost.h and pack.mjs) is the
+version of all this: the app takes a pack and a daemon only of the version it speaks.
+
 ## Tests
 
 | Test | What it covers |

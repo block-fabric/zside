@@ -18,6 +18,7 @@ add_executable(test_chains-app
   nodeapi_tests.cpp
   nodeevents_tests.cpp
   quitguard_tests.cpp
+  remotehost_tests.cpp
   singleinstance_tests.cpp
   windowframe_tests.cpp
   $<$<BOOL:${ENABLE_WALLET}>:walletapi_tests.cpp>
@@ -31,6 +32,7 @@ target_link_libraries(test_chains-app
   core_interface
   chains_webui_core
   chains_webui_assets
+  chains_webui_remote
   $<TARGET_NAME_IF_EXISTS:chains_webui_wallet>
   test_util
   bitcoin_node

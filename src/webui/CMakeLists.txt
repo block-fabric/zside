@@ -164,6 +164,23 @@ if(ENABLE_WALLET)
   )
 endif()
 
+# The host of the pages over RPC, in the daemon (webui/remotehost.h): what the Chains app needs to show this chain's
+# pages in its own window (webuihost, describeconfirmation, webuievents). Only the daemon has it.
+add_library(chains_webui_remote STATIC EXCLUDE_FROM_ALL
+  remotehost.cpp
+)
+target_link_libraries(chains_webui_remote
+  PUBLIC
+    core_interface
+    chains_webui_core
+    $<TARGET_NAME_IF_EXISTS:chains_webui_wallet>
+    bitcoin_node
+)
+if(TARGET bitcoind)
+  target_link_libraries(bitcoind chains_webui_remote)
+  target_compile_definitions(bitcoind PRIVATE ENABLE_WEBUI_REMOTE)
+endif()
+
 if(WIN32)
   # WebView2: its headers (the depends package webview2, or WEBVIEW2_INCLUDE_DIR); the loader is the
   # one built into webview.h, so no WebView2Loader.dll.

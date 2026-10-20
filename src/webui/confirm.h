@@ -153,6 +153,25 @@ std::function<std::optional<Window::ConfirmDialog>(const Call&)> Generic(std::st
                                                                          std::vector<std::string> destinations = {}, std::vector<std::string> amounts = {},
                                                                          dialog::Level level = dialog::Level::WARNING);
 
+/**
+ * While one lives on a thread, the confirmed calls of that thread are described and never run (the host of the pages
+ * over RPC, webui/remotehost.h: describeconfirmation): a call that would run, having asked nothing (a call that needs no
+ * question), is refused with BRIDGE_AUTH_NEEDED instead, and no second step runs on an authorization.
+ */
+class DescribeOnly
+{
+public:
+    DescribeOnly();
+    ~DescribeOnly();
+    DescribeOnly(const DescribeOnly&) = delete;
+    DescribeOnly& operator=(const DescribeOnly&) = delete;
+    //! Whether the calls of this thread are described only.
+    static bool Active();
+
+private:
+    bool m_previous;
+};
+
 /** The methods confirmed this way, by name: the kit's own (confirm.cpp) and the chain's own (local.cpp). */
 const std::map<std::string, Method>& Methods();
 

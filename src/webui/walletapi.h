@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -164,6 +165,8 @@ private:
     int64_t m_next_token GUARDED_BY(m_mutex){1};
     std::map<std::string, std::shared_ptr<Prepared>> m_prepared GUARDED_BY(m_mutex);
     std::map<std::string, std::shared_ptr<Bump>> m_bumps GUARDED_BY(m_mutex);
+    //! The tokens of sends and bumps whose question is open (one question per token at a time).
+    std::set<std::string> m_asking GUARDED_BY(m_mutex);
 
     std::string NewToken() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 };

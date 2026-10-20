@@ -482,7 +482,7 @@ MAX_NODES = 12
 # Don't assign p2p, rpc or tor ports lower than this
 PORT_MIN = int(os.getenv('TEST_RUNNER_PORT_MIN', default=11000))
 # The number of ports to "reserve" for p2p, rpc and tor, each
-PORT_RANGE = 5000
+PORT_RANGE = int(os.getenv('TEST_RUNNER_PORT_RANGE', default=5000))
 
 
 class PortSeed:

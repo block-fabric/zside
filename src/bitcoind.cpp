@@ -29,6 +29,10 @@
 #include <util/threadnames.h>
 #include <util/tokenpipe.h>
 #include <util/translation.h>
+#ifdef ENABLE_WEBUI_REMOTE
+#include <rpc/extra.h>
+#include <webui/remotehost.h>
+#endif
 
 #include <any>
 #include <functional>
@@ -275,6 +279,13 @@ MAIN_FUNCTION
     noui_connect();
 
     util::ThreadSetInternalName("init");
+
+#ifdef ENABLE_WEBUI_REMOTE
+    // The host of the pages of this chain over RPC, for the Chains app that runs this daemon (webui/remotehost.h).
+    rpc_extra::g_register = webui::remote::RegisterRpcCommands;
+    rpc_extra::g_interrupt = webui::remote::Interrupt;
+    rpc_extra::g_shutdown = webui::remote::Shutdown;
+#endif
 
     // Interpret command line arguments
     ArgsManager& args = *Assert(node.args);

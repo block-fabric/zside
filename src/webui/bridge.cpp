@@ -174,6 +174,13 @@ void Bridge::RegisterHost(const std::string& name, HostFn fn, Thread thread)
     m_host[name] = Host{std::move(fn), thread};
 }
 
+Bridge::HostFn Bridge::FindHost(const std::string& name) const
+{
+    LOCK(m_mutex);
+    const auto it{m_host.find(name)};
+    return it == m_host.end() ? HostFn{} : it->second.fn;
+}
+
 size_t Bridge::Pending() const
 {
     LOCK(m_mutex);

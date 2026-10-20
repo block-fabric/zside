@@ -531,6 +531,8 @@ std::optional<Window::ConfirmDialog> Keys(const Call& call)
 
 UniValue RunRpc(interfaces::Node& node, const std::string& method, const UniValue& params, const std::string& wallet)
 {
+    // Described only (DescribeOnly): it would run without a question, so nothing is to be confirmed, and it does not run.
+    if (DescribeOnly::Active()) throw HostError(BRIDGE_AUTH_NEEDED, strprintf("%s needs no confirmation: described only, it was not run", method));
     try {
         return node.executeRpc(method, params, wallet.empty() ? std::string{"/"} : WalletUri(wallet));
     } catch (const UniValue& error) {
@@ -540,6 +542,14 @@ UniValue RunRpc(interfaces::Node& node, const std::string& method, const UniValu
     }
 }
 } // namespace
+
+namespace {
+thread_local bool g_describe_only{false};
+} // namespace
+
+DescribeOnly::DescribeOnly() : m_previous{g_describe_only} { g_describe_only = true; }
+DescribeOnly::~DescribeOnly() { g_describe_only = m_previous; }
+bool DescribeOnly::Active() { return g_describe_only; }
 
 void Authorizations::Add(Entry entry)
 {
@@ -656,7 +666,7 @@ UniValue ConfirmedRpc::Call(const UniValue& params)
     // A first step with its second, in one question.
     if (!then.isNull()) return TwoSteps(node, wallet, name, method, calls.front().second, then);
     // A second step the user accepted with its first: without a question, when it is exactly that one.
-    if (method.kind == Method::Kind::SPEND && !batch) {
+    if (method.kind == Method::Kind::SPEND && !batch && !DescribeOnly::Active()) {
         if (auto done{Authorized(node, wallet, name, method, calls.front().second, only)}) return std::move(*done);
     }
     if (only) throw HostError(BRIDGE_AUTH_NEEDED, strprintf("%s needs your confirmation", name));

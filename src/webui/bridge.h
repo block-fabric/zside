@@ -145,6 +145,12 @@ public:
     void RegisterHost(const std::string& name, HostFn fn, Thread thread = Thread::WORKER) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
+     * The host method registered under this name, or an empty function: for a host that runs them itself, on its own
+     * thread (the host of the pages over RPC of a daemon, webui/remotehost.h).
+     */
+    HostFn FindHost(const std::string& name) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
      * Handle a call of the page. `call_id` identifies the call for the reply,
      * `args_json` is the JSON array of the arguments of the call: [request].
      */

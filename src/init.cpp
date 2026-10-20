@@ -81,6 +81,7 @@
 #include <policy/settings.h>
 #include <protocol.h>
 #include <random.h>
+#include <rpc/extra.h>
 #include <rpc/register.h>
 #include <rpc/server.h>
 #include <rpc/util.h>
@@ -294,6 +295,7 @@ static void ShutdownNotify(const ArgsManager& args)
 
 void Interrupt(NodeContext& node)
 {
+    if (rpc_extra::g_interrupt) rpc_extra::g_interrupt();
 #if HAVE_SYSTEM
     ShutdownNotify(*node.args);
 #endif
@@ -365,6 +367,7 @@ void Shutdown(NodeContext& node)
     // the scheduler. After this point, SyncWithValidationInterfaceQueue() should not be called anymore
     // as this would prevent the shutdown from completing.
     if (node.scheduler) node.scheduler->stop();
+    if (rpc_extra::g_shutdown) rpc_extra::g_shutdown();
 
     // After the threads that potentially access these pointers have been stopped,
     // destruct and reset all to nullptr.
@@ -1662,6 +1665,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 #ifdef ENABLE_ZMQ
     RegisterZMQRPCCommands(tableRPC);
 #endif
+    if (rpc_extra::g_register) rpc_extra::g_register(tableRPC);
 
     // Check port numbers
     if (!CheckHostPortOptions(args)) return false;

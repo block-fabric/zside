@@ -1441,6 +1441,35 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file, guard::AskFn ask) : m_nod
         out.pushKV("canSend", !w->privateKeysDisabled() || w->hasExternalSigner());
         return out;
     });
+    // A prepared send or bump is used up by its question: answered (yes or no) or failed, it is gone. Only a question
+    // carried out of this host unanswered (to the app that runs this daemon, webui/remotehost.h: not an exception of
+    // the standard kind) leaves it prepared, for the same call again with the answer. One question per token at a time.
+    const auto once{[this](const UniValue& params, bool bump, const std::function<UniValue()>& commit) -> UniValue {
+        const std::string token{Str(params, "token")};
+        {
+            LOCK(m_mutex);
+            if (!(bump ? m_bumps.contains(token) : m_prepared.contains(token))) {
+                throw HostError(bump ? "This fee bump is no longer prepared: start again" : "This transaction is no longer prepared: send again");
+            }
+            if (!m_asking.insert(token).second) throw HostError(BRIDGE_INVALID_REQUEST, "Its confirmation is open already");
+        }
+        const auto done{[&](bool used_up) {
+            LOCK(m_mutex);
+            m_asking.erase(token);
+            if (used_up) bump ? (void)m_bumps.erase(token) : (void)m_prepared.erase(token);
+        }};
+        try {
+            UniValue result{commit()};
+            done(true);
+            return result;
+        } catch (const std::exception&) {
+            done(true);
+            throw;
+        } catch (...) {
+            done(false);
+            throw;
+        }
+    }};
     auto take_bump{[this](const UniValue& params, bool erase) {
         LOCK(m_mutex);
         const auto it{m_bumps.find(Str(params, "token"))};
@@ -1449,38 +1478,39 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file, guard::AskFn ask) : m_nod
         if (erase) m_bumps.erase(it);
         return bump;
     }};
-    Add("wallet.bump.commit", [this, get_wallet, take_bump](const UniValue& params) {
-        auto bump{take_bump(params, false)};
-        auto w{get_wallet(params)};
-        if (w->getWalletName() != bump->wallet) throw HostError(BRIDGE_INVALID_REQUEST, "The fee bump is of another wallet");
-        if (w->privateKeysDisabled() && !w->hasExternalSigner()) throw HostError("This wallet cannot sign: create an unsigned transaction instead");
-        bump = take_bump(params, true);
-        // What the replacement pays, from itself, and the fees before and after: confirmed on the desktop (audit 7 #1).
-        Window::ConfirmDialog dialog;
-        dialog.title = "Increase the fee";
-        dialog.message = "The wallet replaces the transaction with one that pays a higher fee, to the same recipients.\n\nAccept only if you asked for it.";
-        dialog.accept = "Increase the fee";
-        dialog.kind = "bump";
-        const CTransaction replacement{bump->mtx};
-        // The output of the wallet's own (its change) is not a payment.
-        std::optional<unsigned int> change;
-        for (unsigned int i{0}; i < replacement.vout.size(); ++i) {
-            if (w->txoutIsMine(replacement.vout[i])) change = i;
-        }
-        dialog.rows = PaymentRows(*w, replacement, change, bump->new_fee, LabelsOf(*w));
-        dialog.rows.insert(dialog.rows.begin() + 2, confirm::Destination("Replaces", bump->txid.GetHex()));
-        dialog.rows.insert(dialog.rows.begin() + 3, confirm::Amount("Fee before", bump->old_fee));
-        return WithKeys(w->getWalletName(), dialog, /*always=*/true, /*fee_unknown=*/false, [&] {
-            CMutableTransaction mtx{bump->mtx};
-            if (!w->signBumpTransaction(mtx)) throw HostError("Can't sign transaction.");
-            std::vector<bilingual_str> errors;
-            Txid new_txid;
-            if (!w->commitBumpTransaction(bump->txid, std::move(mtx), errors, new_txid)) {
-                throw HostError(strprintf("Could not commit transaction (%s)", errors.empty() ? "" : errors[0].translated));
+    Add("wallet.bump.commit", [this, get_wallet, take_bump, once](const UniValue& params) {
+        return once(params, /*bump=*/true, [&]() -> UniValue {
+            auto bump{take_bump(params, false)};
+            auto w{get_wallet(params)};
+            if (w->getWalletName() != bump->wallet) throw HostError(BRIDGE_INVALID_REQUEST, "The fee bump is of another wallet");
+            if (w->privateKeysDisabled() && !w->hasExternalSigner()) throw HostError("This wallet cannot sign: create an unsigned transaction instead");
+            // What the replacement pays, from itself, and the fees before and after: confirmed on the desktop (audit 7 #1).
+            Window::ConfirmDialog dialog;
+            dialog.title = "Increase the fee";
+            dialog.message = "The wallet replaces the transaction with one that pays a higher fee, to the same recipients.\n\nAccept only if you asked for it.";
+            dialog.accept = "Increase the fee";
+            dialog.kind = "bump";
+            const CTransaction replacement{bump->mtx};
+            // The output of the wallet's own (its change) is not a payment.
+            std::optional<unsigned int> change;
+            for (unsigned int i{0}; i < replacement.vout.size(); ++i) {
+                if (w->txoutIsMine(replacement.vout[i])) change = i;
             }
-            UniValue out{UniValue::VOBJ};
-            out.pushKV("txid", new_txid.GetHex());
-            return out;
+            dialog.rows = PaymentRows(*w, replacement, change, bump->new_fee, LabelsOf(*w));
+            dialog.rows.insert(dialog.rows.begin() + 2, confirm::Destination("Replaces", bump->txid.GetHex()));
+            dialog.rows.insert(dialog.rows.begin() + 3, confirm::Amount("Fee before", bump->old_fee));
+            return WithKeys(w->getWalletName(), dialog, /*always=*/true, /*fee_unknown=*/false, [&] {
+                CMutableTransaction mtx{bump->mtx};
+                if (!w->signBumpTransaction(mtx)) throw HostError("Can't sign transaction.");
+                std::vector<bilingual_str> errors;
+                Txid new_txid;
+                if (!w->commitBumpTransaction(bump->txid, std::move(mtx), errors, new_txid)) {
+                    throw HostError(strprintf("Could not commit transaction (%s)", errors.empty() ? "" : errors[0].translated));
+                }
+                UniValue out{UniValue::VOBJ};
+                out.pushKV("txid", new_txid.GetHex());
+                return out;
+            });
         });
     });
     Add("wallet.bump.psbt", [get_wallet, take_bump](const UniValue& params) {
@@ -2114,71 +2144,73 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file, guard::AskFn ask) : m_nod
         if (erase) m_prepared.erase(it);
         return prepared;
     }};
-    Add("wallet.send.commit", [this, get_wallet, take_prepared](const UniValue& params) {
-        auto prepared{take_prepared(params, true)};
-        auto w{get_wallet(params)};
-        if (w->getWalletName() != prepared->wallet) throw HostError(BRIDGE_INVALID_REQUEST, "The transaction is of another wallet");
-        if (w->privateKeysDisabled() && !w->hasExternalSigner()) throw HostError("This wallet cannot sign: create an unsigned transaction instead");
-        // What the transaction pays, read from it (not from what the page asked): each destination whole, then its amount
-        // and the label the page gave it, the fee, the total; confirmed on the desktop (audit 7 #1).
-        std::map<std::string, std::string> labels;
-        for (const auto& rcp : prepared->recipients) labels.emplace(rcp.address, rcp.label);
-        Window::ConfirmDialog dialog;
-        dialog.title = w->hasExternalSigner() ? "Send coins: sign on the device" : "Send coins";
-        dialog.message = "Check each address in full: the coins cannot be taken back once sent.\n\nSend only if you asked for this payment.";
-        dialog.accept = w->hasExternalSigner() ? "Sign on the device" : "Send";
-        dialog.kind = "send";
-        dialog.rows = PaymentRows(*w, *prepared->tx, prepared->change_pos, prepared->fee, labels);
-        return WithKeys(w->getWalletName(), dialog, /*always=*/true, /*fee_unknown=*/false, [&] {
-            CTransactionRef tx{prepared->tx};
-            UniValue out{UniValue::VOBJ};
-            CMutableTransaction mtx{*tx};
-            if (w->hasExternalSigner()) {
-                // SendCoinsDialog::signWithExternalSigner: fill without signing first, then sign on the device.
-                PartiallySignedTransaction psbtx{mtx};
-                bool complete{false};
-                if (w->fillPSBT({.sign = false, .bip32_derivs = true}, nullptr, psbtx, complete)) throw HostError("Transaction creation failed!");
-                std::optional<common::PSBTError> err;
-                try {
-                    err = w->fillPSBT({.sign = true, .bip32_derivs = true}, nullptr, psbtx, complete);
-                } catch (const std::runtime_error& e) {
-                    throw HostError(strprintf("Sign failed: %s", e.what()));
+    Add("wallet.send.commit", [this, get_wallet, take_prepared, once](const UniValue& params) {
+        return once(params, /*bump=*/false, [&]() -> UniValue {
+            auto prepared{take_prepared(params, false)};
+            auto w{get_wallet(params)};
+            if (w->getWalletName() != prepared->wallet) throw HostError(BRIDGE_INVALID_REQUEST, "The transaction is of another wallet");
+            if (w->privateKeysDisabled() && !w->hasExternalSigner()) throw HostError("This wallet cannot sign: create an unsigned transaction instead");
+            // What the transaction pays, read from it (not from what the page asked): each destination whole, then its amount
+            // and the label the page gave it, the fee, the total; confirmed on the desktop (audit 7 #1).
+            std::map<std::string, std::string> labels;
+            for (const auto& rcp : prepared->recipients) labels.emplace(rcp.address, rcp.label);
+            Window::ConfirmDialog dialog;
+            dialog.title = w->hasExternalSigner() ? "Send coins: sign on the device" : "Send coins";
+            dialog.message = "Check each address in full: the coins cannot be taken back once sent.\n\nSend only if you asked for this payment.";
+            dialog.accept = w->hasExternalSigner() ? "Sign on the device" : "Send";
+            dialog.kind = "send";
+            dialog.rows = PaymentRows(*w, *prepared->tx, prepared->change_pos, prepared->fee, labels);
+            return WithKeys(w->getWalletName(), dialog, /*always=*/true, /*fee_unknown=*/false, [&] {
+                CTransactionRef tx{prepared->tx};
+                UniValue out{UniValue::VOBJ};
+                CMutableTransaction mtx{*tx};
+                if (w->hasExternalSigner()) {
+                    // SendCoinsDialog::signWithExternalSigner: fill without signing first, then sign on the device.
+                    PartiallySignedTransaction psbtx{mtx};
+                    bool complete{false};
+                    if (w->fillPSBT({.sign = false, .bip32_derivs = true}, nullptr, psbtx, complete)) throw HostError("Transaction creation failed!");
+                    std::optional<common::PSBTError> err;
+                    try {
+                        err = w->fillPSBT({.sign = true, .bip32_derivs = true}, nullptr, psbtx, complete);
+                    } catch (const std::runtime_error& e) {
+                        throw HostError(strprintf("Sign failed: %s", e.what()));
+                    }
+                    if (err == common::PSBTError::EXTERNAL_SIGNER_NOT_FOUND) throw HostError("External signer not found");
+                    if (err == common::PSBTError::EXTERNAL_SIGNER_FAILED) throw HostError("External signer failure");
+                    if (err) throw HostError("Transaction creation failed!");
+                    // fillPSBT does not always properly finalize.
+                    complete = FinalizeAndExtractPSBT(psbtx, mtx);
+                    if (!complete) {
+                        // More signatures are needed (a multisig wallet): the PSBT goes to the user.
+                        out.pushKV("complete", false);
+                        out.pushKV("psbt", EncodePsbt(psbtx));
+                        return out;
+                    }
+                } else if (!w->signBumpTransaction(mtx)) {
+                    // The keys of the wallet sign each of its inputs.
+                    throw HostError("Can't sign transaction.");
                 }
-                if (err == common::PSBTError::EXTERNAL_SIGNER_NOT_FOUND) throw HostError("External signer not found");
-                if (err == common::PSBTError::EXTERNAL_SIGNER_FAILED) throw HostError("External signer failure");
-                if (err) throw HostError("Transaction creation failed!");
-                // fillPSBT does not always properly finalize.
-                complete = FinalizeAndExtractPSBT(psbtx, mtx);
-                if (!complete) {
-                    // More signatures are needed (a multisig wallet): the PSBT goes to the user.
-                    out.pushKV("complete", false);
-                    out.pushKV("psbt", EncodePsbt(psbtx));
-                    return out;
+                tx = MakeTransactionRef(mtx);
+                std::vector<std::string> messages;
+                for (const auto& rcp : prepared->recipients) {
+                    // Message from a payment URI (chains:...?message=example).
+                    if (!rcp.message.empty()) messages.push_back(rcp.message);
                 }
-            } else if (!w->signBumpTransaction(mtx)) {
-                // The keys of the wallet sign each of its inputs.
-                throw HostError("Can't sign transaction.");
-            }
-            tx = MakeTransactionRef(mtx);
-            std::vector<std::string> messages;
-            for (const auto& rcp : prepared->recipients) {
-                // Message from a payment URI (chains:...?message=example).
-                if (!rcp.message.empty()) messages.push_back(rcp.message);
-            }
-            w->commitTransaction(tx, messages);
-            // Addresses sent to go in the address book, with their label (WalletModel::sendCoins).
-            for (const auto& rcp : prepared->recipients) {
-                const CTxDestination dest{DecodeDestination(rcp.address)};
-                std::string name;
-                if (!w->getAddress(dest, &name, /*purpose=*/nullptr)) {
-                    w->setAddressBook(dest, rcp.label, AddressPurpose::SEND);
-                } else if (name != rcp.label) {
-                    w->setAddressBook(dest, rcp.label, {});
+                w->commitTransaction(tx, messages);
+                // Addresses sent to go in the address book, with their label (WalletModel::sendCoins).
+                for (const auto& rcp : prepared->recipients) {
+                    const CTxDestination dest{DecodeDestination(rcp.address)};
+                    std::string name;
+                    if (!w->getAddress(dest, &name, /*purpose=*/nullptr)) {
+                        w->setAddressBook(dest, rcp.label, AddressPurpose::SEND);
+                    } else if (name != rcp.label) {
+                        w->setAddressBook(dest, rcp.label, {});
+                    }
                 }
-            }
-            out.pushKV("complete", true);
-            out.pushKV("txid", tx->GetHash().GetHex());
-            return out;
+                out.pushKV("complete", true);
+                out.pushKV("txid", tx->GetHash().GetHex());
+                return out;
+            });
         });
     });
     Add("wallet.send.psbt", [get_wallet, take_prepared](const UniValue& params) {
