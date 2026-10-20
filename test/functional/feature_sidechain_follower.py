@@ -146,6 +146,12 @@ class SidechainFollowerTest(BitcoinTestFramework):
         main = self.mainchain
         self.on_record(2)
 
+        self.log.info("The link to the mainchain node: ok, with what it said of itself")
+        self.wait_until(lambda: node.getmainchaininfo().get("mainchain_network") == "regtest")
+        info = node.getmainchaininfo()
+        assert_equal((info["state"], info["followed_height"], info["mainchain_height"], info["mainchain_ibd"], info["behind_blocks"]), ("ok", 2, 2, False, 0))
+        assert "error_kind" not in info and info["last_ok"] > 0 and info["since"] > 0
+
         self.log.info("Blocks that do not follow each other: an error, asked again later, not at once for ever")
         with main.lock:
             main.add_block()
@@ -153,6 +159,9 @@ class SidechainFollowerTest(BitcoinTestFramework):
             main.broken_after = 2
             main.calls = {}
         self.wait_until(lambda: "do not follow each other" in node.getmainchaininfo().get("error", ""))
+        info = node.getmainchaininfo()
+        assert_equal((info["state"], info["error_kind"], info["connected"]), ("down", "other", False))
+        assert info["last_error"] >= info["since"]
         with main.lock:
             main.calls = {}
         time.sleep(3)

@@ -12,6 +12,9 @@
   import { syncStatus } from '../lib/sync';
   import { UNITS, type Unit } from '../lib/units';
   import { go, nav } from '../lib/nav.svelte';
+  import { mainLink } from '../lib/mainlink.svelte';
+
+  const mainName = CHAIN.mainchain?.name ?? '';
 
   let now = $state(Math.floor(Date.now() / 1000));
   $effect(() => {
@@ -75,6 +78,12 @@
     {:else if busy}
       <span class="label"><SafeText text={busy.title} /></span>
       <progress max="100" value={busy.progress} aria-label={busy.title}></progress>
+    {:else if mainLink.banner}
+      <!-- The link to the mainchain node (the banner at the top): this chain cannot sync without it. -->
+      <button type="button" class="mainlink {mainLink.banner}" title={t('Show how to fix it')} onclick={(e) => { e.stopPropagation(); mainLink.expanded = true; }}>
+        <Icon name={mainLink.banner === 'down' ? 'offline' : 'history'} size={16} />
+        <span class="label">{mainLink.banner === 'down' ? t('No link to %1', mainName) : t('%1 is still syncing', mainName)}</span>
+      </button>
     {:else if status && !status.upToDate}
       <Icon name="history" size={16} />
       <span class="label"><SafeText text={status.label} /></span>
@@ -320,5 +329,21 @@
     .statusbar {
       gap: 0.2rem 0.6rem;
     }
+  }
+  .mainlink {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    cursor: pointer;
+  }
+  .mainlink.down {
+    color: var(--negative);
+  }
+  .mainlink.syncing {
+    color: var(--warning);
   }
 </style>

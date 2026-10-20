@@ -13,13 +13,16 @@
 #include <uint256.h>
 #include <util/time.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace node {
@@ -66,10 +69,46 @@ public:
      */
     void Poll() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex, !m_act_mutex);
 
+    /** How the link to the mainchain node stands (getmainchaininfo, the alert of the app). */
+    enum class LinkState { OK, SYNCING, DOWN };
+    /** Why the link is not OK, in a word. */
+    enum class LinkError { NONE, REFUSED, UNREACHABLE, AUTH, TIMEOUT, WRONG_NETWORK, NOT_SYNCED, OTHER };
+    static std::string LinkStateName(LinkState state);
+    static std::string LinkErrorName(LinkError kind);
+    /** The kind of an error of following the mainchain node, from its message (those of MainClient and of the follower). */
+    static LinkError ClassifyError(const std::string& message);
+    //! Mainchain blocks the record may be behind the mainchain node's headers before the link counts as syncing.
+    static constexpr int BEHIND_MARGIN{6};
+    //! Least time between two looks at the mainchain node's own sync (getblockchaininfo), while it answers.
+    static constexpr auto PROBE_INTERVAL{std::chrono::seconds{5}};
+
     struct Status {
         bool connected{false};
         std::string error;
+        //! What the mainchain node said of itself, at the last look (getblockchaininfo); -1 if not known.
+        int main_blocks{-1};
+        int main_headers{-1};
+        bool main_ibd{false};
+        //! Its network ("main", "test", "regtest"...), empty if not known.
+        std::string main_chain;
+        //! Height of the last mainchain block on record.
+        int followed_height{-1};
+        //! The state of the link, why, and since when (unix time); when it last answered, and last failed (0: never).
+        LinkState state{LinkState::DOWN};
+        LinkError kind{LinkError::NONE};
+        int64_t state_since{0};
+        int64_t last_ok{0};
+        int64_t last_error{0};
+        /** Mainchain blocks the record is behind the mainchain node's headers (0 if not known). */
+        int Behind() const { return main_headers < 0 || followed_height < 0 ? 0 : std::max(0, std::max(main_headers, main_blocks) - followed_height); }
     };
+    /**
+     * The state of the link and why, from what is known of it: down when the mainchain node does not answer
+     * or is on another network than this node; syncing when it answers but is in initial block download, is
+     * behind the record, or the record is more than BEHIND_MARGIN blocks behind its headers.
+     * @param[in] own_chain  the network of this node, which the mainchain node's has to be
+     */
+    static std::pair<LinkState, LinkError> Link(const Status& status, const std::string& own_chain);
     Status GetStatus() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** A block of this chain waiting for the mainchain to commit to it. */
@@ -186,6 +225,12 @@ private:
     //! Set when the thread has something to do before its next regular round.
     bool m_woken GUARDED_BY(m_mutex){false};
     Status m_status GUARDED_BY(m_mutex);
+    //! When the mainchain node's own sync was last looked at (Probe).
+    NodeClock::time_point m_last_probe GUARDED_BY(m_mutex){};
+    /** Look at the mainchain node's own sync, at most every PROBE_INTERVAL; a failure leaves what was known. */
+    void Probe() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Note the outcome of a round of Sync in the status (the link's state, and since when). */
+    void NoteLink(bool ok, const std::string& error) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     //! Sidechain blocks that lost, respectively gained, their commitment, and are still to be acted on.
     std::vector<uint256> m_uncommitted GUARDED_BY(m_mutex);
     std::vector<uint256> m_committed GUARDED_BY(m_mutex);

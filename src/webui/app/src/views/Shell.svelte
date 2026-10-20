@@ -8,6 +8,8 @@
   import TitleStrip from '../components/TitleStrip.svelte';
   import TxNotifier from '../components/TxNotifier.svelte';
   import LocalBackground from '../chain/LocalBackground.svelte';
+  import MainchainAlert from '../components/MainchainAlert.svelte';
+  import { startMainLink } from '../lib/mainlink.svelte';
   import { closeDetail, detail } from '../lib/detail.svelte';
   import { go, nav } from '../lib/nav.svelte';
   import { prefs, wallets } from '../lib/state.svelte';
@@ -17,6 +19,9 @@
   $effect(() => {
     detail.follow = prefs.layout === 'workspace';
   });
+
+  // A sidechain: the link to its mainchain node, watched for the banner (none on the mainchain).
+  $effect(() => startMainLink());
 
   // A new page: what was selected on the last one goes.
   $effect(() => {
@@ -43,6 +48,8 @@
   {#if prefs.layout !== 'workspace'}
     <TitleStrip title={pageTitleSource(nav.page)} detail={wallets.current !== null ? wallets.current || 'default wallet' : ''} />
   {/if}
+  <!-- Above every page, whatever the layout: the mainchain node cannot be reached (a sidechain). -->
+  <MainchainAlert />
   <div class="layout">
     {#if prefs.layout === 'workspace'}
       <Workspace />

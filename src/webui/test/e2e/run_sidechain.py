@@ -96,9 +96,13 @@ class Miner(threading.Thread):
         self.stop = threading.Event()
         self.blocks = 0
         self.error = None
+        #: No blocks while set (run_mainlink.py: a mainchain node stopped, or kept in initial block download).
+        self.paused = False
 
     def run(self):
         while not self.stop.wait(self.interval):
+            if self.paused:
+                continue
             try:
                 self.wallet("generatetoaddress", 1, self.address)
                 self.blocks += 1

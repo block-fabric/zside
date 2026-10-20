@@ -91,6 +91,19 @@ RPCMethod getmainchaininfo()
             {RPCResult::Type::NUM, "height", "Height of the last mainchain block on record, -1 if there is none"},
             {RPCResult::Type::STR_HEX, "bestblockhash", /*optional=*/true, "Hash of the last mainchain block on record"},
             {RPCResult::Type::NUM, "tipheight", "Height of the last mainchain block that the tip of this chain has acted on"},
+            {RPCResult::Type::STR, "state", "How the link to the mainchain node stands: \"ok\"; \"syncing\" (it answers, but is in initial block download, "
+                                            "behind the record, or this node is more than a few blocks behind its headers); \"down\" (it does not answer, "
+                                            "or is on another network); \"starting\" (not asked yet)"},
+            {RPCResult::Type::STR, "error_kind", /*optional=*/true, "Why the state is not \"ok\": refused, unreachable, auth, timeout, wrong-network, not-synced or other"},
+            {RPCResult::Type::NUM_TIME, "since", /*optional=*/true, "When the link got into this state (" + UNIX_EPOCH_TIME + ")"},
+            {RPCResult::Type::NUM_TIME, "last_ok", /*optional=*/true, "When the mainchain node last answered (" + UNIX_EPOCH_TIME + ")"},
+            {RPCResult::Type::NUM_TIME, "last_error", /*optional=*/true, "When asking the mainchain node last failed (" + UNIX_EPOCH_TIME + ")"},
+            {RPCResult::Type::NUM, "mainchain_height", /*optional=*/true, "Height of the mainchain node's active chain, as it last said"},
+            {RPCResult::Type::NUM, "mainchain_headers", /*optional=*/true, "Height of the mainchain node's best header, as it last said"},
+            {RPCResult::Type::BOOL, "mainchain_ibd", /*optional=*/true, "Whether the mainchain node said it is in initial block download"},
+            {RPCResult::Type::STR, "mainchain_network", /*optional=*/true, "The network of the mainchain node (main, test, signet, regtest)"},
+            {RPCResult::Type::NUM, "followed_height", "Height of the last mainchain block on record (the same as height)"},
+            {RPCResult::Type::NUM, "behind_blocks", "Mainchain blocks the record is behind the mainchain node's headers (0 when not known)"},
         }},
         RPCExamples{HelpExampleCli("getmainchaininfo", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -107,6 +120,20 @@ RPCMethod getmainchaininfo()
     result.pushKV("height", chainman.m_mainchain->Height());
     if (chainman.m_mainchain->Height() >= 0) result.pushKV("bestblockhash", chainman.m_mainchain->TipHash().GetHex());
     result.pushKV("tipheight", WITH_LOCK(::cs_main, return chainman.ActiveChainstate().SideState().MainHeight()));
+    const bool started{status.state_since != 0};
+    result.pushKV("state", started ? Follower::LinkStateName(status.state) : "starting");
+    if (started && status.kind != Follower::LinkError::NONE) result.pushKV("error_kind", Follower::LinkErrorName(status.kind));
+    if (started) result.pushKV("since", status.state_since);
+    if (status.last_ok) result.pushKV("last_ok", status.last_ok);
+    if (status.last_error) result.pushKV("last_error", status.last_error);
+    if (status.main_blocks >= 0) result.pushKV("mainchain_height", status.main_blocks);
+    if (status.main_headers >= 0) result.pushKV("mainchain_headers", status.main_headers);
+    if (!status.main_chain.empty()) {
+        result.pushKV("mainchain_ibd", status.main_ibd);
+        result.pushKV("mainchain_network", status.main_chain);
+    }
+    result.pushKV("followed_height", status.followed_height);
+    result.pushKV("behind_blocks", status.Behind());
     return result;
 },
     };

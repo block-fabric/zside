@@ -9,7 +9,8 @@
   import { showDetail } from '../lib/detail.svelte';
   import { formatTime } from '../lib/format';
   import { go } from '../lib/nav.svelte';
-  import { markAllRead, noticeList } from '../lib/notices.svelte';
+  import { markAllRead, noticeList, systemList, type SystemNotice } from '../lib/notices.svelte';
+  import { mainLink } from '../lib/mainlink.svelte';
   import { prefs, wallets } from '../lib/state.svelte';
   import { addressText, noticeRecordOf, typeText, walletDisplayName } from '../lib/wallet';
   import { current } from '../lib/walletdata.svelte';
@@ -17,7 +18,9 @@
   let open = $state(false);
   let root: HTMLElement | undefined = $state();
   const list = $derived(noticeList());
-  const unread = $derived(list.filter((n) => n.unread).length);
+  // Notices of the app itself (the link to the mainchain node), above the transactions.
+  const system = $derived(systemList());
+  const unread = $derived(list.filter((n) => n.unread).length + system.filter((n) => n.unread).length);
   const label = $derived(unread ? `Notifications: ${unread} new` : 'Notifications');
 
   function toggle() {
@@ -36,6 +39,12 @@
     close();
     if (r && wallets.current !== null && !prefs.mask) showDetail({ kind: 'tx', wallet: wallets.current, txid, idx: r.idx, address: r.address });
     else go('transactions');
+  }
+  function visitSystem(n: SystemNotice) {
+    close();
+    // The banner says what to do while the link is down; once it is back, the mainchain's settings.
+    if (n.kind !== 'mainchain-restored' && mainLink.banner) mainLink.expanded = true;
+    else go('settings', 'mainchain');
   }
 </script>
 
@@ -62,6 +71,21 @@
         <h2>Notifications</h2>
         {#if unread}<button type="button" class="btn ghost small" onclick={markAllRead}>Mark all as read</button>{/if}
       </header>
+      {#if system.length}
+        <ul class="system" aria-label="Notices of the app">
+          {#each system.slice(0, 6) as n (n.id)}
+            <li>
+              <button type="button" class="item" class:unread={n.unread} onclick={() => visitSystem(n)}>
+                <span class="ic" class:bad={n.kind === 'mainchain-down'} class:warn={n.kind === 'mainchain-syncing'} class:in={n.kind === 'mainchain-restored'}><Icon name={n.kind === 'mainchain-restored' ? 'check' : 'alert'} size={15} /></span>
+                <span class="what">
+                  <span class="title"><SafeText text={n.title} /></span>
+                  <span class="faint small"><SafeText text={n.text} /> · {formatTime(n.time)}</span>
+                </span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
       {#if list.length === 0}
         <p class="muted empty">No new transactions since {CHAIN.name} started. They show here as they come.</p>
       {:else}
@@ -165,6 +189,19 @@
     border-radius: 50%;
     background: var(--raised);
     color: var(--text-muted);
+  }
+  .ic.bad {
+    background: var(--danger-soft);
+    color: var(--negative);
+  }
+  .ic.warn {
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
+  ul.system {
+    margin-bottom: 0.3rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--line);
   }
   .ic.in {
     background: var(--accent-soft);

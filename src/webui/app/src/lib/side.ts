@@ -21,7 +21,25 @@ export interface MainchainInfo {
   bestblockhash?: string;
   /** The last mainchain block the tip of this chain acted on: deposits after it are not credited yet. */
   tipheight: number;
+  /** How the link to the mainchain node stands (nodes before 2026-10-20 do not say). */
+  state?: 'ok' | 'syncing' | 'down' | 'starting';
+  error_kind?: LinkErrorKind;
+  /** Since when (unix seconds) the link is in this state. */
+  since?: number;
+  /** When the mainchain node last answered, last failed (unix seconds). */
+  last_ok?: number;
+  last_error?: number;
+  /** What the mainchain node said of its own chain at the last look. */
+  mainchain_height?: number;
+  mainchain_headers?: number;
+  mainchain_ibd?: boolean;
+  mainchain_network?: string;
+  followed_height?: number;
+  behind_blocks?: number;
 }
+
+/** Why the link to the mainchain node is not ok (getmainchaininfo error_kind). */
+export type LinkErrorKind = 'refused' | 'unreachable' | 'auth' | 'timeout' | 'wrong-network' | 'not-synced' | 'other';
 
 /** listwithdrawals: a withdrawal the mainchain has not paid yet. */
 export interface Withdrawal {

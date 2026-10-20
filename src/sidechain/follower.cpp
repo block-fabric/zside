@@ -30,6 +30,9 @@
 #include <primitives/block.h>
 #include <validation.h>
 
+#include <cassert>
+#include <string_view>
+
 namespace sidechain {
 namespace {
 //! How often the mainchain node is asked for news.
@@ -151,8 +154,123 @@ void Follower::Stop()
 
 Follower::Status Follower::GetStatus() const
 {
-    LOCK(m_mutex);
-    return m_status;
+    Status status{WITH_LOCK(m_mutex, return m_status)};
+    // Not through a round yet, but answering since the last failure (the first round, or the one after an
+    // outage, catching up on many blocks): reachable, syncing.
+    if (!status.connected && status.last_ok > status.last_error) {
+        status.state = LinkState::SYNCING;
+        status.kind = LinkError::NOT_SYNCED;
+        if (status.state_since == 0) status.state_since = status.last_ok;
+    }
+    if (m_node.chainman && m_node.chainman->m_mainchain) status.followed_height = m_node.chainman->m_mainchain->Height();
+    return status;
+}
+
+std::string Follower::LinkStateName(LinkState state)
+{
+    switch (state) {
+    case LinkState::OK: return "ok";
+    case LinkState::SYNCING: return "syncing";
+    case LinkState::DOWN: return "down";
+    }
+    assert(false);
+}
+
+std::string Follower::LinkErrorName(LinkError kind)
+{
+    switch (kind) {
+    case LinkError::NONE: return "";
+    case LinkError::REFUSED: return "refused";
+    case LinkError::UNREACHABLE: return "unreachable";
+    case LinkError::AUTH: return "auth";
+    case LinkError::TIMEOUT: return "timeout";
+    case LinkError::WRONG_NETWORK: return "wrong-network";
+    case LinkError::NOT_SYNCED: return "not-synced";
+    case LinkError::OTHER: return "other";
+    }
+    assert(false);
+}
+
+Follower::LinkError Follower::ClassifyError(const std::string& message)
+{
+    const auto has{[&](std::string_view part) { return message.find(part) != std::string::npos; }};
+    if (message.empty()) return LinkError::NONE;
+    // MainClient: the credentials (none, refused) and the address allowed.
+    if (has("refused the credentials") || has("no credentials") || has("rpcallowip")) return LinkError::AUTH;
+    if (has("Cannot reach the mainchain node")) {
+        if (has(": connection refused")) return LinkError::REFUSED;
+        if (has(": timeout")) return LinkError::TIMEOUT;
+        return LinkError::UNREACHABLE;
+    }
+    // The follower: a mainchain node of another chain, another network, or another sidechain in the slot.
+    if (has("on another chain than the one on record") || has("on another network") || has("is another one")) return LinkError::WRONG_NETWORK;
+    // A mainchain node still syncing, or behind the record.
+    if (has("still syncing") || has("is behind the record") || has("waiting for it to catch up")) return LinkError::NOT_SYNCED;
+    return LinkError::OTHER;
+}
+
+std::pair<Follower::LinkState, Follower::LinkError> Follower::Link(const Status& status, const std::string& own_chain)
+{
+    if (!status.connected) {
+        const LinkError kind{ClassifyError(status.error)};
+        // It answers, but has not got as far as the record: syncing, not down.
+        if (kind == LinkError::NOT_SYNCED) return {LinkState::SYNCING, kind};
+        return {LinkState::DOWN, kind == LinkError::NONE ? LinkError::OTHER : kind};
+    }
+    if (!status.main_chain.empty() && !own_chain.empty() && status.main_chain != own_chain) return {LinkState::DOWN, LinkError::WRONG_NETWORK};
+    if (status.main_ibd || status.Behind() > BEHIND_MARGIN) return {LinkState::SYNCING, LinkError::NOT_SYNCED};
+    return {LinkState::OK, LinkError::NONE};
+}
+
+void Follower::Probe()
+{
+    {
+        LOCK(m_mutex);
+        const auto now{NodeClock::now()};
+        if (now < m_last_probe + PROBE_INTERVAL) return;
+        m_last_probe = now;
+    }
+    try {
+        const UniValue info{m_client.Call("getblockchaininfo", UniValue{UniValue::VARR})};
+        LOCK(m_mutex);
+        m_status.main_blocks = info["blocks"].isNum() ? info["blocks"].getInt<int>() : -1;
+        m_status.main_headers = info["headers"].isNum() ? info["headers"].getInt<int>() : -1;
+        m_status.main_ibd = info["initialblockdownload"].isTrue();
+        m_status.main_chain = info["chain"].isStr() ? info["chain"].get_str() : "";
+    } catch (const std::exception&) {
+        // Sync just reached it: the next round says if it no longer answers.
+    }
+}
+
+void Follower::NoteLink(bool ok, const std::string& error)
+{
+    const int64_t now{GetTime()};
+    if (ok) {
+        if (!m_status.connected) {
+            LogInfo("Following the mainchain node at %s:%u", m_client.GetOptions().host, m_client.GetOptions().port);
+            if (m_node.warnings) m_node.warnings->Unset(node::Warning::MAINCHAIN_UNREACHABLE);
+        }
+        m_status.connected = true;
+        m_status.error.clear();
+        m_status.last_ok = now;
+    } else {
+        m_status.connected = false;
+        m_status.error = error;
+        m_status.last_error = now;
+        // What it said of itself is of before.
+        m_status.main_blocks = m_status.main_headers = -1;
+        m_status.main_ibd = false;
+        m_status.main_chain.clear();
+        m_last_probe = {};
+    }
+    m_status.followed_height = m_node.chainman->m_mainchain ? m_node.chainman->m_mainchain->Height() : -1;
+    const auto [state, kind]{Link(m_status, m_node.chainman->GetParams().GetChainTypeString())};
+    if (state != m_status.state || m_status.state_since == 0) {
+        if (m_status.state_since != 0) LogInfo("The link to the mainchain node is now %s%s", LinkStateName(state), kind == LinkError::NONE ? "" : " (" + LinkErrorName(kind) + ")");
+        m_status.state = state;
+        m_status.state_since = now;
+    }
+    m_status.kind = kind;
 }
 
 bool Follower::UpdateRecord(bool may_drop)
@@ -162,7 +280,14 @@ bool Follower::UpdateRecord(bool may_drop)
     const uint32_t slot{params.slot};
     const auto fetch{[&](int height, int count) {
         try {
-            return m_client.Call("getsidechainevents", Params({static_cast<uint64_t>(slot), height, count}));
+            UniValue events{m_client.Call("getsidechainevents", Params({static_cast<uint64_t>(slot), height, count}))};
+            // It answers: a long catch-up is no outage (GetStatus), and how far its own sync is.
+            Probe();
+            {
+                LOCK(m_mutex);
+                m_status.last_ok = GetTime();
+            }
+            return events;
         } catch (const MainClientError& e) {
             // A mainchain node that pruned blocks before it kept what sidechains need of them (the index
             // of BMM accepts) cannot give them. Said so, with what to do: retrying does not help.
@@ -386,15 +511,11 @@ bool Follower::Sync(std::string& error)
                 m_node.warnings->Set(node::Warning::MAINCHAIN_UNREACHABLE, strprintf(_("This node cannot follow the mainchain, without which it cannot tell which new blocks are valid. %s"), error));
             }
         }
-        m_status = {false, error};
+        NoteLink(/*ok=*/false, error);
         return false;
     }
     LOCK(m_mutex);
-    if (!m_status.connected) {
-        LogInfo("Following the mainchain node at %s:%u", m_client.GetOptions().host, m_client.GetOptions().port);
-        if (m_node.warnings) m_node.warnings->Unset(node::Warning::MAINCHAIN_UNREACHABLE);
-    }
-    m_status = {true, {}};
+    NoteLink(/*ok=*/true, {});
     return true;
 }
 
