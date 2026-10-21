@@ -100,6 +100,13 @@ static bool RPCAuthorized(const std::string& strAuth, std::string& strAuthUserna
     return CheckUserAuthorized(user, pass);
 }
 
+bool RpcUserMayCall(const std::string& user, const std::string& method)
+{
+    const auto it{g_rpc_whitelist.find(user)};
+    if (it == g_rpc_whitelist.end()) return !g_rpc_whitelist_default;
+    return it->second.contains(method);
+}
+
 UniValue ExecuteHTTPRPC(const UniValue& valRequest, JSONRPCRequest& jreq, HTTPStatusCode& status)
 {
     status = HTTP_OK;
@@ -113,7 +120,7 @@ UniValue ExecuteHTTPRPC(const UniValue& valRequest, JSONRPCRequest& jreq, HTTPSt
         // singleton request
         } else if (valRequest.isObject()) {
             jreq.parse(valRequest);
-            if (user_has_whitelist && !g_rpc_whitelist[jreq.authUser].contains(jreq.strMethod)) {
+            if (!RpcUserMayCall(jreq.authUser, jreq.strMethod)) {
                 LogWarning("RPC User %s not allowed to call method %s", jreq.authUser, jreq.strMethod);
                 status = HTTP_FORBIDDEN;
                 return {};
@@ -142,7 +149,7 @@ UniValue ExecuteHTTPRPC(const UniValue& valRequest, JSONRPCRequest& jreq, HTTPSt
                         const UniValue& request = valRequest[reqIdx].get_obj();
                         // Parse method
                         std::string strMethod = request.find_value("method").get_str();
-                        if (!g_rpc_whitelist[jreq.authUser].contains(strMethod)) {
+                        if (!RpcUserMayCall(jreq.authUser, strMethod)) {
                             LogWarning("RPC User %s not allowed to call method %s", jreq.authUser, strMethod);
                             status = HTTP_FORBIDDEN;
                             return {};

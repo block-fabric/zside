@@ -6,12 +6,14 @@ import { rpc } from './rpc';
 import { node } from './state.svelte';
 import {
   EventLog,
+  methodMissing,
   peg,
+  pegInfoFromLegacy,
   type BmmInfo,
   type Connection,
   type MainBundle,
   type MainchainInfo,
-  type MainDrivechainInfo,
+  type PegInfo,
   type SideBundle,
   type SideEvent,
   type Withdrawal,
@@ -36,12 +38,15 @@ export const side = $state({
   /** Why the node could not be asked (not a sidechain, starting). */
   error: '',
   main: {
-    drivechain: null as MainDrivechainInfo | null,
-    /** The bundles of this sidechain being voted on. */
+    /** What the mainchain node says of the peg (getpeginfo): the votes a bundle needs, the escrow, the slot. */
+    peg: null as PegInfo | null,
+    /** The bundles of this sidechain being voted on, their votes now. */
     bundles: [] as MainBundle[],
     events: [] as SideEvent[],
-    /** Why the mainchain node could not be asked. */
+    /** Why the mainchain node could not be asked (its blocks: the events). */
     error: '',
+    /** Why getpeginfo could not be had (the pages leave out what it gives, quietly). */
+    pegError: '',
     /** The mainchain height the above are of. */
     height: -1,
   },
@@ -81,6 +86,23 @@ export function noteManualRequest(fees: number, offer: number): void {
   log({ kind: 'manual', fees, offer, count: 1 });
 }
 
+/**
+ * What the mainchain node says of the peg: getpeginfo of the node, the same over JSON-RPC and through the enforcer's
+ * interface. A node of before it, over JSON-RPC: getdrivechaininfo and listwithdrawalbundles of the mainchain node
+ * (peg.call); through the enforcer's interface, which has neither, nothing is asked.
+ */
+export async function loadPegInfo(slot: number, connection: Connection | null): Promise<PegInfo | null> {
+  try {
+    const info = await rpc.raw<PegInfo>('getpeginfo');
+    return info && typeof info === 'object' && Array.isArray(info.bundles) ? info : null;
+  } catch (e) {
+    if (!methodMissing(e)) throw e;
+    if (connection?.via === 'enforcer') return null;
+    const [drivechain, bundles] = await Promise.all([peg.call<Record<string, number>>('getdrivechaininfo'), peg.call<unknown>('listwithdrawalbundles', [slot])]);
+    return pegInfoFromLegacy(drivechain, bundles, slot, connection?.via);
+  }
+}
+
 async function refreshMain(force: boolean) {
   const info = side.info;
   if (!info) return;
@@ -89,23 +111,29 @@ async function refreshMain(force: boolean) {
   lastMainAsk = now;
   try {
     side.connection = await peg.connection();
-    if (!info.connected || info.height < 0) {
-      side.main.error = info.error ?? '';
-      return;
-    }
-    eventLog ??= new EventLog(info.slot);
-    const [drivechain, bundles, events] = await Promise.all([
-      peg.call<MainDrivechainInfo>('getdrivechaininfo'),
-      peg.call<MainBundle[]>('listwithdrawalbundles', [info.slot]),
-      eventLog.update(info.height),
-    ]);
-    side.main.drivechain = drivechain && typeof drivechain === 'object' ? drivechain : null;
-    side.main.bundles = Array.isArray(bundles) ? bundles : [];
-    side.main.events = [...events];
+  } catch {
+    // (The host's own answer: kept as it was.)
+  }
+  if (!info.connected || info.height < 0) {
+    side.main.error = info.error ?? '';
+    return;
+  }
+  eventLog ??= new EventLog(info.slot);
+  // The blocks (the events) and the peg apart: one failing leaves the other shown.
+  const [events, pegInfo] = await Promise.allSettled([eventLog.update(info.height), loadPegInfo(info.slot, side.connection)]);
+  if (events.status === 'fulfilled') {
+    side.main.events = [...events.value];
     side.main.height = info.height;
     side.main.error = '';
-  } catch (e) {
-    side.main.error = e instanceof Error ? e.message : String(e);
+  } else {
+    side.main.error = events.reason instanceof Error ? events.reason.message : String(events.reason);
+  }
+  if (pegInfo.status === 'fulfilled') {
+    side.main.peg = pegInfo.value;
+    side.main.bundles = pegInfo.value?.bundles ?? [];
+    side.main.pegError = '';
+  } else {
+    side.main.pegError = pegInfo.reason instanceof Error ? pegInfo.reason.message : String(pegInfo.reason);
   }
 }
 

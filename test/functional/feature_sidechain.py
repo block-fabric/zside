@@ -291,6 +291,21 @@ class SidechainTest(BitcoinTestFramework):
         assert_equal(pending[0]["known"], True)
         # A mainchain node upvotes the bundle its sidechain node gave it, unless it is told otherwise.
         assert_equal(pending[0]["vote"], "upvote")
+        # getpeginfo: what the pages show of the peg, as the mainchain node says it.
+        peg = side.getpeginfo()
+        drivechain = main.getdrivechaininfo()
+        assert_equal(peg["via"], "json-rpc")
+        assert_equal(peg["rules"], "chains")
+        assert_equal(peg["height"], main.getblockcount())
+        assert_equal(peg["withdrawalperiod"], drivechain["withdrawalperiod"])
+        assert_equal(peg["withdrawalminscore"], drivechain["withdrawalminscore"])
+        assert_equal(peg["withdrawalminscore"], WITHDRAWAL_MIN_SCORE)
+        assert_equal(peg["sidechain"]["slot"], SLOT)
+        assert_equal(peg["sidechain"]["active"], True)
+        assert_equal(peg["escrow"]["amount"], main.getsidechain(SLOT)["escrow"]["amount"])
+        assert_equal([(b["hash"], b["score"], b["blocksleft"], b["payable"], b["vote"]) for b in peg["bundles"]],
+                     [(b["hash"], b["score"], b["blocksleft"], b["payable"], b["vote"]) for b in pending])
+        assert_equal(peg["votehistory"], True)
         # The block that proposed the bundle gave it its first point, the votes of the blocks since the others.
         self.mine_main(WITHDRAWAL_MIN_SCORE - pending[0]["score"])
         # With the work score, the sidechain node has its mainchain node broadcast the withdrawal (BIP300 M6),

@@ -72,7 +72,7 @@
   const connected = $derived(!!info?.connected);
   const pendingDeposits = $derived(depositsOf(side.main.events, info?.tipheight ?? -1).filter((d) => !d.credited));
   const voted = $derived(side.bundle?.hash ? side.main.bundles.find((b) => b.hash === side.bundle?.hash) : undefined);
-  const minScore = $derived(side.main.drivechain?.withdrawalminscore ?? 0);
+  const minScore = $derived(side.main.peg?.withdrawalminscore ?? 0);
   const share = $derived(bmmShare(side.main.events, bmmWindowSize));
   const marks = $derived(bmmBlocks(side.main.events, bmmWindowSize).reverse());
   /** The blocks of this chain the last mainchain blocks committed to, so far in the window (the sparkline). */

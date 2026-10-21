@@ -11,6 +11,7 @@
 #include <common/args.h>
 #include <common/url.h>
 #include <crypto/sha256.h>
+#include <httprpc.h>
 #include <interfaces/node.h>
 #include <logging.h>
 #include <node/context.h>
@@ -42,7 +43,17 @@
 #include <webui/walletapi.h>
 #endif
 
+#ifdef WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <set>
@@ -163,9 +174,98 @@ std::string ChosenFiles::Problem(const std::string& path)
     return {};
 }
 
+namespace {
+#ifdef WIN32
+//! The file (or folder) a path names, opened as itself: a reparse point (a link, a junction) is opened, not followed.
+std::optional<BY_HANDLE_FILE_INFORMATION> OpenedInfo(const fs::path& path, bool& missing)
+{
+    missing = false;
+    const HANDLE handle{CreateFileW(path.wstring().c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                    OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr)};
+    if (handle == INVALID_HANDLE_VALUE) {
+        const DWORD error{GetLastError()};
+        missing = error == ERROR_FILE_NOT_FOUND;
+        if (!missing) throw std::runtime_error(strprintf("it cannot be opened (error %u)", error));
+        return std::nullopt;
+    }
+    BY_HANDLE_FILE_INFORMATION info;
+    const bool ok{GetFileInformationByHandle(handle, &info) != 0};
+    CloseHandle(handle);
+    if (!ok) throw std::runtime_error("what it is cannot be read");
+    if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) throw std::runtime_error("a symbolic link");
+    return info;
+}
+
+ChosenFiles::Identity IdentityOf(const BY_HANDLE_FILE_INFORMATION& info, bool exists)
+{
+    return {exists, info.dwVolumeSerialNumber, (static_cast<uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow};
+}
+#else
+//! The file (or folder) a path names, opened as itself (O_NOFOLLOW: a link is refused, never followed), by its fstat.
+std::optional<struct stat> OpenedInfo(const fs::path& path, int flags, bool& missing)
+{
+    missing = false;
+    const int fd{open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | flags)};
+    if (fd < 0) {
+        const int error{errno};
+        missing = error == ENOENT;
+        if (missing) return std::nullopt;
+        if (error == ELOOP) throw std::runtime_error("a symbolic link");
+        throw std::runtime_error(strprintf("it cannot be opened (%s)", std::strerror(error)));
+    }
+    struct stat info;
+    const bool ok{fstat(fd, &info) == 0};
+    close(fd);
+    if (!ok) throw std::runtime_error("what it is cannot be read");
+    return info;
+}
+#endif
+} // namespace
+
+ChosenFiles::Identity ChosenFiles::Identify(const std::string& path)
+{
+    const fs::path p{fs::PathFromString(path)};
+    bool missing{false};
+#ifdef WIN32
+    if (const auto file{OpenedInfo(p, missing)}) {
+        if (file->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) throw std::runtime_error("not a file");
+        return IdentityOf(*file, true);
+    }
+    const auto folder{OpenedInfo(p.parent_path(), missing)};
+    if (!folder || !(folder->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) throw std::runtime_error("its folder is not one");
+    return IdentityOf(*folder, false);
+#else
+    if (const auto file{OpenedInfo(p, 0, missing)}) {
+        if (!S_ISREG(file->st_mode)) throw std::runtime_error("not a file");
+        return {true, static_cast<uint64_t>(file->st_dev), static_cast<uint64_t>(file->st_ino)};
+    }
+    const auto folder{OpenedInfo(p.parent_path(), O_DIRECTORY, missing)};
+    if (!folder || !S_ISDIR(folder->st_mode)) throw std::runtime_error("its folder is not one");
+    return {false, static_cast<uint64_t>(folder->st_dev), static_cast<uint64_t>(folder->st_ino)};
+#endif
+}
+
+std::string ChosenFiles::Changed(const File& file)
+{
+    // The path as it was taken (no link on the way, nothing resolved away), then what it names, opened as itself.
+    if (std::string problem{Problem(file.path)}; !problem.empty()) return problem;
+    try {
+        const Identity now{Identify(file.path)};
+        if (now == file.identity) return {};
+        if (file.identity.exists && !now.exists) return "it is not there any more";
+        if (!file.identity.exists && now.exists) return "a file was put there since";
+        return "another file is there now";
+    } catch (const std::runtime_error& e) {
+        return e.what();
+    }
+}
+
 std::string ChosenFiles::Grant(const std::string& path, bool write, std::chrono::steady_clock::time_point now)
 {
     if (const std::string problem{Problem(path)}; !problem.empty()) throw std::runtime_error(problem);
+    // What it names now, kept: what is used later must be that very file (or still none, in that folder).
+    const Identity identity{Identify(path)};
+    if (!write && !identity.exists) throw std::runtime_error("no such file");
     std::array<unsigned char, 32> bytes;
     GetStrongRandBytes(bytes);
     const std::string token{HexStr(bytes)};
@@ -174,7 +274,7 @@ std::string ChosenFiles::Grant(const std::string& path, bool write, std::chrono:
     if (m_entries.size() >= MAX) {
         m_entries.erase(std::ranges::min_element(m_entries, {}, [](const auto& e) { return e.second.expires; }));
     }
-    m_entries.emplace(token, Entry{File{path, write}, now + EXPIRY});
+    m_entries.emplace(token, Entry{File{path, write, identity}, now + EXPIRY});
     return token;
 }
 
@@ -228,6 +328,46 @@ void EventLog::Stop()
     m_cv.notify_all();
 }
 
+Request ParseRequest(const UniValue& request)
+{
+    if (!request.isObject()) throw JSONRPCError(RPC_INVALID_PARAMETER, "request: {kind, method, params, wallet?}");
+    if (HasDuplicateKeys(request)) throw JSONRPCError(RPC_INVALID_PARAMETER, "request: a key is given twice");
+    for (const std::string& key : request.getKeys()) {
+        if (key != "kind" && key != "method" && key != "params" && key != "wallet") throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("request: no field %s", key));
+    }
+    const UniValue& kind{request.find_value("kind")};
+    const UniValue& method{request.find_value("method")};
+    const UniValue& params{request.find_value("params")};
+    const UniValue& wallet{request.find_value("wallet")};
+    if (!kind.isStr() || (kind.get_str() != "rpc" && kind.get_str() != "host")) throw JSONRPCError(RPC_INVALID_PARAMETER, "request.kind: rpc or host");
+    if (!method.isStr() || method.get_str().empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "request.method: a name");
+    if (!params.isNull() && !params.isArray() && !params.isObject()) throw JSONRPCError(RPC_INVALID_PARAMETER, "request.params: an array or an object");
+    if (!wallet.isNull() && !wallet.isStr()) throw JSONRPCError(RPC_INVALID_PARAMETER, "request.wallet: a name");
+    Request out{kind.get_str(), method.get_str(), params.isNull() ? UniValue{kind.get_str() == "rpc" ? UniValue::VARR : UniValue::VOBJ} : params, wallet.isStr() ? wallet.get_str() : std::string{}};
+    if (out.kind == "host") {
+        // One wallet per request: the one the host method acts on, which it reads from its parameters (rpc.confirmed
+        // too: its calls run in params.wallet). A wallet beside them is that one, or the request is refused.
+        const UniValue& inner{out.params.isObject() ? out.params.find_value("wallet") : NullUniValue};
+        if (!inner.isNull() && !inner.isStr()) throw JSONRPCError(RPC_INVALID_PARAMETER, "request.params.wallet: a name");
+        const std::string acts_on{inner.isStr() ? inner.get_str() : std::string{}};
+        if (wallet.isStr() && (inner.isNull() || out.wallet != acts_on)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "request.wallet: a host method acts on the wallet of its parameters (params.wallet); a request naming another is refused");
+        }
+        out.wallet = acts_on;
+    }
+    return out;
+}
+
+std::string DescribedWallet(const std::string& uri, const UniValue& arg)
+{
+    std::string of_uri;
+    constexpr std::string_view prefix{"/wallet/"};
+    if (uri.starts_with(prefix)) of_uri = UrlDecode(std::string_view{uri}.substr(prefix.size()));
+    if (!arg.isStr()) return of_uri;
+    if (!of_uri.empty() && of_uri != arg.get_str()) throw JSONRPCError(RPC_INVALID_PARAMETER, "wallet: the wallet named differs from the wallet of the URI");
+    return arg.get_str();
+}
+
 namespace {
 
 /** What a NeedConfirmation carries out of a host method, past its own handlers: not a std::exception, so none takes it. */
@@ -243,8 +383,8 @@ struct Context {
     std::string token;
     SecureString passphrase;
     //! The files the user chose in the app's own chooser for this request (a backup, a file to hash): by path, whether
-    //! to write. Only from tokens of ChosenFiles, never a path given with the request.
-    std::map<std::string, bool> files;
+    //! to write and what the path named when chosen. Only from tokens of ChosenFiles, never a path given with the request.
+    std::map<std::string, ChosenFiles::File> files;
     bool describe_only{false};
     //! A question was answered yes in this request already: a second one is not asked (it would run the first again).
     bool accepted{false};
@@ -262,11 +402,6 @@ public:
 private:
     Context* m_previous;
 };
-
-const UniValue& Param(const UniValue& params, const std::string& key)
-{
-    return params.isObject() ? params.find_value(key) : NullUniValue;
-}
 
 std::string NetworkLabel(const std::string& network)
 {
@@ -342,11 +477,11 @@ public:
     }
 
     /** One request of the app (webuihost). */
-    UniValue Run(const UniValue& request, const std::string& token, SecureString passphrase, const UniValue& files)
+    UniValue Run(const UniValue& request, const std::string& token, SecureString passphrase, const UniValue& files, const std::string& auth_user)
     {
         if (m_stopped) throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "Shutting down");
         Context context;
-        const auto [kind, method, params, wallet] = Parse(request);
+        const auto [kind, method, params, wallet] = ParseRequest(request);
         context.request = Canonical(kind, method, params, wallet);
         context.wallet = wallet;
         context.token = token;
@@ -355,10 +490,16 @@ public:
             for (const UniValue& f : files.getValues()) {
                 const auto file{f.isStr() ? m_files.Take(f.get_str(), std::chrono::steady_clock::now()) : std::nullopt};
                 if (!file) throw JSONRPCError(RPC_INVALID_PARAMETER, "files: a token of a file chosen in the app is needed (unknown, used or expired)");
-                context.files[file->path] = context.files[file->path] || file->write;
+                const auto [it, added]{context.files.emplace(file->path, *file)};
+                if (!added) {
+                    if (it->second.identity != file->identity) throw JSONRPCError(RPC_INVALID_PARAMETER, "files: two tokens of one path that named two files");
+                    it->second.write |= file->write;
+                }
             }
         }
         const ContextScope scope{context};
+        // What it runs by name, only what the caller may call itself (its -rpcwhitelist).
+        const RpcCallerScope caller{CallerCheck(auth_user)};
         UniValue out{UniValue::VOBJ};
         try {
             out.pushKV("result", kind == "rpc" ? CallRpc(method, params, wallet) : CallHost(method, params));
@@ -371,9 +512,15 @@ public:
     }
 
     /** describeconfirmation: the question of a confirmed RPC method, never run. */
-    UniValue Describe(const std::string& method, const UniValue& params, const std::string& wallet)
+    UniValue Describe(const std::string& method, const UniValue& params, const std::string& wallet, const std::string& auth_user)
     {
         if (m_stopped) throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "Shutting down");
+        const RpcCallerScope caller{CallerCheck(auth_user)};
+        try {
+            CheckRpcCaller(method);
+        } catch (const HostError& e) {
+            throw JSONRPCError(static_cast<RPCErrorCode>(e.code), e.what());
+        }
         const auto& methods{confirm::Methods()};
         if (!methods.contains(method) && !KeyedWalletRpc(method)) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s is not a method that is confirmed (confirm.cpp): it reads, or is not offered to the pages", method));
@@ -427,32 +574,10 @@ public:
     }
 
 private:
-    struct Parsed {
-        std::string kind;
-        std::string method;
-        UniValue params;
-        std::string wallet;
-    };
-
-    static Parsed Parse(const UniValue& request)
+    /** The RPC user's -rpcwhitelist, as the RPC server checks it (RpcUserMayCall). */
+    static RpcCallerScope::AllowedFn CallerCheck(const std::string& auth_user)
     {
-        if (!request.isObject()) throw JSONRPCError(RPC_INVALID_PARAMETER, "request: {kind, method, params, wallet?}");
-        if (HasDuplicateKeys(request)) throw JSONRPCError(RPC_INVALID_PARAMETER, "request: a key is given twice");
-        for (const std::string& key : request.getKeys()) {
-            if (key != "kind" && key != "method" && key != "params" && key != "wallet") throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("request: no field %s", key));
-        }
-        const UniValue& kind{request.find_value("kind")};
-        const UniValue& method{request.find_value("method")};
-        const UniValue& params{request.find_value("params")};
-        const UniValue& wallet{request.find_value("wallet")};
-        if (!kind.isStr() || (kind.get_str() != "rpc" && kind.get_str() != "host")) throw JSONRPCError(RPC_INVALID_PARAMETER, "request.kind: rpc or host");
-        if (!method.isStr() || method.get_str().empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "request.method: a name");
-        if (!params.isNull() && !params.isArray() && !params.isObject()) throw JSONRPCError(RPC_INVALID_PARAMETER, "request.params: an array or an object");
-        if (!wallet.isNull() && !wallet.isStr()) throw JSONRPCError(RPC_INVALID_PARAMETER, "request.wallet: a name");
-        Parsed out{kind.get_str(), method.get_str(), params.isNull() ? UniValue{kind.get_str() == "rpc" ? UniValue::VARR : UniValue::VOBJ} : params, wallet.isStr() ? wallet.get_str() : std::string{}};
-        // A host method of a wallet names it in its parameters.
-        if (out.kind == "host" && out.wallet.empty() && Param(out.params, "wallet").isStr()) out.wallet = Param(out.params, "wallet").get_str();
-        return out;
+        return [auth_user](const std::string& method) { return RpcUserMayCall(auth_user, method); };
     }
 
     static std::string Canonical(const std::string& kind, const std::string& method, const UniValue& params, const std::string& wallet)
@@ -520,6 +645,7 @@ private:
     {
         // The pages' own policy: what they read. What pays or signs is a host method (rpc.confirmed), asked.
         if (!PageRpcPolicy(method)) throw HostError(BRIDGE_METHOD_NOT_FOUND, strprintf("The interface does not call %s (use the console)", method));
+        CheckRpcCaller(method);
         try {
             return m_node->executeRpc(method, params, wallet.empty() ? std::string{"/"} : WalletUri(wallet));
         } catch (const UniValue& error) {
@@ -564,10 +690,16 @@ private:
         const guard::ConfirmFn confirm{[this](const Window::ConfirmDialog& dialog) { return Confirm(dialog); }};
         const guard::AskFn ask{[this](const Window::ConfirmDialog& dialog) { return Ask(dialog); }};
         // A file is the user's only when chosen in the app's own chooser for this request.
+        // Checked when used: the path must still name what it named when chosen (no link or other file put there since).
         const auto chosen{[](const std::string& path, bool write) {
             if (!g_context) return false;
             const auto it{g_context->files.find(path)};
-            return it != g_context->files.end() && (!write || it->second);
+            if (it == g_context->files.end() || (write && !it->second.write)) return false;
+            if (const std::string changed{ChosenFiles::Changed(it->second)}; !changed.empty()) {
+                LogInfo("webui remote: a chosen file was refused when used (%s)", changed);
+                throw HostError(BRIDGE_INVALID_REQUEST, strprintf("The file chosen is not the one it was when chosen (%s): nothing was done. Choose it again.", changed));
+            }
+            return true;
         }};
         m_node_api = std::make_unique<NodeApi>(node, [chosen](const std::string& path) { return chosen(path, false); }, confirm);
         m_node_api->Register(m_bridge);
@@ -625,17 +757,6 @@ std::shared_ptr<RemoteHost> GetHost(const JSONRPCRequest& request)
     return g_host;
 }
 
-/** The wallet a call names: its argument, else the wallet of the URI (/wallet/<name>). */
-std::string WalletOf(const JSONRPCRequest& request, const UniValue& arg)
-{
-    if (arg.isStr()) return arg.get_str();
-    constexpr std::string_view prefix{"/wallet/"};
-    if (request.URI.starts_with(prefix)) {
-        if (const auto name{UrlDecode(std::string_view{request.URI}.substr(prefix.size()))}; !name.empty()) return name;
-    }
-    return {};
-}
-
 const RPCResult DESCRIPTION_RESULT{RPCResult::Type::OBJ, "", "",
     {
         {RPCResult::Type::BOOL, "needed", "whether the call needs the user's word (false: it would run without a question)"},
@@ -681,7 +802,7 @@ RPCMethod describeconfirmation()
             const auto host{GetHost(request)};
             const UniValue params{request.params[1].isNull() ? UniValue{UniValue::VARR} : request.params[1]};
             if (HasDuplicateKeys(params)) throw JSONRPCError(RPC_INVALID_PARAMETER, "params: a key is given twice");
-            return host->Describe(request.params[0].get_str(), params, WalletOf(request, request.params[2]));
+            return host->Describe(request.params[0].get_str(), params, DescribedWallet(request.URI, request.params[2]), request.authUser);
         }};
 }
 
@@ -710,7 +831,7 @@ RPCMethod webuihost()
             if (request.params[2].isStr()) {
                 passphrase.assign(request.params[2].get_str().begin(), request.params[2].get_str().end());
             }
-            return host->Run(request.params[0], request.params[1].isStr() ? request.params[1].get_str() : std::string{}, std::move(passphrase), request.params[3]);
+            return host->Run(request.params[0], request.params[1].isStr() ? request.params[1].get_str() : std::string{}, std::move(passphrase), request.params[3], request.authUser);
         }};
 }
 
@@ -743,8 +864,9 @@ RPCMethod webuichosenfile()
     return RPCMethod{
         "webuichosenfile",
         "A file the user just chose in the native chooser of the app that shows this chain's pages: a one-time token for it, "
-        "valid 10 minutes, that a request of the pages names (webuihost files) to read or write it. Only an absolute, "
-        "canonical path (no link, no \"..\") is taken. The app calls it with what its own chooser answered, never with "
+        "valid 2 minutes, that a request of the pages names (webuihost files) to read or write it. Only an absolute, "
+        "canonical path (no link, no \"..\") is taken, and when a request uses it, it must still name the same file "
+        "(or still none, in the same folder), opened without following a link. The app calls it with what its own chooser answered, never with "
         "a path of the pages.\n",
         {
             {"path", RPCArg::Type::STR, RPCArg::Optional::NO, "the file chosen"},

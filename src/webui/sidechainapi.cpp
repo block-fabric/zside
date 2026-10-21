@@ -111,6 +111,7 @@ UniValue SidechainApi::Call(const std::string& method, const UniValue& params)
         if (!status.connected) out.pushKV("error", status.error);
         out.pushKV("node", strprintf("%s:%u", options.host, options.port));
         out.pushKV("slot", static_cast<int64_t>(slot));
+        out.pushKV("via", "json-rpc");
         out.pushKV("walletSet", options.wallet_set);
         out.pushKV("wallet", options.wallet);
         out.pushKV("auth", options.credentials.empty() ? "cookie" : "password");

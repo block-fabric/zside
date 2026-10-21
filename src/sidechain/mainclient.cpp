@@ -4,17 +4,23 @@
 
 #include <sidechain/mainclient.h>
 
+#include <consensus/amount.h>
+#include <core_io.h>
 #include <netbase.h>
 #include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <support/cleanse.h>
 #include <util/sock.h>
+#include <util/moneystr.h>
 #include <util/strencodings.h>
 #include <util/threadinterrupt.h>
 #include <util/time.h>
 #include <util/translation.h>
 
+#include <algorithm>
 #include <fstream>
+#include <optional>
+#include <vector>
 
 #ifndef WIN32
 #include <fcntl.h>
@@ -39,6 +45,27 @@ std::string PercentEncode(const std::string& text)
         }
     }
     return encoded;
+}
+
+/** An amount of coins of a JSON-RPC reply (a number, or a string as Backbone writes some), if it is one. */
+std::optional<CAmount> Coins(const UniValue& value)
+{
+    if (!value.isNum() && !value.isStr()) return std::nullopt;
+    const auto amount{ParseMoney(value.getValStr())};
+    if (!amount || *amount < 0 || !MoneyRange(*amount)) return std::nullopt;
+    return amount;
+}
+
+/** An integer of a JSON-RPC reply, if it is one. */
+std::optional<int64_t> Int(const UniValue& obj, const std::string& key)
+{
+    const UniValue& value{obj.isObject() ? obj.find_value(key) : NullUniValue};
+    if (!value.isNum()) return std::nullopt;
+    try {
+        return value.getInt<int64_t>();
+    } catch (const std::runtime_error&) {
+        return std::nullopt;
+    }
 }
 } // namespace
 
@@ -155,6 +182,78 @@ UniValue MainClient::Call(const std::string& method, const UniValue& params, boo
         throw MainClientError{strprintf("The mainchain node answered %s with an error: %s", method, text), /*rpc_error_in=*/true, text};
     }
     return answer.find_value("result");
+}
+
+//
+// getpeginfo: what the pages show of the peg.
+//
+
+UniValue PegInfoFromRpc(uint32_t slot, const UniValue& drivechain, const UniValue& sidechain, const UniValue& bundles)
+{
+    UniValue out(UniValue::VOBJ);
+    out.pushKV("height", Int(drivechain, "height").value_or(-1));
+    const bool enforcer_rules{drivechain.isObject() && drivechain.find_value("rules").isStr() && drivechain.find_value("rules").get_str() == "enforcer"};
+    out.pushKV("rules", enforcer_rules ? "enforcer" : "chains");
+    // The votes a bundle needs, within how many blocks: the enforcer's rules pay it with more than the threshold.
+    const auto threshold{Int(drivechain, "bundlethreshold")};
+    const auto period{enforcer_rules ? Int(drivechain, "bundlemaxage") : Int(drivechain, "withdrawalperiod")};
+    const auto min_score{enforcer_rules ? (threshold ? std::optional<int64_t>{*threshold + 1} : std::nullopt) : Int(drivechain, "withdrawalminscore")};
+    if (period) out.pushKV("withdrawalperiod", *period);
+    if (min_score) out.pushKV("withdrawalminscore", *min_score);
+    if (const auto n{Int(drivechain, "activesidechains")}) out.pushKV("activesidechains", *n);
+    if (const auto n{Int(drivechain, "proposals")}) out.pushKV("proposals", *n);
+
+    UniValue side(UniValue::VOBJ);
+    side.pushKV("slot", slot);
+    side.pushKV("active", sidechain.isObject());
+    if (sidechain.isObject()) {
+        if (const auto h{Int(sidechain, "activationheight")}) side.pushKV("activationheight", *h);
+        if (sidechain.find_value("proposalhash").isStr()) side.pushKV("proposalhash", sidechain.find_value("proposalhash").get_str());
+        if (sidechain.find_value("title").isStr()) side.pushKV("title", sidechain.find_value("title").get_str());
+    }
+    out.pushKV("sidechain", std::move(side));
+    const UniValue& escrow{sidechain.isObject() ? sidechain.find_value("escrow") : NullUniValue};
+    if (escrow.isObject() && escrow.find_value("txid").isStr()) {
+        if (const auto amount{Coins(escrow.find_value("amount"))}) {
+            UniValue e(UniValue::VOBJ);
+            e.pushKV("txid", escrow.find_value("txid").get_str());
+            e.pushKV("n", Int(escrow, "n").value_or(0));
+            e.pushKV("amount", ValueFromAmount(*amount));
+            out.pushKV("escrow", std::move(e));
+        }
+    }
+
+    UniValue list(UniValue::VARR);
+    for (const UniValue& b : bundles.isArray() ? bundles.getValues() : std::vector<UniValue>{}) {
+        if (!b.isObject() || !b.find_value("hash").isStr()) continue;
+        if (const auto s{Int(b, "slot")}; s && *s != slot) continue;
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("hash", b.find_value("hash").get_str());
+        entry.pushKV("height", Int(b, "height").value_or(-1));
+        entry.pushKV("score", Int(b, "score").value_or(0));
+        if (const auto left{Int(b, "blocksleft")}) entry.pushKV("blocksleft", std::max<int64_t>(0, *left));
+        if (b.find_value("payable").isBool()) entry.pushKV("payable", b.find_value("payable").get_bool());
+        if (b.find_value("vote").isStr()) entry.pushKV("vote", b.find_value("vote").get_str());
+        list.push_back(std::move(entry));
+    }
+    out.pushKV("bundles", std::move(list));
+    // getsidechainevents of a JSON-RPC node has the score of each pending bundle at each block.
+    out.pushKV("votehistory", true);
+    return out;
+}
+
+UniValue MainClient::PegInfo(uint32_t slot) const
+{
+    UniValue args(UniValue::VARR);
+    args.push_back(static_cast<int64_t>(slot));
+    UniValue sidechain;
+    try {
+        sidechain = Call("getsidechain", args);
+    } catch (const MainClientError& e) {
+        // None active in the slot (yet): said so, not an error.
+        if (!e.rpc_error) throw;
+    }
+    return PegInfoFromRpc(slot, Call("getdrivechaininfo", UniValue{UniValue::VARR}), sidechain, Call("listwithdrawalbundles", args));
 }
 
 } // namespace sidechain

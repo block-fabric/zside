@@ -36,6 +36,8 @@ enum BridgeError : int {
     BRIDGE_STOPPED = -9,
     //! A host method failed.
     BRIDGE_HOST_ERROR = -1,
+    //! The caller may not run that RPC method: the RPC user's -rpcwhitelist does not list it (the host over RPC, remotehost.h).
+    BRIDGE_NOT_ALLOWED = -32803,
 };
 
 //! The key of the result of a request asked {exact: true}: {"$rawjson": "<the result as JSON text>"} (Bridge::Request::exact).
@@ -47,6 +49,28 @@ struct HostError : std::runtime_error {
     HostError(int code_in, const std::string& message) : std::runtime_error(message), code(code_in) {}
     explicit HostError(const std::string& message) : HostError(BRIDGE_HOST_ERROR, message) {}
 };
+
+/**
+ * Who runs the request of this thread may name these RPC methods: in the daemon's host over RPC (remotehost.h), what the
+ * RPC user who called webuihost or describeconfirmation may call itself (its -rpcwhitelist), so that a method run
+ * inside them by name (an RPC method of the pages, the calls of rpc.confirmed, the commands of console.run) is never
+ * one that user could not call directly. Outside a scope (the app's own window): any.
+ */
+class RpcCallerScope
+{
+public:
+    using AllowedFn = std::function<bool(const std::string& method)>;
+    explicit RpcCallerScope(AllowedFn allowed);
+    ~RpcCallerScope();
+    RpcCallerScope(const RpcCallerScope&) = delete;
+    RpcCallerScope& operator=(const RpcCallerScope&) = delete;
+
+private:
+    AllowedFn m_allowed;
+    const AllowedFn* m_previous;
+};
+/** Throws HostError(BRIDGE_NOT_ALLOWED) when the caller of this thread's request may not run `method` (RpcCallerScope). */
+void CheckRpcCaller(const std::string& method);
 
 /** The URI path of a wallet for the RPC dispatcher: "/wallet/<percent-encoded name>". */
 std::string WalletUri(const std::string& wallet_name);

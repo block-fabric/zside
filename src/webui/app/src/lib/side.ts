@@ -14,8 +14,10 @@ export interface MainchainInfo {
   slot: number;
   connected: boolean;
   error?: string;
-  /** host:port of the mainchain node. */
+  /** host:port of the mainchain node (of its enforcer interface, with -mainchaingrpc). */
   node: string;
+  /** How the node reaches it (nodes before 2026-10-18 do not say). */
+  via?: MainVia;
   /** The last mainchain block on record (-1: none). */
   height: number;
   bestblockhash?: string;
@@ -94,37 +96,108 @@ export interface BmmRequest {
 
 // --- The mainchain node (peg.*) ---
 
+/** How the node reaches its mainchain node: JSON-RPC; JSON-RPC with its requests through the enforcer's interface; that interface alone (-mainchaingrpc). */
+export type MainVia = 'json-rpc' | 'json-rpc+enforcer' | 'enforcer';
+
 /** peg.connection: how the node reaches its mainchain node (never its credentials). */
 export interface Connection {
   connected: boolean;
   error?: string;
   node: string;
   slot: number;
+  /** Nodes before 2026-10-21 do not say: JSON-RPC. */
+  via?: MainVia;
   walletSet: boolean;
   wallet: string;
-  auth: 'password' | 'cookie';
+  /** none, token: through the enforcer's interface (no credentials, or -mainchaingrpcauth). */
+  auth: 'password' | 'cookie' | 'none' | 'token';
   cookieFile?: string;
 }
 
-/** getdrivechaininfo of the mainchain: what a bundle needs. */
-export interface MainDrivechainInfo {
-  withdrawalperiod: number;
-  withdrawalminscore: number;
+/** A bundle of this sidechain being voted on (getpeginfo). */
+export interface MainBundle {
+  hash: string;
+  /** The mainchain block that proposed it. */
   height: number;
+  /** Its votes now. */
+  score: number;
+  /** Blocks before it fails; not said by a mainchain that does not report its rules. */
+  blocksleft?: number;
+  payable?: boolean;
+  /** How the mainchain node votes on it (over JSON-RPC only). */
+  vote?: string;
 }
 
-/** listwithdrawalbundles of the mainchain: a bundle of this sidechain being voted on. */
-export interface MainBundle {
-  slot: number;
-  hash: string;
-  index: number;
+/**
+ * getpeginfo of the node: what the mainchain node says of the peg, the same over JSON-RPC (getdrivechaininfo,
+ * getsidechain, listwithdrawalbundles) and through the enforcer's interface (GetChainInfo, GetSidechains, GetCtip,
+ * GetWithdrawalBundleProposals...). A field a way does not report is left out.
+ */
+export interface PegInfo {
+  via: MainVia;
   height: number;
-  score: number;
-  lastupvote: number;
-  blocksleft: number;
-  payable: boolean;
-  known: boolean;
-  vote: string;
+  rules: 'chains' | 'enforcer';
+  /** Blocks a bundle has to collect its votes. */
+  withdrawalperiod?: number;
+  /** Votes a bundle needs to be paid out. */
+  withdrawalminscore?: number;
+  activesidechains?: number;
+  proposals?: number;
+  sidechain: { slot: number; active: boolean; activationheight?: number; proposalhash?: string; title?: string };
+  escrow?: { txid: string; n: number; amount: number };
+  bundles: MainBundle[];
+  /** Whether the votes of each past block are reported (getsidechainevents' scores): not through the enforcer's interface. */
+  votehistory: boolean;
+}
+
+/** getdrivechaininfo of a mainchain node over JSON-RPC (a node before getpeginfo: the pages ask it themselves). */
+interface LegacyDrivechainInfo {
+  withdrawalperiod?: number;
+  withdrawalminscore?: number;
+  rules?: string;
+  bundlethreshold?: number;
+  bundlemaxage?: number;
+  height?: number;
+  activesidechains?: number;
+  proposals?: number;
+}
+
+/**
+ * getpeginfo made from getdrivechaininfo and listwithdrawalbundles, for a node that does not have it, over JSON-RPC
+ * (the enforcer's interface has neither: such a node is not asked). As the node makes it (PegInfoFromRpc).
+ */
+export function pegInfoFromLegacy(info: LegacyDrivechainInfo | null, bundles: unknown, slot: number, via: MainVia = 'json-rpc'): PegInfo {
+  const d = info && typeof info === 'object' ? info : {};
+  const enforcerRules = d.rules === 'enforcer';
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const threshold = num(d.bundlethreshold);
+  const list = Array.isArray(bundles) ? (bundles as Record<string, unknown>[]) : [];
+  return {
+    via,
+    height: num(d.height) ?? -1,
+    rules: enforcerRules ? 'enforcer' : 'chains',
+    withdrawalperiod: enforcerRules ? num(d.bundlemaxage) : num(d.withdrawalperiod),
+    withdrawalminscore: enforcerRules ? (threshold === undefined ? undefined : threshold + 1) : num(d.withdrawalminscore),
+    activesidechains: num(d.activesidechains),
+    proposals: num(d.proposals),
+    sidechain: { slot, active: true },
+    bundles: list
+      .filter((b) => b && typeof b.hash === 'string' && (b.slot === undefined || b.slot === slot))
+      .map((b) => ({
+        hash: b.hash as string,
+        height: num(b.height) ?? -1,
+        score: num(b.score) ?? 0,
+        blocksleft: num(b.blocksleft) === undefined ? undefined : Math.max(0, b.blocksleft as number),
+        payable: typeof b.payable === 'boolean' ? b.payable : undefined,
+        vote: typeof b.vote === 'string' ? b.vote : undefined,
+      })),
+    votehistory: true,
+  };
+}
+
+/** Whether an error is "no such method" (a node of before a method). */
+export function methodMissing(e: unknown): boolean {
+  return !!e && typeof e === 'object' && ((e as { code?: number }).code === -32601 || /method not found/i.test(String((e as { message?: string }).message ?? '')));
 }
 
 /** getsidechainevents of the mainchain: what a block did that concerns this sidechain. */
@@ -212,22 +285,33 @@ export interface BundleHistory {
   closed?: number;
   closedTime?: number;
   paid?: boolean;
-  /** Its score in the last block on record while it was pending. */
-  score: number;
+  /**
+   * Its score in the last block on record while it was pending (its votes now, if it still is); not known for a
+   * bundle closed when the mainchain node does not report the votes of past blocks (the enforcer's interface).
+   */
+  score?: number;
 }
 
-/** The bundles of this sidechain the events saw, the newest first. */
-export function bundleHistory(events: readonly SideEvent[]): BundleHistory[] {
+/**
+ * The bundles of this sidechain the events saw, the newest first. `current`: the bundles being voted on now
+ * (getpeginfo), whose votes now are their score; `votehistory` false: the events have no scores (the enforcer's
+ * interface), so a closed bundle's is not known.
+ */
+export function bundleHistory(events: readonly SideEvent[], current: readonly Pick<MainBundle, 'hash' | 'score'>[] = [], votehistory = true): BundleHistory[] {
   const byHash = new Map<string, BundleHistory>();
   const get = (hash: string) => {
     let b = byHash.get(hash);
-    if (!b) byHash.set(hash, (b = { hash, score: 0 }));
+    if (!b) byHash.set(hash, (b = votehistory ? { hash, score: 0 } : { hash }));
     return b;
   };
   for (const e of events) {
     for (const hash of e.proposed) Object.assign(get(hash), { proposed: e.height, proposedTime: e.time });
     for (const p of e.pending) get(p.hash).score = p.score;
     for (const c of e.bundles) Object.assign(get(c.hash), { closed: e.height, closedTime: e.time, paid: c.paid });
+  }
+  for (const b of current) {
+    const h = byHash.get(b.hash);
+    if (h && h.closed === undefined) h.score = b.score;
   }
   return [...byHash.values()].sort((a, b) => (b.closed ?? b.proposed ?? Infinity) - (a.closed ?? a.proposed ?? Infinity) || (b.proposed ?? 0) - (a.proposed ?? 0));
 }
@@ -316,7 +400,14 @@ export function voteProgress(score: number, minScore: number): number {
   return minScore > 0 ? Math.max(0, Math.min(100, (score / minScore) * 100)) : 0;
 }
 
-/** Whether a bundle can still pass: payable, or enough blocks left to reach the score. */
+/** Whether a bundle can still pass: payable, or enough blocks left to reach the score (not known: it can). */
 export function bundleCanPass(b: Pick<MainBundle, 'payable' | 'score' | 'blocksleft'>, minScore: number): boolean {
-  return b.payable || b.score + b.blocksleft >= minScore;
+  if (b.payable ?? (minScore > 0 && b.score >= minScore)) return true;
+  return b.blocksleft === undefined || b.score + b.blocksleft >= minScore;
 }
+
+/** Whether a bundle has the votes it needs (as the mainchain node says, or from the votes it needs). */
+export function bundlePayable(b: Pick<MainBundle, 'payable' | 'score'>, minScore: number): boolean {
+  return b.payable ?? (minScore > 0 && b.score >= minScore);
+}
+

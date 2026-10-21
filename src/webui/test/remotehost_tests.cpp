@@ -5,6 +5,7 @@
 // The host of the pages over RPC (webui/remotehost.h): the tokens that bind a question the Chains app showed to the
 // call it then runs, the digest of a call and its question, the events kept for the app.
 
+#include <webui/bridge.h>
 #include <webui/confirm.h>
 #include <webui/remotehost.h>
 
@@ -17,6 +18,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 
@@ -122,6 +124,60 @@ BOOST_AUTO_TEST_CASE(duplicate_keys_refused)
     BOOST_CHECK(!HasDuplicateKeys(v));
 }
 
+BOOST_AUTO_TEST_CASE(one_wallet_per_request)
+{
+    const auto parse{[](const std::string& json) {
+        UniValue v;
+        BOOST_REQUIRE(v.read(json));
+        return ParseRequest(v);
+    }};
+    const auto refused{[](const std::string& json) {
+        UniValue v;
+        BOOST_REQUIRE(v.read(json));
+        try {
+            ParseRequest(v);
+        } catch (const UniValue& error) {
+            return error.find_value("message").get_str().find("wallet") != std::string::npos;
+        }
+        return false;
+    }};
+    // A host method: the wallet of its parameters (what it acts on), also named beside them the same.
+    BOOST_CHECK_EQUAL(parse(R"({"kind":"host","method":"wallet.send.commit","params":{"wallet":"a","token":"t"}})").wallet, "a");
+    BOOST_CHECK_EQUAL(parse(R"({"kind":"host","method":"wallet.send.commit","params":{"wallet":"a"},"wallet":"a"})").wallet, "a");
+    BOOST_CHECK_EQUAL(parse(R"({"kind":"host","method":"rpc.confirmed","params":{"method":"signmessage","params":["x","y"],"wallet":"a"}})").wallet, "a");
+    BOOST_CHECK_EQUAL(parse(R"({"kind":"host","method":"app.hello","params":{}})").wallet, "");
+    // Bound to one, acting on another: refused (rpc.confirmed and any host method), and a wallet beside parameters naming none.
+    BOOST_CHECK(refused(R"({"kind":"host","method":"wallet.send.commit","params":{"wallet":"b","token":"t"},"wallet":"a"})"));
+    BOOST_CHECK(refused(R"({"kind":"host","method":"rpc.confirmed","params":{"method":"signmessage","params":["x","y"],"wallet":"b"},"wallet":"a"})"));
+    BOOST_CHECK(refused(R"({"kind":"host","method":"rpc.confirmed","params":{"method":"setgenerate","params":[true]},"wallet":"a"})"));
+    BOOST_CHECK(refused(R"({"kind":"host","method":"wallet.send.commit","params":{"wallet":1}})"));
+    // An RPC method: the wallet of its URI.
+    BOOST_CHECK_EQUAL(parse(R"({"kind":"rpc","method":"getbalances","params":[],"wallet":"a"})").wallet, "a");
+
+    // describeconfirmation: its argument, or the wallet of the URI; both, the same.
+    BOOST_CHECK_EQUAL(DescribedWallet("/wallet/a", UniValue{}), "a");
+    BOOST_CHECK_EQUAL(DescribedWallet("/", UniValue{"b"}), "b");
+    BOOST_CHECK_EQUAL(DescribedWallet("/wallet/a", UniValue{"a"}), "a");
+    BOOST_CHECK_THROW(DescribedWallet("/wallet/a", UniValue{"b"}), UniValue);
+}
+
+BOOST_AUTO_TEST_CASE(rpc_caller_scope)
+{
+    // Outside a scope (the app's own window): any method.
+    BOOST_CHECK_NO_THROW(CheckRpcCaller("sendtoaddress"));
+    {
+        const RpcCallerScope caller{[](const std::string& method) { return method == "getblockcount"; }};
+        BOOST_CHECK_NO_THROW(CheckRpcCaller("getblockcount"));
+        BOOST_CHECK_EXCEPTION(CheckRpcCaller("sendtoaddress"), HostError, [](const HostError& e) { return e.code == BRIDGE_NOT_ALLOWED; });
+        {
+            const RpcCallerScope inner{[](const std::string&) { return true; }};
+            BOOST_CHECK_NO_THROW(CheckRpcCaller("sendtoaddress"));
+        }
+        BOOST_CHECK_THROW(CheckRpcCaller("sendtoaddress"), HostError);
+    }
+    BOOST_CHECK_NO_THROW(CheckRpcCaller("sendtoaddress"));
+}
+
 BOOST_AUTO_TEST_CASE(event_log)
 {
     EventLog log;
@@ -157,7 +213,7 @@ BOOST_AUTO_TEST_SUITE(remotehost_files_tests)
 
 BOOST_AUTO_TEST_CASE(chosen_files_only_by_token)
 {
-    const fs::path dir{fs::temp_directory_path() / fs::u8path(strprintf("remotehost-files-%d", FastRandomContext{}.rand32()))};
+    const fs::path dir{fs::path{fs::temp_directory_path()} / fs::PathFromString(strprintf("remotehost-files-%d", FastRandomContext{}.rand32()))};
     fs::create_directories(dir / "sub");
     const fs::path canonical{fs::weakly_canonical(dir)};
     const std::string file{fs::PathToString(canonical / "backup.dat")};
@@ -183,8 +239,78 @@ BOOST_AUTO_TEST_CASE(chosen_files_only_by_token)
     BOOST_CHECK_EQUAL(got->path, file);
     BOOST_CHECK(got->write);
     BOOST_CHECK(!files.Take(token, T0 + 2s));
-    const std::string late{files.Grant(file, false, T0)};
+    // A file to be read must be there; one to be written may be made.
+    BOOST_CHECK_THROW(files.Grant(file, false, T0), std::runtime_error);
+    { std::ofstream{fs::PathToString(canonical / "read.dat")} << "x"; }
+    const std::string late{files.Grant(fs::PathToString(canonical / "read.dat"), false, T0)};
     BOOST_CHECK(!files.Take(late, T0 + ChosenFiles::EXPIRY));
+    // Minutes, not more: the app asks for a token right before the request that uses it.
+    BOOST_CHECK(ChosenFiles::EXPIRY <= 120s);
+    fs::remove_all(dir);
+}
+
+BOOST_AUTO_TEST_CASE(chosen_file_swapped_after_grant)
+{
+    const fs::path dir{fs::path{fs::temp_directory_path()} / fs::PathFromString(strprintf("remotehost-swap-%d", FastRandomContext{}.rand32()))};
+    fs::create_directories(dir);
+    const fs::path canonical{fs::weakly_canonical(dir)};
+    const fs::path chosen{canonical / "chosen.dat"};
+    const fs::path elsewhere{canonical / "secret.dat"};
+    { std::ofstream{fs::PathToString(chosen)} << "chosen"; }
+    { std::ofstream{fs::PathToString(elsewhere)} << "secret"; }
+    ChosenFiles files;
+
+    // An existing file: still the same, it is used.
+    auto token{files.Grant(fs::PathToString(chosen), false, T0)};
+    auto got{files.Take(token, T0)};
+    BOOST_REQUIRE(got);
+    BOOST_CHECK(got->identity.exists);
+    BOOST_CHECK(ChosenFiles::Changed(*got).empty());
+
+    // A symbolic link put in its place after it was chosen (to a file the user never chose): refused, not followed.
+    token = files.Grant(fs::PathToString(chosen), true, T0);
+    got = files.Take(token, T0);
+    BOOST_REQUIRE(got);
+    fs::remove(chosen);
+    std::filesystem::create_symlink(elsewhere, chosen);
+    BOOST_CHECK(!ChosenFiles::Changed(*got).empty());
+    // Nor is a link taken when chosen.
+    BOOST_CHECK_THROW(files.Grant(fs::PathToString(chosen), false, T0), std::runtime_error);
+    BOOST_CHECK_THROW(ChosenFiles::Identify(fs::PathToString(chosen)), std::runtime_error);
+
+    // Another file moved to the path (same name, another inode): refused.
+    fs::remove(chosen);
+    { std::ofstream{fs::PathToString(chosen)} << "chosen"; }
+    token = files.Grant(fs::PathToString(chosen), true, T0);
+    got = files.Take(token, T0);
+    BOOST_REQUIRE(got);
+    fs::rename(elsewhere, chosen);
+    BOOST_CHECK(!ChosenFiles::Changed(*got).empty());
+
+    // A file to be made: still none, in the same folder, it is used; a link (or a file) put there first: refused.
+    const fs::path fresh{canonical / "new.dat"};
+    token = files.Grant(fs::PathToString(fresh), true, T0);
+    got = files.Take(token, T0);
+    BOOST_REQUIRE(got);
+    BOOST_CHECK(!got->identity.exists);
+    BOOST_CHECK(ChosenFiles::Changed(*got).empty());
+    std::filesystem::create_symlink(chosen, fresh);
+    BOOST_CHECK(!ChosenFiles::Changed(*got).empty());
+    fs::remove(fresh);
+    BOOST_CHECK(ChosenFiles::Changed(*got).empty());
+    { std::ofstream{fs::PathToString(fresh)} << "planted"; }
+    BOOST_CHECK(!ChosenFiles::Changed(*got).empty());
+
+    // Its folder swapped for a link to another folder: refused (the path is no longer canonical, and the folder another).
+    const fs::path sub{canonical / "sub"};
+    fs::create_directories(sub);
+    token = files.Grant(fs::PathToString(sub / "x.dat"), true, T0);
+    got = files.Take(token, T0);
+    BOOST_REQUIRE(got);
+    fs::create_directories(canonical / "other");
+    fs::remove(sub);
+    std::filesystem::create_symlink(canonical / "other", sub);
+    BOOST_CHECK(!ChosenFiles::Changed(*got).empty());
     fs::remove_all(dir);
 }
 

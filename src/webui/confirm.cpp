@@ -630,6 +630,9 @@ UniValue ConfirmedRpc::Call(const UniValue& params)
     }
     const std::string name{calls.front().first};
     const UniValue& then{params.find_value("then")};
+    // Each method it would run, the caller may run itself (its -rpcwhitelist, for the host over RPC): before any question.
+    for (const auto& c : calls) CheckRpcCaller(c.first);
+    if (then.isObject() && then.find_value("method").isStr()) CheckRpcCaller(then.find_value("method").get_str());
     const bool only{params.find_value("authorizedOnly").isTrue()};
     if (batch && (!then.isNull() || only)) throw HostError(BRIDGE_INVALID_REQUEST, "calls: one at a time with then or authorizedOnly");
     if (!then.isNull() && only) throw HostError(BRIDGE_INVALID_REQUEST, "then or authorizedOnly, not both");

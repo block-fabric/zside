@@ -6,6 +6,7 @@
 #define BITCOIN_HTTPRPC_H
 
 #include <any>
+#include <string>
 
 class JSONRPCRequest;
 class UniValue;
@@ -22,6 +23,10 @@ void InterruptHTTPRPC();
  * Precondition; HTTP and RPC has been stopped.
  */
 void StopHTTPRPC();
+
+/** Whether an RPC user may call a method (-rpcwhitelist, -rpcwhitelistdefault), as the HTTP RPC server decides it: also
+ * for the methods run by name inside a call of that user (webuihost of webui/remotehost.h). */
+bool RpcUserMayCall(const std::string& user, const std::string& method);
 
 /** Execute a single HTTP request containing one or more JSONRPC requests.
  * Specified `jreq` will be modified and `status` will be returned.

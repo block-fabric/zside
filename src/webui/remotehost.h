@@ -119,18 +119,38 @@ private:
  * native chooser answered, gives the path here (webuichosenfile) and gets a one-time token for it; a request of the pages
  * then names the token (webuihost files), never a path. A path is taken only absolute and already canonical (no "..",
  * no symbolic link on the way, no relative part): what the user saw chosen is what is opened.
+ *
+ * What the path named when it was chosen is kept (Identity: the file, opened without following a link, by its device
+ * and inode; or, for a file to be made, its folder): when a request uses it, the path is opened again the same way and
+ * must name the very same file (or still none, in the same folder). A link or another file put there in between is
+ * refused, never followed.
  */
 class ChosenFiles
 {
 public:
+    /** What a path named when it was chosen: a regular file (exists) or, when there was none yet, its folder. */
+    struct Identity {
+        bool exists{false};
+        uint64_t device{0};
+        uint64_t inode{0};
+        bool operator==(const Identity&) const = default;
+    };
     struct File {
         std::string path;
         bool write{false};
+        Identity identity;
     };
-    static constexpr std::chrono::seconds EXPIRY{600};
+    static constexpr std::chrono::seconds EXPIRY{120};
     static constexpr size_t MAX{32};
     /** Why a path cannot be taken ("" when it can). */
     static std::string Problem(const std::string& path);
+    /**
+     * What the path names now, opened without following a link (O_NOFOLLOW; on Windows, the reparse point itself): a
+     * regular file, or none in a folder that is one. Throws std::runtime_error with what it is else.
+     */
+    static Identity Identify(const std::string& path);
+    /** Why a file chosen cannot be used now ("" when the path still names what it named when chosen). */
+    static std::string Changed(const File& file);
     /** A token for a chosen file. Throws std::runtime_error with the Problem. */
     std::string Grant(const std::string& path, bool write, std::chrono::steady_clock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** The file of a token, once (gone after); nullopt for a token unknown, used or expired. */
@@ -144,6 +164,25 @@ private:
     Mutex m_mutex;
     std::map<std::string, Entry> m_entries GUARDED_BY(m_mutex);
 };
+
+/** A request of the pages (webuihost), read: one wallet for it, the one its method uses (ParseRequest). */
+struct Request {
+    std::string kind;
+    std::string method;
+    UniValue params;
+    std::string wallet;
+};
+/**
+ * Read a request {kind, method, params, wallet?}. Throws a JSON-RPC error when it is not one. Its wallet is the one the
+ * method acts on: for an RPC method, `wallet` (the URI it runs at); for a host method, the wallet of its parameters
+ * (params.wallet, as the host methods and rpc.confirmed read it), and a `wallet` beside it must be that same one
+ * (refused when it differs, or names one where the parameters name none): a token is never bound to one wallet for
+ * a call that acts on another.
+ */
+Request ParseRequest(const UniValue& request);
+
+/** The wallet of describeconfirmation: its argument, or the wallet of the URI (/wallet/<name>); both must agree. */
+std::string DescribedWallet(const std::string& uri, const UniValue& arg);
 
 /** Add webuihost, describeconfirmation, webuievents and webuichosenfile to the table (rpc_extra::g_register of the daemon). */
 void RegisterRpcCommands(CRPCTable& table);

@@ -49,6 +49,8 @@ const std::map<std::string, Bridge::Thread>& Methods()
         {"getbmminfo", WORKER},
         {"getdepositaddress", WORKER},
         {"getmainchaininfo", WORKER},
+        // What the mainchain node says of the peg (getpeginfo): it waits for it.
+        {"getpeginfo", LONG},
         {"getwithdrawalbundle", WORKER},
         {"listwithdrawals", WORKER},
         {"syncmainchain", LONG},

@@ -13,7 +13,7 @@ import Bmm from '../pages/Bmm.svelte';
 import Peg from '../pages/Peg.svelte';
 import SideHome from '../views/home/SideHome.svelte';
 import { checkAddress, networkParams } from '../lib/address';
-import { setTransport, type BridgeRequest } from '../lib/bridge';
+import { BridgeError, setTransport, type BridgeRequest } from '../lib/bridge';
 import { buildCommands, chainHas, menuSections, pageAvailable } from '../lib/commands.svelte';
 import { dialogs } from '../lib/dialogs.svelte';
 import { handleShortcut } from '../lib/keyboard';
@@ -21,7 +21,7 @@ import { AREAS, chainBeforeTools, HOME_QUICK_ACTIONS, NAV_SECTIONS } from '../li
 import { go, nav, PAGES, type PageId } from '../lib/nav.svelte';
 import { FIRST_STEPS } from '../lib/firststeps';
 import type { NodeOptions } from '../lib/rpc';
-import { bmmBlocks, bmmShare, bundleHistory, depositsOf, depositTarget, EventLog, voteProgress, type SideEvent } from '../lib/side';
+import { bmmBlocks, bmmShare, bundleCanPass, bundleHistory, bundlePayable, depositsOf, depositTarget, EventLog, pegInfoFromLegacy, voteProgress, type SideEvent } from '../lib/side';
 import { noteBmm, side, stopSide } from '../lib/sidestate.svelte';
 import { checkLink, stopMainLink, SYNC_DELAY_MS } from '../lib/mainlink.svelte';
 import StatusBar from '../components/StatusBar.svelte';
@@ -56,6 +56,31 @@ const calls: BridgeRequest[] = [];
 let mining = false;
 /** The link of the fake to its mainchain node (getmainchaininfo's state). */
 let linkState: 'ok' | 'syncing' | 'down' = 'ok';
+/**
+ * How the fake reaches its mainchain node: JSON-RPC; the enforcer's interface alone (-mainchaingrpc), which has no
+ * getdrivechaininfo nor listwithdrawalbundles and no scores of past blocks; or JSON-RPC from a node of before getpeginfo.
+ */
+let mode: 'json-rpc' | 'enforcer' | 'legacy' = 'json-rpc';
+/** The refusal of the node for a method of the mainchain its enforcer interface does not have (MainClient::CallAsEnforcer). */
+const REFUSED = (m: string) => new BridgeError(-1, `The mainchain node is reached through the bip300301_enforcer's interface alone (-mainchaingrpc), which has no ${m}`);
+
+/** getpeginfo of the fake: the same bundle, with the rules of each way (the enforcer's: 6 votes in 10 blocks). */
+function pegInfo() {
+  const enforcer = mode === 'enforcer';
+  return {
+    via: mode === 'enforcer' ? 'enforcer' : 'json-rpc',
+    height: 101,
+    rules: enforcer ? 'enforcer' : 'chains',
+    withdrawalperiod: enforcer ? 10 : 60,
+    withdrawalminscore: enforcer ? 6 : 30,
+    activesidechains: 1,
+    proposals: 0,
+    sidechain: { slot: SLOT, active: true, activationheight: 20, title: 'Test' },
+    escrow: { txid: 'e5'.repeat(32), n: 0, amount: 3.5 },
+    bundles: [{ hash: 'cc'.repeat(32), height: 99, score: 3, blocksleft: enforcer ? 7 : 57, payable: false, ...(enforcer ? {} : { vote: 'upvote' }) }],
+    votehistory: !enforcer,
+  };
+}
 
 async function fakeNode(r: BridgeRequest): Promise<unknown> {
   calls.push(r);
@@ -64,6 +89,9 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
     case 'getmainchaininfo':
       if (linkState === 'down') return { slot: SLOT, connected: false, node: '127.0.0.1:29554', height: 101, tipheight: 100, state: 'down', error_kind: 'refused', error: 'Cannot reach the mainchain node at 127.0.0.1:29554: connection refused' };
       return { slot: SLOT, connected: true, node: '127.0.0.1:29554', height: 101, bestblockhash: 'h101', tipheight: 100, state: linkState, ...(linkState === 'syncing' ? { error_kind: 'not-synced', behind_blocks: 40 } : {}) };
+    case 'getpeginfo':
+      if (mode === 'legacy') throw new BridgeError(-32601, 'Method not found');
+      return pegInfo();
     case 'getbmminfo':
       return mining ? { mining: true, address: ownAddress, always: false, idle: false, lastfees: 0.001, lastoffer: 0.00099, requests: 4, blocks: 3, outbid: 1, candidates: 1 } : { mining: false, requests: 4, blocks: 3, outbid: 1, candidates: 0 };
     case 'getwithdrawalbundle':
@@ -95,8 +123,10 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
     case 'bmm.request':
       return { hash: 'bc'.repeat(32), mainchainheight: 101, transactions: 1, fees: 0, amount: 0.0001, mainchaintxid: 'mt'.repeat(32) };
     case 'peg.connection':
+      if (mode === 'enforcer') return { connected: true, node: '127.0.0.1:50051', slot: SLOT, via: 'enforcer', walletSet: false, wallet: '', auth: 'none' };
       return { connected: true, node: '127.0.0.1:29554', slot: SLOT, walletSet: true, wallet: 'miner', auth: 'cookie', cookieFile: '/home/u/.chains/regtest/.cookie' };
     case 'peg.call':
+      if (mode === 'enforcer' && !['getsidechainevents', 'getbalances', 'getnewaddress', 'getblockcount', 'getblockchaininfo', 'getbestblockhash'].includes(p.method as string)) throw REFUSED(p.method as string);
       switch (p.method) {
         case 'getdrivechaininfo':
           return { withdrawalperiod: 60, withdrawalminscore: 30, height: 101 };
@@ -104,7 +134,8 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
           return [{ slot: SLOT, hash: 'cc'.repeat(32), index: 0, height: 99, score: 3, lastupvote: 101, blocksleft: 57, payable: false, known: true, vote: 'upvote' }];
         case 'getsidechainevents': {
           const [, from, count] = p.params as number[];
-          return EVENTS.filter((e) => e.height >= from && e.height < from + count);
+          // Through the enforcer's interface: no scores of the bundles pending at each block.
+          return EVENTS.filter((e) => e.height >= from && e.height < from + count).map((e) => (mode === 'enforcer' ? { ...e, pending: [] } : e));
         }
         case 'getbalances':
           return { mine: { trusted: 12 } };
@@ -145,6 +176,7 @@ beforeEach(() => {
   calls.length = 0;
   mining = false;
   linkState = 'ok';
+  mode = 'json-rpc';
   setTransport(fakeNode);
 });
 
@@ -154,6 +186,9 @@ afterEach(() => {
   side.log = [];
   side.main.events = [];
   side.main.height = -1;
+  side.main.peg = null;
+  side.main.bundles = [];
+  side.connection = null;
   setTransport(null);
   dialogs.queue.splice(0);
   wallets.list = [];
@@ -263,6 +298,39 @@ describe('the peg and merged mining, as the pages put them together', () => {
     expect(depositTarget('plain text', SLOT)).toBeNull();
     expect(voteProgress(15, 30)).toBe(50);
     expect(voteProgress(45, 30)).toBe(100);
+  });
+
+  it('the peg the same whichever way the node reaches the mainchain: JSON-RPC, the enforcer interface, a node before getpeginfo', () => {
+    // A node before getpeginfo, over JSON-RPC: getdrivechaininfo and listwithdrawalbundles made into it, as the node does.
+    const chains = pegInfoFromLegacy({ withdrawalperiod: 60, withdrawalminscore: 30, height: 101, activesidechains: 1, proposals: 0 }, [
+      { slot: SLOT, hash: 'cc'.repeat(32), index: 0, height: 99, score: 3, lastupvote: 101, blocksleft: 57, payable: false, known: true, vote: 'upvote' },
+      { slot: SLOT + 1, hash: 'dd'.repeat(32), index: 0, height: 99, score: 9, lastupvote: 101, blocksleft: 57, payable: false, known: true, vote: 'abstain' },
+    ], SLOT);
+    expect(chains).toMatchObject({ via: 'json-rpc', height: 101, rules: 'chains', withdrawalperiod: 60, withdrawalminscore: 30, votehistory: true });
+    expect(chains.bundles).toEqual([{ hash: 'cc'.repeat(32), height: 99, score: 3, blocksleft: 57, payable: false, vote: 'upvote' }]);
+    // Backbone with the enforcer's rules: more votes than the threshold, within the maximum age (not its Chains period).
+    const enforcerRules = pegInfoFromLegacy({ withdrawalperiod: 60, withdrawalminscore: 30, rules: 'enforcer', bundlethreshold: 5, bundlemaxage: 10, height: 211 }, [], SLOT);
+    expect(enforcerRules).toMatchObject({ rules: 'enforcer', withdrawalperiod: 10, withdrawalminscore: 6, bundles: [] });
+    // Nothing made up from a reply of another shape.
+    expect(pegInfoFromLegacy(null, null, SLOT)).toMatchObject({ height: -1, bundles: [], withdrawalperiod: undefined, withdrawalminscore: undefined });
+
+    // The history of the bundles through the enforcer's interface: no scores of past blocks; a pending bundle's are its votes now.
+    const noScores = EVENTS.map((e) => ({ ...e, pending: [] }));
+    expect(bundleHistory(noScores, [], false)).toEqual([{ hash: 'cc'.repeat(32), proposed: 99, proposedTime: EVENTS[3].time }]);
+    expect(bundleHistory(noScores, [{ hash: 'cc'.repeat(32), score: 4 }], false)[0].score).toBe(4);
+    const closedNoScore = bundleHistory([...noScores, event(102, { bundles: [{ hash: 'cc'.repeat(32), paid: true }] })], [{ hash: 'cc'.repeat(32), score: 4 }], false);
+    expect(closedNoScore[0]).toMatchObject({ closed: 102, paid: true });
+    expect(closedNoScore[0].score).toBeUndefined();
+    // Over JSON-RPC, as before: the score of the last block on record.
+    expect(bundleHistory(EVENTS)[0].score).toBe(3);
+
+    // A bundle whose blocks left or payability are not said: judged from its votes, never "cannot pass".
+    expect(bundlePayable({ score: 6 }, 6)).toBe(true);
+    expect(bundlePayable({ score: 5 }, 6)).toBe(false);
+    expect(bundlePayable({ score: 50, payable: false }, 6)).toBe(false);
+    expect(bundleCanPass({ score: 1 }, 6)).toBe(true);
+    expect(bundleCanPass({ score: 1, blocksleft: 2 }, 6)).toBe(false);
+    expect(bundleCanPass({ score: 1, blocksleft: 5 }, 6)).toBe(true);
   });
 
   it('keeps a log of merged mining: requests, blocks mined, outbids, errors', () => {
@@ -441,6 +509,17 @@ describe.runIf(SIDECHAIN)('the pages of a sidechain', () => {
     await fireEvent.click(screen.getAllByRole('button', { name: 'Choose…' })[0]);
     await waitFor(() => expect(calls.find((c) => c.method === 'options.chooseFile')?.params).toEqual({ name: 'mainchainrpccookiefile' }));
     await waitFor(() => expect(chosen).not.toBeNull());
+  });
+});
+
+describe.runIf(SIDECHAIN)('the pages of a sidechain whose node has no getpeginfo', () => {
+  it('Peg → Bundle: getdrivechaininfo and listwithdrawalbundles of the mainchain node over JSON-RPC, as before', async () => {
+    mode = 'legacy';
+    go('peg', 'bundle');
+    render(Peg);
+    await waitFor(() => screen.getByText('3 of 30'));
+    expect(screen.getByText(/57 blocks left/)).toBeTruthy();
+    expect(calls.some((c) => c.method === 'peg.call' && (c.params as Record<string, unknown>).method === 'getdrivechaininfo')).toBe(true);
   });
 });
 

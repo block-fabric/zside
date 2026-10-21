@@ -54,6 +54,13 @@ public:
 
     const Options& GetOptions() const { return m_options; }
 
+    /**
+     * What the pages show of the peg of the sidechain in `slot` (getpeginfo): getdrivechaininfo, getsidechain and
+     * listwithdrawalbundles of the mainchain node, read by PegInfoFromRpc.
+     * @throws MainClientError, std::runtime_error
+     */
+    UniValue PegInfo(uint32_t slot) const;
+
 private:
     const Options m_options;
 };
@@ -68,6 +75,14 @@ private:
  * directory is). Errors name the file but never contain what it holds.
  */
 util::Result<std::string> ReadPasswordFile(const fs::path& path);
+
+/**
+ * getpeginfo from the replies of a mainchain node over JSON-RPC: `drivechain` (getdrivechaininfo), `sidechain`
+ * (getsidechain of the slot; null if none is active in it) and `bundles` (listwithdrawalbundles of the slot). With
+ * the enforcer's rules (Backbone on eCash), the score a bundle needs and the blocks it has are those rules': more
+ * votes than bundlethreshold within bundlemaxage blocks. What a reply does not say is left out, nothing made up.
+ */
+UniValue PegInfoFromRpc(uint32_t slot, const UniValue& drivechain, const UniValue& sidechain, const UniValue& bundles);
 
 } // namespace sidechain
 

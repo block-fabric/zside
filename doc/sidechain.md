@@ -128,7 +128,8 @@ takes note of the outcome of the bundle.
 
 ## Commands
 
-Node: `getmainchaininfo`, `syncmainchain`, `createbmmblock`, `setbmm`,
+Node: `getmainchaininfo`, `getpeginfo` (what the mainchain node says of the peg: the votes a
+bundle needs, the bundles being voted on, the escrow), `syncmainchain`, `createbmmblock`, `setbmm`,
 `getbmminfo`, `listwithdrawals`, `getwithdrawalbundle`.
 
 Wallet: `getdepositaddress`, `createwithdrawal`, `refundwithdrawal`.

@@ -155,6 +155,8 @@ UniValue NodeApi::Call(const std::string& method, const UniValue& params)
         // given to the desktop, for each call (the line is checked as it runs, nested commands too), with the parameters
         // it runs with shown (audit 7 #3).
         const console::ExecuteFn execute{[&](const std::string& m, const UniValue& p, const std::string& uri) {
+            // Only what the caller may run itself (the RPC user's -rpcwhitelist, for the host over RPC), nested commands too.
+            CheckRpcCaller(m);
             if (!guard::ConsoleRunsQuietly(m)) {
                 const auto dialog{guard::ConsoleConfirmation(m, p, wallet_name, confirm::ArgNames(node, m))};
                 if (!dialog) throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found");

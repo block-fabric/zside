@@ -25,7 +25,7 @@
   import { rpc } from '../lib/rpc';
   import { node, prefs, toast, wallets, walletsEnabled } from '../lib/state.svelte';
   import { coinsToSats, formatAmount, satsToCoins } from '../lib/units';
-  import { bundleCanPass, bundleHistory, declined, depositsOf, depositTarget, ownWithdrawals, peg, voteProgress, withdrawalKey, type Withdrawal } from '../lib/side';
+  import { bundleCanPass, bundleHistory, bundlePayable, declined, depositsOf, depositTarget, ownWithdrawals, peg, voteProgress, withdrawalKey, type Withdrawal } from '../lib/side';
   import { refreshSide, side, startSide } from '../lib/sidestate.svelte';
   import Bmm from './Bmm.svelte';
   import Pager from '../components/Pager.svelte';
@@ -261,9 +261,14 @@
 
   // --- The bundle ---
   const bundle = $derived(side.bundle);
-  const minScore = $derived(side.main.drivechain?.withdrawalminscore ?? 0);
+  const minScore = $derived(side.main.peg?.withdrawalminscore ?? 0);
+  const period = $derived(side.main.peg?.withdrawalperiod);
   const voted = $derived(bundle?.hash ? side.main.bundles.find((b) => b.hash === bundle.hash) : undefined);
-  const history = $derived(bundleHistory(side.main.events));
+  const votedPayable = $derived(voted ? bundlePayable(voted, minScore) : false);
+  /** Through the enforcer's interface: the votes of past blocks are not reported (the history's last scores). */
+  const votesOfPastBlocks = $derived(side.main.peg?.votehistory ?? side.connection?.via !== 'enforcer');
+  const history = $derived(bundleHistory(side.main.events, side.main.bundles, votesOfPastBlocks));
+  const viaEnforcer = $derived(side.connection?.via === 'enforcer');
 
   // Opened from the home (goTo('peg', 'bundle', hash)): that bundle's row.
   let focusBundle = $state<string | null>(takeFocus('peg'));
@@ -292,6 +297,7 @@
       <strong translate="no">{CHAIN.name}</strong>
       <span class="muted">{slot === null ? 'Slot –' : `Slot ${slot}`}</span>
       {#if info}<span class="faint small">acted on mainchain block {formatCount(Math.max(0, info.tipheight))}</span>{/if}
+      {#if side.main.peg?.escrow}<span class="faint small">escrow <Amount sats={coinsToSats(side.main.peg.escrow.amount)} /></span>{/if}
     </div>
   </section>
 
@@ -358,12 +364,12 @@
       <section class="panel">
         <div class="panel-head"><h2>Deposit from the {mainName} wallet</h2></div>
         <form class="panel-body side-form" onsubmit={(e) => { e.preventDefault(); depositFromMainchain(); }}>
-          <p class="side-note">The wallet of the {mainName} node this node follows can make the deposit to the address on the left, if it holds coins.</p>
+          <p class="side-note">The wallet of the {mainName} node this node follows{viaEnforcer ? ' (the wallet behind its enforcer interface)' : ''} can make the deposit to the address on the left, if it holds coins.</p>
           {#if !connected}
             <p class="side-note side-warn">The {mainName} node is not reachable.</p>
           {:else}
             <dl class="facts">
-              <dt>Wallet</dt><dd translate="no">{side.connection?.walletSet ? side.connection.wallet || '(default wallet)' : 'its only wallet loaded'}</dd>
+              <dt>Wallet</dt><dd translate="no">{viaEnforcer ? 'the wallet of its enforcer interface' : side.connection?.walletSet ? side.connection.wallet || '(default wallet)' : 'its only wallet loaded'}</dd>
               <dt>Available</dt><dd>{#if mainBalance !== null}<Amount sats={mainBalance} />{:else}<span class="muted"><SafeText text={mainBalanceError || '–'} /></span>{/if}</dd>
             </dl>
             {#key helperKey}<AmountInput id="deposit-amount" label="Amount" bind:value={helperAmount} max={mainBalance ?? undefined} />{/key}
@@ -442,14 +448,14 @@
         <ol class="panel-body steps">
           <li><strong>Waiting</strong> The withdrawal is in a block of this chain, with the others that wait. It can be taken back.</li>
           <li><strong>In a bundle</strong> A block of this chain puts the waiting withdrawals, those that offer the most first, in a bundle: one transaction of {mainName} that pays them all.</li>
-          <li><strong>Voted on</strong> The miners of {mainName} vote on the bundle, block after block{minScore ? `; it needs ${minScore} votes` : ''}{side.main.drivechain ? ` within ${side.main.drivechain.withdrawalperiod} blocks` : ''}.</li>
+          <li><strong>Voted on</strong> The miners of {mainName} vote on the bundle, block after block{minScore ? `; it needs ${minScore} votes` : ''}{period ? ` within ${period} blocks` : ''}.</li>
           <li><strong>Paid</strong> With the votes it needs, the bundle is paid out of the escrow of this sidechain. If it fails, its withdrawals go in a later one.</li>
         </ol>
         {#if simple && bundle?.status === 'pending' && voted && minScore}
           <!-- Simple mode: how far the withdrawals being voted on are, in a line. -->
           <div class="panel-body simple-votes">
-            <Meter value={voted.score} max={minScore} label="Approval of the withdrawals" text="{Math.round(voteProgress(voted.score, minScore))}%" tone={voted.payable ? 'positive' : 'accent'} />
-            <p class="side-note">{voted.payable ? 'Approved: paid with the next block.' : `The withdrawals being voted on are ${Math.round(voteProgress(voted.score, minScore))}% approved, ${voted.blocksleft} blocks left.`}</p>
+            <Meter value={voted.score} max={minScore} label="Approval of the withdrawals" text="{Math.round(voteProgress(voted.score, minScore))}%" tone={votedPayable ? 'positive' : 'accent'} />
+            <p class="side-note">{votedPayable ? 'Approved: paid with the next block.' : `The withdrawals being voted on are ${Math.round(voteProgress(voted.score, minScore))}% approved${voted.blocksleft === undefined ? '' : `, ${voted.blocksleft} blocks left`}.`}</p>
           </div>
         {/if}
       </section>
@@ -510,12 +516,15 @@
           {#if bundle.status === 'pending'}
             {#if voted && minScore}
               <div class="votes">
-                <Meter value={voted.score} max={minScore} label="Votes for the bundle" text="{voted.score} of {minScore}" tone={voted.payable ? 'positive' : bundleCanPass(voted, minScore) ? 'accent' : 'negative'} />
+                <Meter value={voted.score} max={minScore} label="Votes for the bundle" text="{voted.score} of {minScore}" tone={votedPayable ? 'positive' : bundleCanPass(voted, minScore) ? 'accent' : 'negative'} />
                 <p class="side-note">
-                  {voted.payable ? `It has the votes it needs: the next block of ${mainName} can pay it.` : `${Math.round(voteProgress(voted.score, minScore))}% of the votes it needs, ${voted.blocksleft} blocks left.`}
-                  {#if !voted.payable && !bundleCanPass(voted, minScore)}It cannot reach the score any more: it will fail, and its withdrawals go in a later bundle.{/if}
+                  {votedPayable ? `It has the votes it needs: the next block of ${mainName} can pay it.` : `${Math.round(voteProgress(voted.score, minScore))}% of the votes it needs${voted.blocksleft === undefined ? '' : `, ${voted.blocksleft} blocks left`}.`}
+                  {#if !votedPayable && !bundleCanPass(voted, minScore)}It cannot reach the score any more: it will fail, and its withdrawals go in a later bundle.{/if}
                 </p>
               </div>
+            {:else if voted}
+              <!-- The votes, without the score it needs (a mainchain node that does not report its rules). -->
+              <p class="side-note">{voted.score} vote(s) so far{voted.blocksleft === undefined ? '' : `, ${voted.blocksleft} blocks left`}.</p>
             {:else}
               <p class="side-note">{side.main.error ? `The votes are on ${mainName}, which is not reachable.` : `${mainName} has not proposed it yet: it does once a block of ${mainName} takes it.`}</p>
             {/if}
@@ -539,7 +548,7 @@
                   <td class="mono"><span translate="no">{shortHash(h.hash, 12)}</span></td>
                   <td class="num">{h.proposed === undefined ? '–' : formatCount(h.proposed)}{#if h.proposedTime} <span class="faint small">{formatTime(h.proposedTime, true)}</span>{/if}</td>
                   <td class="num">{h.closed === undefined ? '–' : formatCount(h.closed)}{#if h.closedTime} <span class="faint small">{formatTime(h.closedTime, true)}</span>{/if}</td>
-                  <td class="end num">{h.score}{minScore ? ` / ${minScore}` : ''}</td>
+                  <td class="end num">{#if h.score === undefined}<span class="faint" title="The votes of past blocks are not reported by the enforcer's interface">–</span>{:else}{h.score}{minScore ? ` / ${minScore}` : ''}{/if}</td>
                 </tr>
               {/each}
             </tbody>

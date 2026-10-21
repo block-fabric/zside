@@ -132,7 +132,7 @@ BOOST_AUTO_TEST_CASE(page_rpc_policy_of_the_chain)
 {
 #if WEBUI_SIDECHAIN
     // A sidechain: its peg and merged mining; none of the drivechain methods of the mainchain, no solo mining.
-    for (const char* m : {"getmainchaininfo", "getbmminfo", "listwithdrawals", "getwithdrawalbundle", "getdepositaddress"}) {
+    for (const char* m : {"getmainchaininfo", "getpeginfo", "getbmminfo", "listwithdrawals", "getwithdrawalbundle", "getdepositaddress"}) {
         BOOST_CHECK_MESSAGE(webui::PageRpcPolicy(m).has_value(), m);
     }
     // What spends the wallet of the mainchain node is a host method, confirmed on the desktop (bmm.set, bmm.request); a

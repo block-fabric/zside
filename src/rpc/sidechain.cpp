@@ -16,6 +16,7 @@
 #include <streams.h>
 #include <util/strencodings.h>
 #include <sidechain/follower.h>
+#include <sidechain/mainclient.h>
 #include <sidechain/mainchain.h>
 #include <sidechain/state.h>
 #include <univalue.h>
@@ -134,6 +135,72 @@ RPCMethod getmainchaininfo()
     }
     result.pushKV("followed_height", status.followed_height);
     result.pushKV("behind_blocks", status.Behind());
+    return result;
+},
+    };
+}
+
+RPCMethod getpeginfo()
+{
+    return RPCMethod{
+        "getpeginfo",
+        "Returns what the mainchain node says of the peg of this sidechain: the bundles of withdrawals being voted on, the\n"
+        "votes they need, the escrow, the sidechain's slot (from its getdrivechaininfo, getsidechain and listwithdrawalbundles).\n"
+        "What the mainchain node does not report is left out.",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR, "via", "How this node reaches the mainchain node: json-rpc"},
+            {RPCResult::Type::NUM, "height", "Height of the mainchain node's tip, as it says now"},
+            {RPCResult::Type::STR, "rules", "The drivechain rules of the mainchain: chains, or enforcer (those of the bip300301_enforcer, Backbone on eCash)"},
+            {RPCResult::Type::NUM, "withdrawalperiod", /*optional=*/true, "Blocks a bundle has to collect its votes (the enforcer's rules: the maximum age of a bundle)"},
+            {RPCResult::Type::NUM, "withdrawalminscore", /*optional=*/true, "Votes a bundle needs to be paid out (the enforcer's rules: one more than the inclusion threshold)"},
+            {RPCResult::Type::NUM, "activesidechains", /*optional=*/true, "Number of active sidechains"},
+            {RPCResult::Type::NUM, "proposals", /*optional=*/true, "Number of sidechain proposals collecting acks"},
+            {RPCResult::Type::OBJ, "sidechain", "This sidechain's slot on the mainchain",
+            {
+                {RPCResult::Type::NUM, "slot", "The slot"},
+                {RPCResult::Type::BOOL, "active", "Whether a sidechain is active in the slot"},
+                {RPCResult::Type::NUM, "activationheight", /*optional=*/true, "Height of the mainchain block that activated it"},
+                {RPCResult::Type::STR_HEX, "proposalhash", /*optional=*/true, "Hash of its proposal"},
+                {RPCResult::Type::STR, "title", /*optional=*/true, "Its title"},
+            }},
+            {RPCResult::Type::OBJ, "escrow", /*optional=*/true, "The output of the mainchain that holds the coins of this sidechain (none before the first deposit)",
+            {
+                {RPCResult::Type::STR_HEX, "txid", "Its transaction"},
+                {RPCResult::Type::NUM, "n", "Its output index"},
+                {RPCResult::Type::STR_AMOUNT, "amount", "What it holds"},
+            }},
+            {RPCResult::Type::ARR, "bundles", "The bundles of withdrawals of this sidechain being voted on",
+            {
+                {RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::STR_HEX, "hash", "The hash of the bundle"},
+                    {RPCResult::Type::NUM, "height", "Height of the mainchain block that proposed it"},
+                    {RPCResult::Type::NUM, "score", "Its votes now"},
+                    {RPCResult::Type::NUM, "blocksleft", /*optional=*/true, "Blocks before it fails if it is not paid out"},
+                    {RPCResult::Type::BOOL, "payable", /*optional=*/true, "Whether it has the votes to be paid out"},
+                    {RPCResult::Type::STR, "vote", /*optional=*/true, "How the mainchain node votes on it"},
+                }},
+            }},
+            {RPCResult::Type::BOOL, "votehistory", "Whether the mainchain node reports the votes of the bundles at each past block (getsidechainevents)"},
+        }},
+        RPCExamples{HelpExampleCli("getpeginfo", "") + HelpExampleRpc("getpeginfo", "")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    NodeContext& node{EnsureAnyNodeContext(request.context)};
+    Follower& follower{EnsureFollower(node)};
+    UniValue info;
+    try {
+        info = follower.Client().PegInfo(EnsureChainman(node).GetConsensus().sidechain.slot);
+    } catch (const sidechain::MainClientError& e) {
+        throw JSONRPCError(RPC_MISC_ERROR, e.what());
+    } catch (const std::runtime_error& e) {
+        throw JSONRPCError(RPC_MISC_ERROR, strprintf("The mainchain node's answer could not be read: %s", e.what()));
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("via", "json-rpc");
+    for (size_t i{0}; i < info.size(); ++i) result.pushKV(info.getKeys()[i], info.getValues()[i]);
     return result;
 },
     };
@@ -513,6 +580,7 @@ void RegisterSidechainRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
         {"sidechain", &getmainchaininfo},
+        {"sidechain", &getpeginfo},
         {"sidechain", &syncmainchain},
         {"sidechain", &createbmmblock},
         {"sidechain", &setbmm},

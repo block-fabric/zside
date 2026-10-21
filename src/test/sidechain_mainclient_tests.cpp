@@ -5,6 +5,8 @@
 #include <sidechain/follower.h>
 #include <sidechain/mainclient.h>
 #include <test/util/setup_common.h>
+#include <tinyformat.h>
+#include <uint256.h>
 #include <util/translation.h>
 
 #include <boost/test/unit_test.hpp>
@@ -143,6 +145,65 @@ BOOST_AUTO_TEST_CASE(link_state_mapping)
     BOOST_CHECK_EQUAL(Follower::LinkStateName(S::OK), "ok");
     BOOST_CHECK_EQUAL(Follower::LinkStateName(S::SYNCING), "syncing");
     BOOST_CHECK_EQUAL(Follower::LinkStateName(S::DOWN), "down");
+}
+
+BOOST_AUTO_TEST_CASE(peg_info_from_rpc)
+{
+    // getpeginfo over JSON-RPC: the Chains rules (the period and the score of getdrivechaininfo), the slot and its
+    // escrow (getsidechain), the bundles of the slot only (listwithdrawalbundles); what a reply does not say is left out.
+    const auto read{[](const std::string& json) {
+        UniValue v;
+        BOOST_REQUIRE(v.read(json));
+        return v;
+    }};
+    const std::string bundle(64, 'c');
+    const std::string escrow_txid(64, 'e');
+    const UniValue chains{PegInfoFromRpc(7,
+        read(R"({"withdrawalperiod":60,"withdrawalminscore":30,"height":211,"activesidechains":2,"proposals":1})"),
+        read(strprintf(R"({"slot":7,"title":"Layers","proposalhash":"%s","activationheight":118,"escrow":{"txid":"%s","n":1,"amount":115.98}})", std::string(64, 'a'), escrow_txid)),
+        read(strprintf(R"([{"slot":7,"hash":"%s","index":0,"height":205,"score":3,"lastupvote":210,"blocksleft":54,"payable":false,"known":true,"vote":"upvote"},
+                           {"slot":8,"hash":"%s","height":205,"score":9}])", bundle, std::string(64, 'd'))))};
+    BOOST_CHECK_EQUAL(chains["height"].getInt<int>(), 211);
+    BOOST_CHECK_EQUAL(chains["rules"].get_str(), "chains");
+    BOOST_CHECK_EQUAL(chains["withdrawalperiod"].getInt<int>(), 60);
+    BOOST_CHECK_EQUAL(chains["withdrawalminscore"].getInt<int>(), 30);
+    BOOST_CHECK_EQUAL(chains["activesidechains"].getInt<int>(), 2);
+    BOOST_CHECK_EQUAL(chains["proposals"].getInt<int>(), 1);
+    BOOST_CHECK(chains["sidechain"]["active"].get_bool());
+    BOOST_CHECK_EQUAL(chains["sidechain"]["slot"].getInt<int>(), 7);
+    BOOST_CHECK_EQUAL(chains["sidechain"]["activationheight"].getInt<int>(), 118);
+    BOOST_CHECK_EQUAL(chains["sidechain"]["title"].get_str(), "Layers");
+    BOOST_CHECK_EQUAL(chains["escrow"]["txid"].get_str(), escrow_txid);
+    BOOST_CHECK_EQUAL(chains["escrow"]["n"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(chains["escrow"]["amount"].getValStr(), "115.98000000");
+    BOOST_REQUIRE_EQUAL(chains["bundles"].size(), 1U);
+    const UniValue& b{chains["bundles"][0]};
+    BOOST_CHECK_EQUAL(b["hash"].get_str(), bundle);
+    BOOST_CHECK_EQUAL(b["height"].getInt<int>(), 205);
+    BOOST_CHECK_EQUAL(b["score"].getInt<int>(), 3);
+    BOOST_CHECK_EQUAL(b["blocksleft"].getInt<int>(), 54);
+    BOOST_CHECK(!b["payable"].get_bool());
+    BOOST_CHECK_EQUAL(b["vote"].get_str(), "upvote");
+    BOOST_CHECK(chains["votehistory"].get_bool());
+
+    // The enforcer's rules (Backbone on eCash): more votes than the threshold, within the maximum age.
+    const UniValue enforcer{PegInfoFromRpc(46, read(R"({"withdrawalperiod":60,"withdrawalminscore":30,"rules":"enforcer","bundlethreshold":5,"bundlemaxage":10,"height":12})"), NullUniValue, read("[]"))};
+    BOOST_CHECK_EQUAL(enforcer["rules"].get_str(), "enforcer");
+    BOOST_CHECK_EQUAL(enforcer["withdrawalperiod"].getInt<int>(), 10);
+    BOOST_CHECK_EQUAL(enforcer["withdrawalminscore"].getInt<int>(), 6);
+
+    // No sidechain in the slot, replies of another shape: not active, no escrow, nothing made up.
+    const UniValue none{PegInfoFromRpc(5, read(R"({"height":"x"})"), NullUniValue, read(R"({"hash":"00"})"))};
+    BOOST_CHECK_EQUAL(none["height"].getInt<int>(), -1);
+    BOOST_CHECK(!none["sidechain"]["active"].get_bool());
+    BOOST_CHECK(none.find_value("escrow").isNull());
+    BOOST_CHECK(none.find_value("withdrawalperiod").isNull());
+    BOOST_CHECK(none.find_value("withdrawalminscore").isNull());
+    BOOST_CHECK_EQUAL(none["bundles"].size(), 0U);
+    // An escrow amount that is not one is left out.
+    const UniValue bad{PegInfoFromRpc(5, read("{}"), read(R"({"escrow":{"txid":"ab","n":0,"amount":-1}})"), read("[]"))};
+    BOOST_CHECK(bad["sidechain"]["active"].get_bool());
+    BOOST_CHECK(bad.find_value("escrow").isNull());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

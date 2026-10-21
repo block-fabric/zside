@@ -64,7 +64,7 @@ export function installMock(options: MockOptions = {}): void {
     'wallet.requests': () => [],
     'wallet.fee': () => ({ feePerK: 1000, fallback: false, target: 6, requiredFeePerK: 1000 }),
     // A sidechain (chain.json role "sidechain"): its mainchain node, through the host (peg.*).
-    'peg.connection': () => ({ connected: true, node: '127.0.0.1:29554', slot: 5, walletSet: false, wallet: '', auth: 'cookie', cookieFile: '~/.chains/regtest/.cookie' }),
+    'peg.connection': () => ({ connected: true, node: '127.0.0.1:29554', slot: 5, via: 'json-rpc', walletSet: false, wallet: '', auth: 'cookie', cookieFile: '~/.chains/regtest/.cookie' }),
     'peg.call': (p) => {
       const args = (p.params ?? []) as number[];
       switch (p.method) {
@@ -132,6 +132,11 @@ export function installMock(options: MockOptions = {}): void {
     ],
     listwithdrawalbundles: () => [{ slot: 2, hash: 'cd'.repeat(32), score: 14, blocksleft: 86, payable: false }],
     getmainchaininfo: () => ({ slot: 5, connected: true, node: '127.0.0.1:29554', height: height + 500, bestblockhash: hash(height + 500), tipheight: height + 498 }),
+    getpeginfo: () => ({
+      via: 'json-rpc', height: height + 500, rules: 'chains', withdrawalperiod: 600, withdrawalminscore: 300, activesidechains: 2, proposals: 1,
+      sidechain: { slot: 5, active: true, activationheight: 120, title: 'BitNames' }, escrow: { txid: 'bb'.repeat(32), n: 0, amount: 2 },
+      bundles: [{ hash: 'cd'.repeat(32), height: height + 400, score: 120, blocksleft: 480, payable: false, vote: 'upvote' }], votehistory: true,
+    }),
     getbmminfo: () => ({ mining: true, address: 'rsc1qminer', always: false, idle: false, lastfees: 0.0012, lastoffer: 0.001188, requests: 31, blocks: 27, outbid: 2, candidates: 1 }),
     getwithdrawalbundle: () => ({ status: 'pending', hash: 'cd'.repeat(32), height: height - 20, withdrawals: 2, amount: 1.5, mainchainfee: 0.0002, waiting: 1 }),
     listwithdrawals: () => [
