@@ -266,6 +266,8 @@ class DescribeConfirmationTest(BitcoinTestFramework):
             "-rpcwhitelist=app:" + ",".join(APP_METHODS + APP_NEEDS),
             f"-rpcauth={rpcauth('named', 'pw4')}",
             "-rpcwhitelist=named:webuihost,wallet.info,webuichosenfile,backupwallet,restorewallet",
+            f"-rpcauth={rpcauth('pegger', 'pw5')}",
+            "-rpcwhitelist=pegger:webuihost,peg.call,getblockcount,getmainchaininfo",
             "-webuichooser=app",
             "-rpcwhitelistdefault=0",
         ])
@@ -298,6 +300,15 @@ class DescribeConfirmationTest(BitcoinTestFramework):
         assert_raises_rpc_error(NOT_ALLOWED, "may not run peers.ban", pages.webuihost, {"kind": "host", "method": "peers.ban", "params": {}})
         assert_raises_rpc_error(NOT_ALLOWED, "may not run wallet.info", pages.webuihost, {"kind": "host", "method": "wallet.info", "params": {"wallet": "main"}})
         assert_raises_rpc_error(NOT_ALLOWED, "may not run some.own", pages.webuihost, {"kind": "host", "method": "some.own", "params": {}})
+        # What proxies the mainchain connection or shows its credentials: only when named; peg.call then forwards only
+        # mainchain methods the user may call itself.
+        peg_call = {"kind": "host", "method": "peg.call", "params": {"method": "getblockchaininfo", "params": []}}
+        assert_raises_rpc_error(NOT_ALLOWED, "may not run peg.call", pages.webuihost, peg_call)
+        assert_raises_rpc_error(NOT_ALLOWED, "may not run peg.connection", pages.webuihost, {"kind": "host", "method": "peg.connection", "params": {}})
+        pegger = self.user_rpc(node, "pegger", "pw5")
+        assert_raises_rpc_error(NOT_ALLOWED, "may not run peg.connection", pegger.webuihost, {"kind": "host", "method": "peg.connection", "params": {}})
+        assert_raises_rpc_error(NOT_ALLOWED, "may not call getblockchaininfo", pegger.webuihost, peg_call)
+        assert_raises_rpc_error(NOT_ALLOWED, "may not call getbalances", pegger.webuihost, {"kind": "host", "method": "peg.call", "params": {"method": "getbalances", "params": []}})
         # A host method named in the whitelist itself runs; others still not.
         named = self.user_rpc(node, "named", "pw4")
         assert_equal(named.webuihost({"kind": "host", "method": "wallet.info", "params": {"wallet": "main"}})["result"]["name"], "main")

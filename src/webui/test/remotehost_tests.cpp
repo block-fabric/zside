@@ -376,6 +376,12 @@ BOOST_AUTO_TEST_CASE(host_methods_need_their_privilege)
     BOOST_CHECK(HostMethodAllowed("wallet.backup", only({"wallet.backup"})));
     BOOST_CHECK(!HostMethodAllowed("wallets.restoreMigrate", only({"restorewallet"})));
     BOOST_CHECK(HostMethodAllowed("wallets.restoreMigrate", only({"restorewallet", "migratewallet"})));
+    // What proxies the mainchain connection or shows its credentials: only when named, whatever else is allowed.
+    BOOST_CHECK(!HostPrivileges().contains("peg.call"));
+    BOOST_CHECK(!HostPrivileges().contains("peg.connection"));
+    BOOST_CHECK(!HostMethodAllowed("peg.call", only({"getmainchaininfo", "getblockcount", "getbalances", "getnewaddress"})));
+    BOOST_CHECK(!HostMethodAllowed("peg.connection", only({"getmainchaininfo", "getnetworkinfo"})));
+    BOOST_CHECK(HostMethodAllowed("peg.call", only({"peg.call"})));
     // A host method not in the table (a chain's own): only when named.
     BOOST_CHECK(!HostMethodAllowed("bitassets.logo", only({"getblockcount", "send"})));
     BOOST_CHECK(HostMethodAllowed("bitassets.logo", only({"bitassets.logo"})));

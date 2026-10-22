@@ -121,6 +121,8 @@ UniValue SidechainApi::Call(const std::string& method, const UniValue& params)
     if (method == "peg.call") {
         const std::string name{ParamStr(params, "method")};
         if (!MainchainMethods().contains(name)) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("%s is not a method the pages call on the mainchain node", name));
+        // And one the caller may call itself (its -rpcwhitelist, for the host over RPC).
+        CheckRpcCaller(name);
         const UniValue& args{Param(params, "params")};
         if (!args.isNull() && !args.isArray()) throw HostError(BRIDGE_INVALID_REQUEST, "params: an array is needed");
         return call_main(name, args.isNull() ? UniValue{UniValue::VARR} : args, MainchainWalletMethods().contains(name));

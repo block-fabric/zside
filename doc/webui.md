@@ -669,7 +669,9 @@ only in `<bin>d`):
   A **host method** runs for a user with a whitelist only when the whitelist names it, or every RPC
   method whose privilege it exercises (`HostPrivileges` of remotehost.cpp: `wallet.send.*` needs `send`,
   `wallet.backup` `backupwallet`, `peg.deposit` `createsidechaindeposit`, `bmm.set` `setbmm`...); a host
-  method of the chain's own (`local.cpp`) only when named. A user whitelisted for `webuihost` alone gets
+  method of the chain's own (`local.cpp`), and one that proxies the mainchain connection or shows its
+  credentials (`peg.call`, `peg.connection`), only when named; `peg.call` also checks the mainchain
+  method it forwards by name (within its own list of reads). A user whitelisted for `webuihost` alone gets
   nothing more through it.
 
 A host method that keeps something for its question (a prepared send) keeps it while the question is

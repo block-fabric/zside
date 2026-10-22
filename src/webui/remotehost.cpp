@@ -595,8 +595,9 @@ const std::map<std::string, std::vector<std::string>>& HostPrivileges()
         {"explorer.blocks", {"getblockheader"}},
         {"explorer.peg", {"getblock"}},
         // SidechainApi.
-        {"peg.connection", {"getmainchaininfo"}},
-        {"peg.call", {"getmainchaininfo"}},
+        // peg.connection (it shows the mainchain connection: its node, its wallet, how it logs in) and peg.call (it
+        // calls the mainchain node, its wallet too, with the sidechain's own credentials): no entry, only when named in
+        // the whitelist. peg.call checks the mainchain method by name too (CheckRpcCaller), within its own list.
         {"peg.deposit", {"createsidechaindeposit"}},
         {"bmm.set", {"setbmm"}},
         {"bmm.request", {"requestbmmblock"}},
@@ -671,7 +672,7 @@ std::string PrivilegeText(const std::string& method)
 {
     const auto& table{HostPrivileges()};
     const auto it{table.find(method)};
-    if (it == table.end()) return "a method of the chain's own";
+    if (it == table.end()) return "only by its own name";
     std::string out;
     for (const std::string& m : it->second) out += (out.empty() ? "" : ", ") + m;
     return out.empty() ? "nothing" : out;
