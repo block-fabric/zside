@@ -5,8 +5,14 @@
 // The host of the pages over RPC (webui/remotehost.h): the tokens that bind a question the Chains app showed to the
 // call it then runs, the digest of a call and its question, the events kept for the app.
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <webui/bridge.h>
 #include <webui/confirm.h>
+#include <webui/nodeapi.h>
+#ifdef ENABLE_WALLET
+#include <webui/walletapi.h>
+#endif
 #include <webui/remotehost.h>
 
 #include <random.h>
@@ -18,6 +24,8 @@
 
 #include <chrono>
 #include <filesystem>
+#include <iterator>
+#include <set>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -211,11 +219,27 @@ BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_AUTO_TEST_SUITE(remotehost_files_tests)
 
+namespace {
+fs::path TempFolder(const std::string& name)
+{
+    const fs::path dir{fs::path{fs::temp_directory_path()} / fs::PathFromString(strprintf("%s-%d", name, FastRandomContext{}.rand32()))};
+    fs::create_directories(dir);
+    return fs::weakly_canonical(dir);
+}
+
+void Put(const fs::path& path, const std::string& text) { std::ofstream{static_cast<const std::filesystem::path&>(path), std::ios::binary | std::ios::trunc} << text; }
+
+std::string Get(const fs::path& path)
+{
+    std::ifstream in{static_cast<const std::filesystem::path&>(path), std::ios::binary};
+    return {std::istreambuf_iterator<char>{in}, {}};
+}
+} // namespace
+
 BOOST_AUTO_TEST_CASE(chosen_files_only_by_token)
 {
-    const fs::path dir{fs::path{fs::temp_directory_path()} / fs::PathFromString(strprintf("remotehost-files-%d", FastRandomContext{}.rand32()))};
-    fs::create_directories(dir / "sub");
-    const fs::path canonical{fs::weakly_canonical(dir)};
+    const fs::path canonical{TempFolder("remotehost-files")};
+    fs::create_directories(canonical / "sub");
     const std::string file{fs::PathToString(canonical / "backup.dat")};
     ChosenFiles files;
     // Only absolute, canonical paths: nothing relative, no "..", no ".", no link, no folder.
@@ -228,90 +252,140 @@ BOOST_AUTO_TEST_CASE(chosen_files_only_by_token)
     BOOST_CHECK(!ChosenFiles::Problem(fs::PathToString(canonical / "link" / "x.dat")).empty());
     std::filesystem::create_symlink(canonical / "backup.dat", canonical / "filelink");
     BOOST_CHECK(!ChosenFiles::Problem(fs::PathToString(canonical / "filelink")).empty());
-    BOOST_CHECK_THROW(files.Grant(fs::PathToString(canonical / "link" / "x.dat"), true, T0), std::runtime_error);
+    BOOST_CHECK_THROW(files.Grant(fs::PathToString(canonical / "link" / "x.dat"), true, false, "app", T0), std::runtime_error);
+    // A folder for the files of the app (-webuifiledir): only files right in it.
+    BOOST_CHECK(ChosenFiles::Problem(file, fs::PathToString(canonical)).empty());
+    BOOST_CHECK(!ChosenFiles::Problem(fs::PathToString(canonical / "sub" / "x.dat"), fs::PathToString(canonical)).empty());
+    BOOST_CHECK(!ChosenFiles::Problem(file, fs::PathToString(canonical / "sub")).empty());
 
-    // A token gives its file once, within its time; a forged token (or a path given as one) gives nothing.
-    const std::string token{files.Grant(file, /*write=*/true, T0)};
-    BOOST_CHECK(!files.Take(file, T0));
-    BOOST_CHECK(!files.Take(std::string(64, 'b'), T0));
-    const auto got{files.Take(token, T0 + 1s)};
+    // A token gives its file once, within its time, to the user it was given to; a forged token (or a path given as one) gives nothing.
+    std::string token{files.Grant(file, /*write=*/true, false, "app", T0)};
+    BOOST_CHECK(!files.Take(file, "app", T0));
+    BOOST_CHECK(!files.Take(std::string(64, 'b'), "app", T0));
+    const auto got{files.Take(token, "app", T0 + 1s)};
     BOOST_REQUIRE(got);
     BOOST_CHECK_EQUAL(got->path, file);
     BOOST_CHECK(got->write);
-    BOOST_CHECK(!files.Take(token, T0 + 2s));
-    // A file to be read must be there; one to be written may be made.
-    BOOST_CHECK_THROW(files.Grant(file, false, T0), std::runtime_error);
-    { std::ofstream{fs::PathToString(canonical / "read.dat")} << "x"; }
-    const std::string late{files.Grant(fs::PathToString(canonical / "read.dat"), false, T0)};
-    BOOST_CHECK(!files.Take(late, T0 + ChosenFiles::EXPIRY));
+    BOOST_CHECK(!files.Take(token, "app", T0 + 2s));
+    token = files.Grant(file, true, false, "app", T0);
+    BOOST_CHECK(!files.Take(token, "other", T0));
+    BOOST_CHECK(!files.Take(token, "app", T0));
+    // A file to be read must be there; one to be written over only with overwrite.
+    BOOST_CHECK_THROW(files.Grant(file, false, false, "app", T0), std::runtime_error);
+    Put(canonical / "read.dat", "x");
+    BOOST_CHECK_THROW(files.Grant(fs::PathToString(canonical / "read.dat"), true, false, "app", T0), std::runtime_error);
+    token = files.Grant(fs::PathToString(canonical / "read.dat"), true, /*overwrite=*/true, "app", T0);
+    BOOST_CHECK(files.Take(token, "app", T0)->overwrite);
+    const std::string late{files.Grant(fs::PathToString(canonical / "read.dat"), false, false, "app", T0)};
+    BOOST_CHECK(!files.Take(late, "app", T0 + ChosenFiles::EXPIRY));
     // Minutes, not more: the app asks for a token right before the request that uses it.
     BOOST_CHECK(ChosenFiles::EXPIRY <= 120s);
-    fs::remove_all(dir);
+    fs::remove_all(canonical);
 }
 
 BOOST_AUTO_TEST_CASE(chosen_file_swapped_after_grant)
 {
-    const fs::path dir{fs::path{fs::temp_directory_path()} / fs::PathFromString(strprintf("remotehost-swap-%d", FastRandomContext{}.rand32()))};
-    fs::create_directories(dir);
-    const fs::path canonical{fs::weakly_canonical(dir)};
+    const fs::path canonical{TempFolder("remotehost-swap")};
     const fs::path chosen{canonical / "chosen.dat"};
     const fs::path elsewhere{canonical / "secret.dat"};
-    { std::ofstream{fs::PathToString(chosen)} << "chosen"; }
-    { std::ofstream{fs::PathToString(elsewhere)} << "secret"; }
+    const fs::path scratch{canonical / "scratch.tmp"};
+    Put(chosen, "chosen");
+    Put(elsewhere, "secret");
     ChosenFiles files;
 
-    // An existing file: still the same, it is used.
-    auto token{files.Grant(fs::PathToString(chosen), false, T0)};
-    auto got{files.Take(token, T0)};
+    // An existing file, unchanged: read through what was opened.
+    auto got{files.Take(files.Grant(fs::PathToString(chosen), false, false, "app", T0), "app", T0)};
     BOOST_REQUIRE(got);
     BOOST_CHECK(got->identity.exists);
     BOOST_CHECK(ChosenFiles::Changed(*got).empty());
+    ChosenFiles::CopyOut(*got, scratch);
+    BOOST_CHECK_EQUAL(Get(scratch), "chosen");
 
-    // A symbolic link put in its place after it was chosen (to a file the user never chose): refused, not followed.
-    token = files.Grant(fs::PathToString(chosen), true, T0);
-    got = files.Take(token, T0);
-    BOOST_REQUIRE(got);
-    fs::remove(chosen);
+    // Swapped between the check and the use: the chosen file renamed away, a link to another put at its path. The
+    // check refuses it; and what is read is still the file chosen, never the other one (no path opened again).
+    fs::rename(chosen, canonical / "moved.dat");
     std::filesystem::create_symlink(elsewhere, chosen);
     BOOST_CHECK(!ChosenFiles::Changed(*got).empty());
+    ChosenFiles::CopyOut(*got, scratch);
+    BOOST_CHECK_EQUAL(Get(scratch), "chosen");
     // Nor is a link taken when chosen.
-    BOOST_CHECK_THROW(files.Grant(fs::PathToString(chosen), false, T0), std::runtime_error);
+    BOOST_CHECK_THROW(files.Grant(fs::PathToString(chosen), false, false, "app", T0), std::runtime_error);
     BOOST_CHECK_THROW(ChosenFiles::Identify(fs::PathToString(chosen)), std::runtime_error);
-
-    // Another file moved to the path (same name, another inode): refused.
     fs::remove(chosen);
-    { std::ofstream{fs::PathToString(chosen)} << "chosen"; }
-    token = files.Grant(fs::PathToString(chosen), true, T0);
-    got = files.Take(token, T0);
-    BOOST_REQUIRE(got);
-    fs::rename(elsewhere, chosen);
-    BOOST_CHECK(!ChosenFiles::Changed(*got).empty());
+    fs::rename(canonical / "moved.dat", chosen);
 
-    // A file to be made: still none, in the same folder, it is used; a link (or a file) put there first: refused.
+    // Written over (a backup the user agreed to replace): through what was opened; another file renamed to its path
+    // in between is refused by the check, and is not what is written.
+    got = files.Take(files.Grant(fs::PathToString(chosen), true, true, "app", T0), "app", T0);
+    BOOST_REQUIRE(got);
+    Put(scratch, "backup");
+    ChosenFiles::CopyIn(*got, scratch);
+    BOOST_CHECK_EQUAL(Get(chosen), "backup");
+    Put(canonical / "other.dat", "secret");
+    fs::rename(canonical / "other.dat", chosen);
+    BOOST_CHECK(!ChosenFiles::Changed(*got).empty());
+    BOOST_CHECK_EQUAL(Get(elsewhere), "secret");
+
+    // A file to be made: made in the folder held, only where nothing is. A link put there (to a file the user never
+    // chose) is refused by the check, and the file is never written through it.
     const fs::path fresh{canonical / "new.dat"};
-    token = files.Grant(fs::PathToString(fresh), true, T0);
-    got = files.Take(token, T0);
+    got = files.Take(files.Grant(fs::PathToString(fresh), true, false, "app", T0), "app", T0);
     BOOST_REQUIRE(got);
     BOOST_CHECK(!got->identity.exists);
     BOOST_CHECK(ChosenFiles::Changed(*got).empty());
-    std::filesystem::create_symlink(chosen, fresh);
+    std::filesystem::create_symlink(elsewhere, fresh);
     BOOST_CHECK(!ChosenFiles::Changed(*got).empty());
+    Put(scratch, "backup");
+    BOOST_CHECK_THROW(ChosenFiles::CopyIn(*got, scratch), std::runtime_error);
+    BOOST_CHECK_EQUAL(Get(elsewhere), "secret");
     fs::remove(fresh);
     BOOST_CHECK(ChosenFiles::Changed(*got).empty());
-    { std::ofstream{fs::PathToString(fresh)} << "planted"; }
-    BOOST_CHECK(!ChosenFiles::Changed(*got).empty());
+    ChosenFiles::CopyIn(*got, scratch);
+    BOOST_CHECK_EQUAL(Get(fresh), "backup");
+    BOOST_CHECK(!std::filesystem::is_symlink(fresh));
 
-    // Its folder swapped for a link to another folder: refused (the path is no longer canonical, and the folder another).
+    // Its folder swapped for a link to another folder: refused by the check, and nothing made in the other folder.
     const fs::path sub{canonical / "sub"};
     fs::create_directories(sub);
-    token = files.Grant(fs::PathToString(sub / "x.dat"), true, T0);
-    got = files.Take(token, T0);
+    got = files.Take(files.Grant(fs::PathToString(sub / "x.dat"), true, false, "app", T0), "app", T0);
     BOOST_REQUIRE(got);
     fs::create_directories(canonical / "other");
-    fs::remove(sub);
+    fs::rename(sub, canonical / "sub-moved");
     std::filesystem::create_symlink(canonical / "other", sub);
     BOOST_CHECK(!ChosenFiles::Changed(*got).empty());
-    fs::remove_all(dir);
+    ChosenFiles::CopyIn(*got, scratch);
+    BOOST_CHECK(!fs::exists(canonical / "other" / "x.dat"));
+    BOOST_CHECK(fs::exists(canonical / "sub-moved" / "x.dat"));
+    fs::remove_all(canonical);
+}
+
+BOOST_AUTO_TEST_CASE(host_methods_need_their_privilege)
+{
+    const auto only{[](std::set<std::string> names) { return [names](const std::string& m) { return names.contains(m); }; }};
+    // A user that may call webuihost alone runs no host method that spends, backs up, deposits or mines.
+    const auto bare{only({"webuihost"})};
+    for (const std::string m : {"wallet.send.commit", "wallet.send.prepare", "wallet.backup", "peg.deposit", "bmm.set", "wallet.signMessage", "wallet.unlock", "wallets.restore", "peers.ban"}) {
+        BOOST_CHECK_MESSAGE(!HostMethodAllowed(m, bare), m);
+    }
+    // What needs nothing more (it reads nothing of the node, or what it runs is checked by name) runs.
+    BOOST_CHECK(HostMethodAllowed("rpc.confirmed", bare));
+    BOOST_CHECK(HostMethodAllowed("console.run", bare));
+    // With the privilege of the method, or the host method named itself.
+    BOOST_CHECK(HostMethodAllowed("wallet.send.commit", only({"send"})));
+    BOOST_CHECK(HostMethodAllowed("wallet.backup", only({"backupwallet"})));
+    BOOST_CHECK(HostMethodAllowed("wallet.backup", only({"wallet.backup"})));
+    BOOST_CHECK(!HostMethodAllowed("wallets.restoreMigrate", only({"restorewallet"})));
+    BOOST_CHECK(HostMethodAllowed("wallets.restoreMigrate", only({"restorewallet", "migratewallet"})));
+    // A host method not in the table (a chain's own): only when named.
+    BOOST_CHECK(!HostMethodAllowed("bitassets.logo", only({"getblockcount", "send"})));
+    BOOST_CHECK(HostMethodAllowed("bitassets.logo", only({"bitassets.logo"})));
+    // Every host method of the kit has its entry.
+    const NodeApi node_api{[]() -> interfaces::Node& { throw std::runtime_error("no node"); }, nullptr, nullptr};
+    for (const std::string& m : node_api.Methods()) BOOST_CHECK_MESSAGE(HostPrivileges().contains(m), m);
+#ifdef ENABLE_WALLET
+    const WalletApi wallet_api{[]() -> interfaces::Node& { throw std::runtime_error("no node"); }, nullptr, nullptr};
+    for (const std::string& m : wallet_api.Methods()) BOOST_CHECK_MESSAGE(HostPrivileges().contains(m), m);
+#endif
 }
 
 BOOST_AUTO_TEST_SUITE_END()

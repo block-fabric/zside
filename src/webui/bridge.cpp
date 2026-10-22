@@ -26,6 +26,22 @@ RpcCallerScope::RpcCallerScope(AllowedFn allowed) : m_allowed{std::move(allowed)
 
 RpcCallerScope::~RpcCallerScope() { g_rpc_caller = m_previous; }
 
+namespace {
+thread_local const ChosenFileScope::UseFn* g_chosen_file{nullptr};
+} // namespace
+
+ChosenFileScope::ChosenFileScope(UseFn use) : m_use{std::move(use)}, m_previous{g_chosen_file}
+{
+    g_chosen_file = &m_use;
+}
+
+ChosenFileScope::~ChosenFileScope() { g_chosen_file = m_previous; }
+
+std::string UseChosenFile(const std::string& path, bool write)
+{
+    return g_chosen_file && *g_chosen_file ? (*g_chosen_file)(path, write) : path;
+}
+
 void CheckRpcCaller(const std::string& method)
 {
     if (g_rpc_caller && *g_rpc_caller && !(*g_rpc_caller)(method)) {

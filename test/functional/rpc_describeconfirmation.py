@@ -41,6 +41,11 @@ APP_METHODS = [
 ]
 
 
+# What the app's user must also be allowed for the pages' host methods it runs through webuihost (HostPrivileges of
+# remotehost.cpp): a spend of the pages, a backup and a restore of a file chosen in its chooser.
+APP_NEEDS = ["send", "backupwallet", "restorewallet"]
+
+
 def rpcauth(user, password):
     salt = os.urandom(16).hex()
     return f"{user}:{salt}${hmac.new(salt.encode(), password.encode(), hashlib.sha256).hexdigest()}"
@@ -167,8 +172,13 @@ class DescribeConfirmationTest(BitcoinTestFramework):
         open(backup, "wb").close()
         read_only = node.webuichosenfile(backup, False)
         assert_raises_rpc_error(-32600, "Only a file chosen by the user can be written", node.webuihost, request, "", "", [read_only])
+        # A file there already is written over only when the user agreed (overwrite), and only by a wallet backup.
+        assert_raises_rpc_error(-8, "a file is there already", node.webuichosenfile, backup, True)
+        token = node.webuichosenfile(backup, True, True)
+        export = {"kind": "host", "method": "wallet.exportWatchOnly", "params": {"wallet": "main", "file": backup}}
+        assert_raises_rpc_error(-32600, "Only a file chosen by the user can be written", node.webuihost, export, "", "", [token])
         # Chosen to be written: written, once.
-        token = node.webuichosenfile(backup, True)
+        token = node.webuichosenfile(backup, True, True)
         assert_equal(node.webuihost(request, "", "", [token])["result"], backup)
         assert os.path.getsize(backup) > 0
         assert_raises_rpc_error(-8, "unknown, used or expired", node.webuihost, request, "", "", [token])
@@ -224,18 +234,22 @@ class DescribeConfirmationTest(BitcoinTestFramework):
         # An existing file replaced by a link: the same.
         with open(chosen, "w") as f:
             f.write("old backup")
-        token = node.webuichosenfile(chosen, True)
-        os.remove(chosen)
+        token = node.webuichosenfile(chosen, True, True)
+        os.rename(chosen, chosen + ".moved")
         os.symlink(target, chosen)
         assert_raises_rpc_error(-32600, "not the one it was when chosen", node.webuihost, request, "", "", [token])
         with open(target) as f:
             assert_equal(f.read(), "keep")
+        with open(chosen + ".moved") as f:
+            assert_equal(f.read(), "old backup")
         os.remove(chosen)
         # Unchanged: written.
         token = node.webuichosenfile(chosen, True)
         assert_equal(node.webuihost(request, "", "", [token])["result"], chosen)
         assert os.path.getsize(chosen) > 0
         assert "2 minutes" in node.help("webuichosenfile")
+        # Nothing of the host's own private copies is left behind.
+        assert_equal(os.listdir(node.chain_path / "webui-files"), [])
 
     def user_rpc(self, node, user, password):
         url = urllib.parse.urlparse(node.url)
@@ -249,7 +263,10 @@ class DescribeConfirmationTest(BitcoinTestFramework):
             f"-rpcauth={rpcauth('signer', 'pw2')}",
             "-rpcwhitelist=signer:webuihost,describeconfirmation,signmessage",
             f"-rpcauth={rpcauth('app', 'pw3')}",
-            "-rpcwhitelist=app:" + ",".join(APP_METHODS),
+            "-rpcwhitelist=app:" + ",".join(APP_METHODS + APP_NEEDS),
+            f"-rpcauth={rpcauth('named', 'pw4')}",
+            "-rpcwhitelist=named:webuihost,wallet.info,webuichosenfile,backupwallet,restorewallet",
+            "-webuichooser=app",
             "-rpcwhitelistdefault=0",
         ])
         node = self.nodes[0]
@@ -271,6 +288,23 @@ class DescribeConfirmationTest(BitcoinTestFramework):
         assert not out["ok"] and "may not call getblockchaininfo" in out["error"]
         out = pages.webuihost({"kind": "host", "method": "console.run", "params": {"line": "getblockcount"}})["result"]
         assert out["ok"]
+        # Host methods: only with the privilege of what they do (a spend, a backup, a deposit, merged mining...).
+        to = node.get_wallet_rpc("spare").getnewaddress()
+        send = {"kind": "host", "method": "wallet.send.prepare", "params": {"wallet": "main", "recipients": [{"address": to, "amount": 10000000}]}}
+        assert_raises_rpc_error(NOT_ALLOWED, "may not run wallet.send.prepare", pages.webuihost, send)
+        assert_raises_rpc_error(NOT_ALLOWED, "may not run wallet.send.commit", pages.webuihost, {"kind": "host", "method": "wallet.send.commit", "params": {"wallet": "main", "token": "x"}})
+        assert_raises_rpc_error(NOT_ALLOWED, "may not run wallet.backup", pages.webuihost, {"kind": "host", "method": "wallet.backup", "params": {"wallet": "main", "file": "/x"}})
+        assert_raises_rpc_error(NOT_ALLOWED, "may not run wallet.unlock", pages.webuihost, {"kind": "host", "method": "wallet.unlock", "params": {"wallet": "main", "passphrase": "x"}})
+        assert_raises_rpc_error(NOT_ALLOWED, "may not run peers.ban", pages.webuihost, {"kind": "host", "method": "peers.ban", "params": {}})
+        assert_raises_rpc_error(NOT_ALLOWED, "may not run wallet.info", pages.webuihost, {"kind": "host", "method": "wallet.info", "params": {"wallet": "main"}})
+        assert_raises_rpc_error(NOT_ALLOWED, "may not run some.own", pages.webuihost, {"kind": "host", "method": "some.own", "params": {}})
+        # A host method named in the whitelist itself runs; others still not.
+        named = self.user_rpc(node, "named", "pw4")
+        assert_equal(named.webuihost({"kind": "host", "method": "wallet.info", "params": {"wallet": "main"}})["result"]["name"], "main")
+        assert_raises_rpc_error(NOT_ALLOWED, "may not run wallet.unlock", named.webuihost, {"kind": "host", "method": "wallet.unlock", "params": {"wallet": "main", "passphrase": "x"}})
+        # Files: only the app's own chooser (-webuichooser) gives them, even to a user that may back up.
+        folder = os.path.realpath(self.options.tmpdir)
+        assert_raises_rpc_error(NOT_ALLOWED, "Only the app's own chooser", named.webuichosenfile, os.path.join(folder, "named.dat"), True)
 
         signer = self.user_rpc(node, "signer", "pw2")
         d = signer.describeconfirmation("signmessage", [address, "hello"], "main")
@@ -292,7 +326,12 @@ class DescribeConfirmationTest(BitcoinTestFramework):
         assert sent["txid"] in node.getrawmempool()
         backup = os.path.join(os.path.realpath(self.options.tmpdir), "app-backup.dat")
         token = app.webuichosenfile(backup, True)
-        assert_equal(app.webuihost({"kind": "host", "method": "wallet.backup", "params": {"wallet": "main", "file": backup}}, "", "", [token])["result"], backup)
+        backup_request = {"kind": "host", "method": "wallet.backup", "params": {"wallet": "main", "file": backup}}
+        # The token is the app's: another user cannot use it.
+        assert_raises_rpc_error(-8, "unknown, used or expired", named.webuihost, backup_request, "", "", [token])
+        token = app.webuichosenfile(backup, True)
+        assert_equal(app.webuihost(backup_request, "", "", [token])["result"], backup)
+        assert os.path.getsize(backup) > 0
         # Not in its whitelist: refused through webuihost too.
         assert_raises_rpc_error(NOT_ALLOWED, "may not call signmessage", app.describeconfirmation, "signmessage", [address, "hello"], "main")
         assert_raises_rpc_error(NOT_ALLOWED, "may not call getrawmempool", app.webuihost, {"kind": "rpc", "method": "getrawmempool", "params": []})

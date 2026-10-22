@@ -120,6 +120,9 @@ static bool ParseArgs(NodeContext& node, int argc, char* argv[])
     ArgsManager& args{*Assert(node.args)};
     // If Qt is used, parameters/bitcoin.conf are parsed in qt/bitcoin.cpp's main()
     SetupServerArgs(args, node.init->canListenIpc());
+#ifdef ENABLE_WEBUI_REMOTE
+    webui::remote::AddArgs(args);
+#endif
     std::string error;
     if (!args.ParseParameters(argc, argv, error)) {
         return InitError(Untranslated(strprintf("Error parsing command line arguments: %s", error)));

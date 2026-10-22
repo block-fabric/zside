@@ -55,6 +55,7 @@
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <set>
 
@@ -159,7 +160,7 @@ size_t Bindings::Size() const
     return m_entries.size();
 }
 
-std::string ChosenFiles::Problem(const std::string& path)
+std::string ChosenFiles::Problem(const std::string& path, const std::string& folder)
 {
     if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos) return "not a path";
     const fs::path p{fs::PathFromString(path)};
@@ -171,27 +172,45 @@ std::string ChosenFiles::Problem(const std::string& path)
     if (fs::PathToString(canonical) != path) return "not a canonical path (a link, \"..\" or \".\" in it)";
     if (std::filesystem::is_symlink(p, ec)) return "a symbolic link";
     if (std::filesystem::exists(p, ec) && !std::filesystem::is_regular_file(p, ec)) return "not a file";
+    if (!folder.empty()) {
+        const fs::path base{std::filesystem::weakly_canonical(fs::PathFromString(folder), ec)};
+        if (ec || p.parent_path() != base) return strprintf("not a file of the folder for the files of the app (-webuifiledir=%s)", folder);
+    }
     return {};
 }
 
-namespace {
 #ifdef WIN32
-//! The file (or folder) a path names, opened as itself: a reparse point (a link, a junction) is opened, not followed.
-std::optional<BY_HANDLE_FILE_INFORMATION> OpenedInfo(const fs::path& path, bool& missing)
-{
-    missing = false;
-    const HANDLE handle{CreateFileW(path.wstring().c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                                    OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr)};
-    if (handle == INVALID_HANDLE_VALUE) {
-        const DWORD error{GetLastError()};
-        missing = error == ERROR_FILE_NOT_FOUND;
-        if (!missing) throw std::runtime_error(strprintf("it cannot be opened (error %u)", error));
-        return std::nullopt;
+struct ChosenFiles::Held {
+    //! The file, opened as itself and without sharing its deletion (it cannot be renamed or replaced while held).
+    HANDLE file{INVALID_HANDLE_VALUE};
+    //! For a file to be made: its folder, held the same way.
+    HANDLE folder{INVALID_HANDLE_VALUE};
+    ~Held()
+    {
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        if (folder != INVALID_HANDLE_VALUE) CloseHandle(folder);
     }
+};
+
+namespace {
+std::string WinError(DWORD error) { return strprintf("error %u", error); }
+
+//! Opened as itself (a reparse point is opened, not followed); nullptr when there is nothing at the path.
+HANDLE OpenAsItself(const fs::path& path, DWORD access, bool folder)
+{
+    const HANDLE handle{CreateFileW(path.wstring().c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                    FILE_FLAG_OPEN_REPARSE_POINT | (folder ? FILE_FLAG_BACKUP_SEMANTICS : 0), nullptr)};
+    if (handle != INVALID_HANDLE_VALUE) return handle;
+    const DWORD error{GetLastError()};
+    if (error == ERROR_FILE_NOT_FOUND) return nullptr;
+    if (error == ERROR_SHARING_VIOLATION) throw std::runtime_error("it is in use");
+    throw std::runtime_error(strprintf("it cannot be opened (%s)", WinError(error)));
+}
+
+BY_HANDLE_FILE_INFORMATION InfoOf(HANDLE handle)
+{
     BY_HANDLE_FILE_INFORMATION info;
-    const bool ok{GetFileInformationByHandle(handle, &info) != 0};
-    CloseHandle(handle);
-    if (!ok) throw std::runtime_error("what it is cannot be read");
+    if (!GetFileInformationByHandle(handle, &info)) throw std::runtime_error("what it is cannot be read");
     if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) throw std::runtime_error("a symbolic link");
     return info;
 }
@@ -200,56 +219,141 @@ ChosenFiles::Identity IdentityOf(const BY_HANDLE_FILE_INFORMATION& info, bool ex
 {
     return {exists, info.dwVolumeSerialNumber, (static_cast<uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow};
 }
-#else
-//! The file (or folder) a path names, opened as itself (O_NOFOLLOW: a link is refused, never followed), by its fstat.
-std::optional<struct stat> OpenedInfo(const fs::path& path, int flags, bool& missing)
+
+//! Opened and checked: a regular file (exists), or none in a folder that is one. The handle(s) in `held`.
+ChosenFiles::Identity Open(const fs::path& path, bool write, ChosenFiles::Held* held)
 {
-    missing = false;
-    const int fd{open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | flags)};
-    if (fd < 0) {
-        const int error{errno};
-        missing = error == ENOENT;
-        if (missing) return std::nullopt;
-        if (error == ELOOP) throw std::runtime_error("a symbolic link");
-        throw std::runtime_error(strprintf("it cannot be opened (%s)", std::strerror(error)));
+    if (const HANDLE file{OpenAsItself(path, write ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ, false)}) {
+        auto close{[&] { if (!held) CloseHandle(file); }};
+        try {
+            const auto info{InfoOf(file)};
+            if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) throw std::runtime_error("not a file");
+            close();
+            if (held) held->file = file;
+            return IdentityOf(info, true);
+        } catch (...) {
+            CloseHandle(file);
+            throw;
+        }
     }
+    const HANDLE folder{OpenAsItself(path.parent_path(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES, true)};
+    if (!folder) throw std::runtime_error("its folder is not there");
+    try {
+        const auto info{InfoOf(folder)};
+        if (!(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) throw std::runtime_error("its folder is not one");
+        if (held) {
+            held->folder = folder;
+        } else {
+            CloseHandle(folder);
+        }
+        return IdentityOf(info, false);
+    } catch (...) {
+        CloseHandle(folder);
+        throw;
+    }
+}
+} // namespace
+#else
+struct ChosenFiles::Held {
+    //! The file, opened without following a link.
+    int fd{-1};
+    //! For a file to be made: its folder (the file is made in it by name, openat).
+    int folder{-1};
+    std::string name;
+    ~Held()
+    {
+        if (fd >= 0) close(fd);
+        if (folder >= 0) close(folder);
+    }
+};
+
+namespace {
+//! Opened as itself (O_NOFOLLOW: a link is refused, never followed); -1 when there is nothing at the path.
+int OpenAsItself(const fs::path& path, int flags)
+{
+    const int fd{open(path.c_str(), flags | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)};
+    if (fd >= 0) return fd;
+    const int error{errno};
+    if (error == ENOENT) return -1;
+    if (error == ELOOP) throw std::runtime_error("a symbolic link");
+    throw std::runtime_error(strprintf("it cannot be opened (%s)", std::strerror(error)));
+}
+
+struct stat StatOf(int fd)
+{
     struct stat info;
-    const bool ok{fstat(fd, &info) == 0};
-    close(fd);
-    if (!ok) throw std::runtime_error("what it is cannot be read");
+    if (fstat(fd, &info) != 0) throw std::runtime_error("what it is cannot be read");
     return info;
 }
-#endif
+
+ChosenFiles::Identity Open(const fs::path& path, bool write, ChosenFiles::Held* held)
+{
+    if (const int fd{OpenAsItself(path, write ? O_RDWR : O_RDONLY)}; fd >= 0) {
+        struct stat info;
+        try {
+            info = StatOf(fd);
+            if (!S_ISREG(info.st_mode)) throw std::runtime_error("not a file");
+        } catch (...) {
+            close(fd);
+            throw;
+        }
+        if (held) {
+            held->fd = fd;
+        } else {
+            close(fd);
+        }
+        return {true, static_cast<uint64_t>(info.st_dev), static_cast<uint64_t>(info.st_ino)};
+    }
+    const int folder{OpenAsItself(path.parent_path(), O_RDONLY | O_DIRECTORY)};
+    if (folder < 0) throw std::runtime_error("its folder is not there");
+    struct stat info;
+    try {
+        info = StatOf(folder);
+        if (!S_ISDIR(info.st_mode)) throw std::runtime_error("its folder is not one");
+    } catch (...) {
+        close(folder);
+        throw;
+    }
+    if (held) {
+        held->folder = folder;
+        held->name = fs::PathToString(path.filename());
+    } else {
+        close(folder);
+    }
+    return {false, static_cast<uint64_t>(info.st_dev), static_cast<uint64_t>(info.st_ino)};
+}
+
+void WriteAll(int fd, const char* data, size_t size, off_t offset)
+{
+    while (size > 0) {
+        const ssize_t n{pwrite(fd, data, size, offset)};
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            throw std::runtime_error(strprintf("it cannot be written (%s)", std::strerror(errno)));
+        }
+        data += n;
+        size -= static_cast<size_t>(n);
+        offset += n;
+    }
+}
 } // namespace
+#endif
 
 ChosenFiles::Identity ChosenFiles::Identify(const std::string& path)
 {
-    const fs::path p{fs::PathFromString(path)};
-    bool missing{false};
-#ifdef WIN32
-    if (const auto file{OpenedInfo(p, missing)}) {
-        if (file->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) throw std::runtime_error("not a file");
-        return IdentityOf(*file, true);
-    }
-    const auto folder{OpenedInfo(p.parent_path(), missing)};
-    if (!folder || !(folder->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) throw std::runtime_error("its folder is not one");
-    return IdentityOf(*folder, false);
-#else
-    if (const auto file{OpenedInfo(p, 0, missing)}) {
-        if (!S_ISREG(file->st_mode)) throw std::runtime_error("not a file");
-        return {true, static_cast<uint64_t>(file->st_dev), static_cast<uint64_t>(file->st_ino)};
-    }
-    const auto folder{OpenedInfo(p.parent_path(), O_DIRECTORY, missing)};
-    if (!folder || !S_ISDIR(folder->st_mode)) throw std::runtime_error("its folder is not one");
-    return {false, static_cast<uint64_t>(folder->st_dev), static_cast<uint64_t>(folder->st_ino)};
-#endif
+    return Open(fs::PathFromString(path), /*write=*/false, nullptr);
 }
 
 std::string ChosenFiles::Changed(const File& file)
 {
+    if (!file.held) return "it was not opened when chosen";
     // The path as it was taken (no link on the way, nothing resolved away), then what it names, opened as itself.
     if (std::string problem{Problem(file.path)}; !problem.empty()) return problem;
     try {
+#ifndef WIN32
+        // What is held is still a name of the file (not unlinked since).
+        if (file.held->fd >= 0 && StatOf(file.held->fd).st_nlink == 0) return "it is not there any more";
+#endif
         const Identity now{Identify(file.path)};
         if (now == file.identity) return {};
         if (file.identity.exists && !now.exists) return "it is not there any more";
@@ -260,12 +364,109 @@ std::string ChosenFiles::Changed(const File& file)
     }
 }
 
-std::string ChosenFiles::Grant(const std::string& path, bool write, std::chrono::steady_clock::time_point now)
+void ChosenFiles::CopyOut(const File& file, const fs::path& copy)
 {
-    if (const std::string problem{Problem(path)}; !problem.empty()) throw std::runtime_error(problem);
-    // What it names now, kept: what is used later must be that very file (or still none, in that folder).
-    const Identity identity{Identify(path)};
+    if (!file.held) throw std::runtime_error("it was not opened when chosen");
+    std::ofstream out{static_cast<const std::filesystem::path&>(copy), std::ios::binary | std::ios::trunc};
+    if (!out) throw std::runtime_error("a private copy cannot be made");
+    std::vector<char> chunk(1 << 20);
+#ifdef WIN32
+    if (file.held->file == INVALID_HANDLE_VALUE) throw std::runtime_error("no such file");
+    LARGE_INTEGER zero{};
+    if (!SetFilePointerEx(file.held->file, zero, nullptr, FILE_BEGIN)) throw std::runtime_error("it cannot be read");
+    while (true) {
+        DWORD n{0};
+        if (!ReadFile(file.held->file, chunk.data(), static_cast<DWORD>(chunk.size()), &n, nullptr)) throw std::runtime_error("it cannot be read");
+        if (n == 0) break;
+        out.write(chunk.data(), n);
+    }
+#else
+    if (file.held->fd < 0) throw std::runtime_error("no such file");
+    off_t offset{0};
+    while (true) {
+        const ssize_t n{pread(file.held->fd, chunk.data(), chunk.size(), offset)};
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            throw std::runtime_error(strprintf("it cannot be read (%s)", std::strerror(errno)));
+        }
+        if (n == 0) break;
+        out.write(chunk.data(), n);
+        offset += n;
+    }
+#endif
+    out.close();
+    if (!out) throw std::runtime_error("a private copy cannot be made");
+}
+
+void ChosenFiles::CopyIn(const File& file, const fs::path& from)
+{
+    if (!file.held) throw std::runtime_error("it was not opened when chosen");
+    if (!file.write) throw std::runtime_error("it was not chosen to be written");
+    std::ifstream in{static_cast<const std::filesystem::path&>(from), std::ios::binary};
+    if (!in) throw std::runtime_error("nothing was made to write");
+    std::vector<char> chunk(1 << 20);
+#ifdef WIN32
+    HANDLE target{file.held->file};
+    bool made{false};
+    if (target == INVALID_HANDLE_VALUE) {
+        // Made new, only where nothing is (not over a link put there, nor a file): the folder is held, not renamed.
+        target = CreateFileW(fs::PathFromString(file.path).wstring().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (target == INVALID_HANDLE_VALUE) throw std::runtime_error(strprintf("it cannot be made (%s)", WinError(GetLastError())));
+        made = true;
+    }
+    auto done{[&] { if (made) CloseHandle(target); }};
+    LARGE_INTEGER zero{};
+    if (!SetFilePointerEx(target, zero, nullptr, FILE_BEGIN) || !SetEndOfFile(target)) {
+        done();
+        throw std::runtime_error("it cannot be written");
+    }
+    while (in) {
+        in.read(chunk.data(), chunk.size());
+        const DWORD n{static_cast<DWORD>(in.gcount())};
+        DWORD written{0};
+        if (n > 0 && (!WriteFile(target, chunk.data(), n, &written, nullptr) || written != n)) {
+            done();
+            throw std::runtime_error("it cannot be written");
+        }
+    }
+    FlushFileBuffers(target);
+    done();
+#else
+    int target{file.held->fd};
+    bool made{false};
+    if (target < 0) {
+        // Made in the folder held, by its name, only where nothing is: no link followed, no file put there replaced.
+        target = openat(file.held->folder, file.held->name.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (target < 0) throw std::runtime_error(strprintf("it cannot be made (%s)", std::strerror(errno)));
+        made = true;
+    }
+    try {
+        if (ftruncate(target, 0) != 0) throw std::runtime_error(strprintf("it cannot be written (%s)", std::strerror(errno)));
+        off_t offset{0};
+        while (in) {
+            in.read(chunk.data(), chunk.size());
+            const auto n{in.gcount()};
+            if (n > 0) WriteAll(target, chunk.data(), static_cast<size_t>(n), offset);
+            offset += n;
+        }
+        if (fsync(target) != 0) throw std::runtime_error(strprintf("it cannot be written (%s)", std::strerror(errno)));
+    } catch (...) {
+        if (made) close(target);
+        throw;
+    }
+    if (made) close(target);
+#endif
+    if (in.bad()) throw std::runtime_error("what was made cannot be read");
+}
+
+std::string ChosenFiles::Grant(const std::string& path, bool write, bool overwrite, const std::string& user, std::chrono::steady_clock::time_point now, const std::string& folder)
+{
+    if (const std::string problem{Problem(path, folder)}; !problem.empty()) throw std::runtime_error(problem);
+    // Opened now and kept: what is used later is that very file (or a new one made in that very folder).
+    auto held{std::make_shared<Held>()};
+    const Identity identity{Open(fs::PathFromString(path), write, held.get())};
     if (!write && !identity.exists) throw std::runtime_error("no such file");
+    if (write && identity.exists && !overwrite) throw std::runtime_error("a file is there already (the chooser asks the user before one is replaced: overwrite)");
     std::array<unsigned char, 32> bytes;
     GetStrongRandBytes(bytes);
     const std::string token{HexStr(bytes)};
@@ -274,19 +475,19 @@ std::string ChosenFiles::Grant(const std::string& path, bool write, std::chrono:
     if (m_entries.size() >= MAX) {
         m_entries.erase(std::ranges::min_element(m_entries, {}, [](const auto& e) { return e.second.expires; }));
     }
-    m_entries.emplace(token, Entry{File{path, write, identity}, now + EXPIRY});
+    m_entries.emplace(token, Entry{File{path, write, write && identity.exists && overwrite, user, identity, std::move(held)}, now + EXPIRY});
     return token;
 }
 
-std::optional<ChosenFiles::File> ChosenFiles::Take(const std::string& token, std::chrono::steady_clock::time_point now)
+std::optional<ChosenFiles::File> ChosenFiles::Take(const std::string& token, const std::string& user, std::chrono::steady_clock::time_point now)
 {
     LOCK(m_mutex);
     const auto it{m_entries.find(token)};
     if (it == m_entries.end()) return std::nullopt;
-    const Entry entry{it->second};
+    Entry entry{std::move(it->second)};
     m_entries.erase(it);
-    if (entry.expires <= now) return std::nullopt;
-    return entry.file;
+    if (entry.expires <= now || entry.file.user != user) return std::nullopt;
+    return std::move(entry.file);
 }
 
 void EventLog::Add(std::string batch)
@@ -368,7 +569,113 @@ std::string DescribedWallet(const std::string& uri, const UniValue& arg)
     return arg.get_str();
 }
 
+const std::map<std::string, std::vector<std::string>>& HostPrivileges()
+{
+    static const std::map<std::string, std::vector<std::string>> table{
+        // The host of the daemon: what the app reads first.
+        {"app.hello", {"getnetworkinfo"}},
+        {"app.info", {"getnetworkinfo"}},
+        {"node.state", {"getblockchaininfo"}},
+        // rpc.confirmed and console.run: each method they run is checked by name (CheckRpcCaller).
+        {"rpc.confirmed", {}},
+        {"rpc.confirmedMethods", {}},
+        {"console.check", {}},
+        {"console.run", {}},
+        // NodeApi.
+        {"peers.disconnect", {"disconnectnode"}},
+        {"peers.ban", {"setban"}},
+        {"bans.unban", {"setban"}},
+        {"drivechain.depositAddress", {"getdepositaddress"}},
+        {"tools.hashes", {}},
+        {"tools.merkle", {}},
+        {"tools.decode", {}},
+        // A file is read only by a token the app's chooser gave (webuichosenfile: restorewallet).
+        {"timestamp.hashFile", {}},
+        {"timestamp.search", {"getblock"}},
+        {"explorer.blocks", {"getblockheader"}},
+        {"explorer.peg", {"getblock"}},
+        // SidechainApi.
+        {"peg.connection", {"getmainchaininfo"}},
+        {"peg.call", {"getmainchaininfo"}},
+        {"peg.deposit", {"createsidechaindeposit"}},
+        {"bmm.set", {"setbmm"}},
+        {"bmm.request", {"requestbmmblock"}},
+        // WalletApi.
+        {"wallets.list", {"listwallets"}},
+        {"wallets.signers", {"enumeratesigners"}},
+        {"wallets.create", {"createwallet"}},
+        {"wallets.open", {"loadwallet"}},
+        {"wallets.close", {"unloadwallet"}},
+        {"wallets.restore", {"restorewallet"}},
+        {"wallets.migrate", {"migratewallet"}},
+        {"wallets.restoreMigrate", {"restorewallet", "migratewallet"}},
+        {"wallets.isEncrypted", {"getwalletinfo"}},
+        {"wallet.info", {"getwalletinfo"}},
+        {"wallet.encrypt", {"encryptwallet"}},
+        {"wallet.changePassphrase", {"walletpassphrasechange"}},
+        {"wallet.unlock", {"walletpassphrase"}},
+        {"wallet.lock", {"walletlock"}},
+        {"wallet.backup", {"backupwallet"}},
+        {"wallet.exportWatchOnly", {"exportwatchonlywallet"}},
+        {"wallet.transactions", {"listtransactions"}},
+        {"wallet.balanceHistory", {"listtransactions"}},
+        {"wallet.transaction", {"gettransaction"}},
+        {"wallet.txActions", {"gettransaction"}},
+        {"wallet.abandon", {"abandontransaction"}},
+        {"wallet.bump.prepare", {"bumpfee"}},
+        {"wallet.bump.commit", {"bumpfee"}},
+        {"wallet.bump.psbt", {"psbtbumpfee"}},
+        {"wallet.addresses", {"listreceivedbyaddress"}},
+        {"wallet.owned", {"listunspent"}},
+        {"wallet.address", {"getaddressinfo"}},
+        {"wallet.addressBook.add", {"setlabel"}},
+        {"wallet.addressBook.edit", {"setlabel"}},
+        {"wallet.addressBook.delete", {"setlabel"}},
+        {"wallet.newAddress", {"getnewaddress"}},
+        {"wallet.displayAddress", {"walletdisplayaddress"}},
+        {"wallet.requests", {"listreceivedbyaddress"}},
+        {"wallet.requests.add", {"getnewaddress"}},
+        {"wallet.requests.remove", {"setlabel"}},
+        {"wallet.coins", {"listunspent"}},
+        {"wallet.coins.lock", {"lockunspent"}},
+        {"wallet.coinControl.summary", {"listunspent"}},
+        {"wallet.fee", {"estimatesmartfee"}},
+        {"wallet.available", {"getbalances"}},
+        {"wallet.checkChange", {"getaddressinfo"}},
+        {"send.isDust", {}},
+        {"wallet.send.prepare", {"send"}},
+        {"wallet.send.commit", {"send"}},
+        {"wallet.send.psbt", {"walletcreatefundedpsbt"}},
+        {"wallet.send.discard", {"send"}},
+        {"wallet.signMessage", {"signmessage"}},
+        {"message.verify", {"verifymessage"}},
+        {"psbt.decode", {"decodepsbt"}},
+        {"wallet.psbt.open", {"decodepsbt"}},
+        {"wallet.psbt.sign", {"walletprocesspsbt"}},
+        {"psbt.broadcast", {"sendrawtransaction"}},
+    };
+    return table;
+}
+
+bool HostMethodAllowed(const std::string& method, const std::function<bool(const std::string&)>& allowed)
+{
+    if (allowed(method)) return true;
+    const auto& table{HostPrivileges()};
+    const auto it{table.find(method)};
+    return it != table.end() && std::ranges::all_of(it->second, allowed);
+}
+
 namespace {
+
+std::string PrivilegeText(const std::string& method)
+{
+    const auto& table{HostPrivileges()};
+    const auto it{table.find(method)};
+    if (it == table.end()) return "a method of the chain's own";
+    std::string out;
+    for (const std::string& m : it->second) out += (out.empty() ? "" : ", ") + m;
+    return out.empty() ? "nothing" : out;
+}
 
 /** What a NeedConfirmation carries out of a host method, past its own handlers: not a std::exception, so none takes it. */
 struct NeedConfirmation {
@@ -385,9 +692,22 @@ struct Context {
     //! The files the user chose in the app's own chooser for this request (a backup, a file to hash): by path, whether
     //! to write and what the path named when chosen. Only from tokens of ChosenFiles, never a path given with the request.
     std::map<std::string, ChosenFiles::File> files;
+    //! The host method it runs ("" for an RPC method).
+    std::string method;
+    //! The private files the host method reads (copies of chosen files) or writes (to be written into chosen files,
+    //! by path of the chosen file), gone when the request is done.
+    std::vector<fs::path> scratch;
+    std::map<std::string, fs::path> to_write;
     bool describe_only{false};
     //! A question was answered yes in this request already: a second one is not asked (it would run the first again).
     bool accepted{false};
+    ~Context()
+    {
+        for (const fs::path& p : scratch) {
+            std::error_code ec;
+            std::filesystem::remove(p, ec);
+        }
+    }
 };
 thread_local Context* g_context{nullptr};
 
@@ -431,6 +751,15 @@ public:
         m_node_events = std::make_unique<NodeEvents>(*m_node, *m_hub);
         m_node_events->SubscribeNode();
         m_hub->SetReady(true);
+        // The host's own folder for the private copies of chosen files: the daemon's alone, emptied at each start.
+        if (context.args) {
+            std::error_code ec;
+            m_private = context.args->GetDataDirNet() / "webui-files";
+            std::filesystem::remove_all(m_private, ec);
+            std::filesystem::create_directories(m_private, ec);
+            std::filesystem::permissions(m_private, std::filesystem::perms::owner_all, ec);
+            if (ec) m_private.clear();
+        }
         Register();
     }
 
@@ -488,21 +817,30 @@ public:
         context.passphrase = std::move(passphrase);
         if (files.isArray()) {
             for (const UniValue& f : files.getValues()) {
-                const auto file{f.isStr() ? m_files.Take(f.get_str(), std::chrono::steady_clock::now()) : std::nullopt};
+                const auto file{f.isStr() ? m_files.Take(f.get_str(), auth_user, std::chrono::steady_clock::now()) : std::nullopt};
                 if (!file) throw JSONRPCError(RPC_INVALID_PARAMETER, "files: a token of a file chosen in the app is needed (unknown, used or expired)");
                 const auto [it, added]{context.files.emplace(file->path, *file)};
-                if (!added) {
-                    if (it->second.identity != file->identity) throw JSONRPCError(RPC_INVALID_PARAMETER, "files: two tokens of one path that named two files");
-                    it->second.write |= file->write;
-                }
+                if (!added) throw JSONRPCError(RPC_INVALID_PARAMETER, "files: one token for a file");
             }
         }
+        if (kind == "host") context.method = method;
         const ContextScope scope{context};
         // What it runs by name, only what the caller may call itself (its -rpcwhitelist).
         const RpcCallerScope caller{CallerCheck(auth_user)};
+        // The files chosen: read and written through what was opened when they were chosen.
+        const ChosenFileScope chosen_files{[this](const std::string& path, bool write) { return UseFile(path, write); }};
         UniValue out{UniValue::VOBJ};
         try {
-            out.pushKV("result", kind == "rpc" ? CallRpc(method, params, wallet) : CallHost(method, params));
+            UniValue result{kind == "rpc" ? CallRpc(method, params, wallet) : CallHost(method, params)};
+            // What the host method wrote, now written into the files chosen.
+            for (const auto& [path, from] : context.to_write) {
+                try {
+                    ChosenFiles::CopyIn(context.files.at(path), from);
+                } catch (const std::runtime_error& e) {
+                    throw HostError(BRIDGE_HOST_ERROR, strprintf("The file chosen cannot be written: %s", e.what()));
+                }
+            }
+            out.pushKV("result", std::move(result));
         } catch (NeedConfirmation& need) {
             out.pushKV("confirm", std::move(need.description));
         } catch (const HostError& e) {
@@ -564,10 +902,23 @@ public:
 
     Bindings& bindings() { return m_bindings; }
 
-    std::string ChooseFile(const std::string& path, bool write)
+    std::string ChooseFile(const std::string& path, bool write, bool overwrite, const std::string& auth_user)
     {
+        // Only the app's own chooser: its RPC user (-webuichooser), or one that may call everything; and only what that
+        // user may do itself with a file.
+        const ArgsManager* args{m_node->context() ? m_node->context()->args : nullptr};
+        const std::string chooser{args ? args->GetArg("-webuichooser", "") : std::string{}};
+        if (auth_user != chooser || chooser.empty()) {
+            if (!RpcUserMayCallAll(auth_user)) {
+                throw JSONRPCError(static_cast<RPCErrorCode>(BRIDGE_NOT_ALLOWED), "Only the app's own chooser gives files (-webuichooser): this RPC user may not");
+            }
+        }
+        const std::string privilege{write ? "backupwallet" : "restorewallet"};
+        if (!RpcUserMayCall(auth_user, privilege)) {
+            throw JSONRPCError(static_cast<RPCErrorCode>(BRIDGE_NOT_ALLOWED), strprintf("This RPC user may not call %s (-rpcwhitelist): no file chosen to be %s", privilege, write ? "written" : "read"));
+        }
         try {
-            return m_files.Grant(path, write, std::chrono::steady_clock::now());
+            return m_files.Grant(path, write, overwrite, auth_user, std::chrono::steady_clock::now(), args ? args->GetArg("-webuifiledir", "") : std::string{});
         } catch (const std::runtime_error& e) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("This file cannot be used: %s", e.what()));
         }
@@ -578,6 +929,43 @@ private:
     static RpcCallerScope::AllowedFn CallerCheck(const std::string& auth_user)
     {
         return [auth_user](const std::string& method) { return RpcUserMayCall(auth_user, method); };
+    }
+
+    /** A private file of the host (in the data directory, the daemon's alone), new. */
+    fs::path Scratch()
+    {
+        std::array<unsigned char, 16> bytes;
+        GetStrongRandBytes(bytes);
+        const fs::path p{m_private / fs::PathFromString(HexStr(bytes) + ".tmp")};
+        if (g_context) g_context->scratch.push_back(p);
+        return p;
+    }
+
+    /** Where a host method reads or writes a file chosen for this request (ChosenFileScope): never the path itself. */
+    std::string UseFile(const std::string& path, bool write)
+    {
+        if (!g_context) throw HostError(BRIDGE_INVALID_REQUEST, "A file outside a request of the app");
+        const auto it{g_context->files.find(path)};
+        if (it == g_context->files.end() || (write && !it->second.write)) throw HostError(BRIDGE_INVALID_REQUEST, "Only a file chosen by the user can be used");
+        const ChosenFiles::File& file{it->second};
+        // The path still names what was opened when chosen: else the user would not find there what is written.
+        if (const std::string changed{ChosenFiles::Changed(file)}; !changed.empty()) {
+            LogInfo("webui remote: a chosen file was refused when used (%s)", changed);
+            throw HostError(BRIDGE_INVALID_REQUEST, strprintf("The file chosen is not the one it was when chosen (%s): nothing was done. Choose it again.", changed));
+        }
+        if (m_private.empty()) throw HostError("No private folder for the files of the app");
+        const fs::path scratch{Scratch()};
+        if (write) {
+            if (g_context->to_write.contains(path)) throw HostError(BRIDGE_INVALID_REQUEST, "A file chosen is written once per request");
+            g_context->to_write.emplace(path, scratch);
+            return fs::PathToString(scratch);
+        }
+        try {
+            ChosenFiles::CopyOut(file, scratch);
+        } catch (const std::runtime_error& e) {
+            throw HostError(strprintf("The file chosen cannot be read: %s", e.what()));
+        }
+        return fs::PathToString(scratch);
     }
 
     static std::string Canonical(const std::string& kind, const std::string& method, const UniValue& params, const std::string& wallet)
@@ -657,6 +1045,18 @@ private:
 
     UniValue CallHost(const std::string& method, const UniValue& params)
     {
+        // Only what the caller may do itself: the host method named in its -rpcwhitelist, or what it exercises
+        // (HostPrivileges); a host method not in that table only when named.
+        if (!HostMethodAllowed(method, [](const std::string& m) {
+                try {
+                    CheckRpcCaller(m);
+                    return true;
+                } catch (const HostError&) {
+                    return false;
+                }
+            })) {
+            throw HostError(BRIDGE_NOT_ALLOWED, strprintf("This RPC user may not run %s (-rpcwhitelist: neither it nor what it does, %s, is listed)", method, PrivilegeText(method)));
+        }
         // What a daemon can do for the pages: never the window, the app's settings, the desktop (the app does those).
         if (method == "app.hello") {
             UniValue out{UniValue::VOBJ};
@@ -689,16 +1089,13 @@ private:
         }};
         const guard::ConfirmFn confirm{[this](const Window::ConfirmDialog& dialog) { return Confirm(dialog); }};
         const guard::AskFn ask{[this](const Window::ConfirmDialog& dialog) { return Ask(dialog); }};
-        // A file is the user's only when chosen in the app's own chooser for this request.
-        // Checked when used: the path must still name what it named when chosen (no link or other file put there since).
+        // A file is the user's only when chosen in the app's own chooser for this request; one there already is replaced
+        // only by a wallet backup the user agreed to replace it with (overwrite). Used through UseFile.
         const auto chosen{[](const std::string& path, bool write) {
             if (!g_context) return false;
             const auto it{g_context->files.find(path)};
             if (it == g_context->files.end() || (write && !it->second.write)) return false;
-            if (const std::string changed{ChosenFiles::Changed(it->second)}; !changed.empty()) {
-                LogInfo("webui remote: a chosen file was refused when used (%s)", changed);
-                throw HostError(BRIDGE_INVALID_REQUEST, strprintf("The file chosen is not the one it was when chosen (%s): nothing was done. Choose it again.", changed));
-            }
+            if (write && it->second.identity.exists && !(it->second.overwrite && g_context->method == "wallet.backup")) return false;
             return true;
         }};
         m_node_api = std::make_unique<NodeApi>(node, [chosen](const std::string& path) { return chosen(path, false); }, confirm);
@@ -741,6 +1138,7 @@ private:
     std::unique_ptr<confirm::ConfirmedRpc> m_confirmed;
     Bindings m_bindings;
     ChosenFiles m_files;
+    fs::path m_private;
     std::atomic<bool> m_stopped{false};
 };
 
@@ -866,20 +1264,30 @@ RPCMethod webuichosenfile()
         "A file the user just chose in the native chooser of the app that shows this chain's pages: a one-time token for it, "
         "valid 2 minutes, that a request of the pages names (webuihost files) to read or write it. Only an absolute, "
         "canonical path (no link, no \"..\") is taken, and when a request uses it, it must still name the same file "
-        "(or still none, in the same folder), opened without following a link. The app calls it with what its own chooser answered, never with "
-        "a path of the pages.\n",
+        "(or still none, in the same folder): it is opened now, without following a link, and read or written through what was "
+        "opened. Only the app's own RPC user (-webuichooser) or one that may call everything gives files, and only one that may "
+        "call backupwallet (to write) or restorewallet (to read); the token is that user's. A file there already is replaced only "
+        "with overwrite, by a wallet backup. The app calls it with what its own chooser answered, never with a path of the pages.\n",
         {
             {"path", RPCArg::Type::STR, RPCArg::Optional::NO, "the file chosen"},
             {"write", RPCArg::Type::BOOL, RPCArg::Default{false}, "chosen to be written (a backup)"},
+            {"overwrite", RPCArg::Type::BOOL, RPCArg::Default{false}, "the user agreed to replace the file there (a wallet backup only)"},
         },
         RPCResult{RPCResult::Type::STR_HEX, "", "the token"},
         RPCExamples{""},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue {
-            return GetHost(request)->ChooseFile(request.params[0].get_str(), !request.params[1].isNull() && request.params[1].get_bool());
+            return GetHost(request)->ChooseFile(request.params[0].get_str(), !request.params[1].isNull() && request.params[1].get_bool(),
+                                                !request.params[2].isNull() && request.params[2].get_bool(), request.authUser);
         }};
 }
 
 } // namespace
+
+void AddArgs(ArgsManager& args)
+{
+    args.AddArg("-webuichooser=<user>", "The RPC user of the app that shows this chain's pages (its -rpcauth user): the only one, besides those that may call everything, that gives files the user chose (webuichosenfile)", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
+    args.AddArg("-webuifiledir=<dir>", "Only files of this folder are given (webuichosenfile)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
+}
 
 void RegisterRpcCommands(CRPCTable& table)
 {

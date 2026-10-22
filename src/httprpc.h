@@ -27,6 +27,8 @@ void StopHTTPRPC();
 /** Whether an RPC user may call a method (-rpcwhitelist, -rpcwhitelistdefault), as the HTTP RPC server decides it: also
  * for the methods run by name inside a call of that user (webuihost of webui/remotehost.h). */
 bool RpcUserMayCall(const std::string& user, const std::string& method);
+/** Whether an RPC user may call every method (no -rpcwhitelist applies to it). */
+bool RpcUserMayCallAll(const std::string& user);
 
 /** Execute a single HTTP request containing one or more JSONRPC requests.
  * Specified `jreq` will be modified and `status` will be returned.

@@ -1124,7 +1124,7 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file, guard::AskFn ask) : m_nod
     Add("wallets.restore", [this](const UniValue& params) {
         const std::string name{WalletName(Str(params, "name"))};
         std::vector<bilingual_str> warnings;
-        auto w{Loader().restoreWallet(fs::PathFromString(ChosenFile(params, /*write=*/false)), name, warnings, /*load_after_restore=*/true)};
+        auto w{Loader().restoreWallet(fs::PathFromString(UseChosenFile(ChosenFile(params, /*write=*/false), /*write=*/false)), name, warnings, /*load_after_restore=*/true)};
         if (!w) throw HostError(util::ErrorString(w).translated);
         UniValue out{UniValue::VOBJ};
         out.pushKV("name", (*w)->getWalletName());
@@ -1148,7 +1148,7 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file, guard::AskFn ask) : m_nod
     Add("wallets.restoreMigrate", [this, migrate](const UniValue& params) {
         const std::string name{WalletName(Str(params, "name"))};
         std::vector<bilingual_str> warnings;
-        auto restored{Loader().restoreWallet(fs::PathFromString(ChosenFile(params, /*write=*/false)), name, warnings, /*load_after_restore=*/false)};
+        auto restored{Loader().restoreWallet(fs::PathFromString(UseChosenFile(ChosenFile(params, /*write=*/false), /*write=*/false)), name, warnings, /*load_after_restore=*/false)};
         if (!restored) throw HostError(util::ErrorString(restored).translated);
         const SecureString passphrase{SecretParam(params, "passphrase", /*required=*/false)};
         if (passphrase.empty() && Loader().isEncrypted(name)) {
@@ -1266,15 +1266,18 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file, guard::AskFn ask) : m_nod
     Add("wallet.backup", [this, get_wallet](const UniValue& params) {
         auto w{get_wallet(params)};
         const std::string file{ChosenFile(params, /*write=*/true)};
-        if (!w->backupWallet(file)) throw HostError(strprintf("There was an error trying to save the wallet data to %s.", file));
+        if (!w->backupWallet(UseChosenFile(file, /*write=*/true))) throw HostError(strprintf("There was an error trying to save the wallet data to %s.", file));
         return UniValue{file};
     });
     Add("wallet.exportWatchOnly", [this, get_wallet](const UniValue& params) {
         auto w{get_wallet(params)};
         if (w->privateKeysDisabled()) throw HostError("This wallet is watch-only already");
-        auto res{w->exportWatchOnlyWallet(fs::PathFromString(ChosenFile(params, /*write=*/true)))};
+        const std::string file{ChosenFile(params, /*write=*/true)};
+        const std::string use{UseChosenFile(file, /*write=*/true)};
+        auto res{w->exportWatchOnlyWallet(fs::PathFromString(use))};
         if (!res) throw HostError(util::ErrorString(res).translated);
-        return UniValue{*res};
+        // Written where it is to go (the file chosen), whatever private file it was made in first.
+        return UniValue{*res == use ? file : *res};
     });
 
     // --- Transactions ---

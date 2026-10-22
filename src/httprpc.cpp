@@ -107,6 +107,11 @@ bool RpcUserMayCall(const std::string& user, const std::string& method)
     return it->second.contains(method);
 }
 
+bool RpcUserMayCallAll(const std::string& user)
+{
+    return !g_rpc_whitelist.contains(user) && !g_rpc_whitelist_default;
+}
+
 UniValue ExecuteHTTPRPC(const UniValue& valRequest, JSONRPCRequest& jreq, HTTPStatusCode& status)
 {
     status = HTTP_OK;

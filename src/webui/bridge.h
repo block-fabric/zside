@@ -72,6 +72,28 @@ private:
 /** Throws HostError(BRIDGE_NOT_ALLOWED) when the caller of this thread's request may not run `method` (RpcCallerScope). */
 void CheckRpcCaller(const std::string& method);
 
+/**
+ * Where a host method reads or writes a file the user chose (after its own check that it was chosen): in the app's own
+ * window, the path itself; in the daemon's host over RPC (remotehost.h), a private copy made through the file opened
+ * when it was chosen, or a private file written back through what was opened when it was chosen once the request is
+ * done, never the path opened again.
+ */
+class ChosenFileScope
+{
+public:
+    using UseFn = std::function<std::string(const std::string& path, bool write)>;
+    explicit ChosenFileScope(UseFn use);
+    ~ChosenFileScope();
+    ChosenFileScope(const ChosenFileScope&) = delete;
+    ChosenFileScope& operator=(const ChosenFileScope&) = delete;
+
+private:
+    UseFn m_use;
+    const UseFn* m_previous;
+};
+/** The path to read (write: to write) for a file the user chose at `path` (ChosenFileScope); the path itself outside one. */
+std::string UseChosenFile(const std::string& path, bool write);
+
 /** The URI path of a wallet for the RPC dispatcher: "/wallet/<percent-encoded name>". */
 std::string WalletUri(const std::string& wallet_name);
 

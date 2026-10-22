@@ -8,6 +8,7 @@
 #include <support/allocators/secure.h>
 #include <sync.h>
 #include <univalue.h>
+#include <util/fs.h>
 #include <webui/window.h>
 
 #include <atomic>
@@ -15,10 +16,14 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
+class ArgsManager;
 class CRPCTable;
 
 /**
@@ -120,10 +125,17 @@ private:
  * then names the token (webuihost files), never a path. A path is taken only absolute and already canonical (no "..",
  * no symbolic link on the way, no relative part): what the user saw chosen is what is opened.
  *
- * What the path named when it was chosen is kept (Identity: the file, opened without following a link, by its device
- * and inode; or, for a file to be made, its folder): when a request uses it, the path is opened again the same way and
- * must name the very same file (or still none, in the same folder). A link or another file put there in between is
- * refused, never followed.
+ * Only the app's own chooser grants: the RPC user named by -webuichooser (the app's own, an -rpcauth of its run), or
+ * one that may call everything; and only what that user may do itself (backupwallet to write, restorewallet to read).
+ * A token is the granting user's alone. A file there already is written only when the grant says so (overwrite: the
+ * chooser asked the user) and only by a wallet backup. With -webuifiledir, only files in that folder.
+ *
+ * The file is opened when chosen and kept open (O_NOFOLLOW; on Windows, the reparse point itself, without sharing its
+ * deletion: it cannot be renamed or replaced meanwhile); for a file to be made, its folder. Used, it is read through
+ * that descriptor (into a private copy the host method reads), or written through it (from a private file the host
+ * method wrote): made in that very folder (openat, O_CREAT|O_EXCL|O_NOFOLLOW), never by opening the path again. Before,
+ * the path must still name what is held (else the user would not find it there): a link or another file put there
+ * in between is refused.
  */
 class ChosenFiles
 {
@@ -135,26 +147,38 @@ public:
         uint64_t inode{0};
         bool operator==(const Identity&) const = default;
     };
+    /** What is kept open of a chosen file (remotehost.cpp). */
+    struct Held;
     struct File {
         std::string path;
         bool write{false};
+        //! The user agreed to replace the file there (a backup over an older one).
+        bool overwrite{false};
+        //! The RPC user who granted it: only that user's requests use it.
+        std::string user;
         Identity identity;
+        std::shared_ptr<Held> held;
     };
     static constexpr std::chrono::seconds EXPIRY{120};
     static constexpr size_t MAX{32};
-    /** Why a path cannot be taken ("" when it can). */
-    static std::string Problem(const std::string& path);
-    /**
-     * What the path names now, opened without following a link (O_NOFOLLOW; on Windows, the reparse point itself): a
-     * regular file, or none in a folder that is one. Throws std::runtime_error with what it is else.
-     */
+    /** Why a path cannot be taken ("" when it can); with a folder (-webuifiledir), only a path in it. */
+    static std::string Problem(const std::string& path, const std::string& folder = {});
+    /** What the path names now, opened without following a link. Throws std::runtime_error with what it is else. */
     static Identity Identify(const std::string& path);
-    /** Why a file chosen cannot be used now ("" when the path still names what it named when chosen). */
+    /** Why the path no longer names what is held of a chosen file ("" when it does). */
     static std::string Changed(const File& file);
-    /** A token for a chosen file. Throws std::runtime_error with the Problem. */
-    std::string Grant(const std::string& path, bool write, std::chrono::steady_clock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /** The file of a token, once (gone after); nullopt for a token unknown, used or expired. */
-    std::optional<File> Take(const std::string& token, std::chrono::steady_clock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** A private copy of a chosen file, read through what was opened when chosen. Throws std::runtime_error. */
+    static void CopyOut(const File& file, const fs::path& copy);
+    /** Write a chosen file from a private one, through what was opened when chosen. Throws std::runtime_error. */
+    static void CopyIn(const File& file, const fs::path& from);
+    /**
+     * A token for a chosen file, of the RPC user `user`. Throws std::runtime_error with the Problem, or when there is
+     * a file there to write and `overwrite` is not given.
+     */
+    std::string Grant(const std::string& path, bool write, bool overwrite, const std::string& user, std::chrono::steady_clock::time_point now,
+                      const std::string& folder = {}) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** The file of a token for `user`, once (gone after); nullopt for a token unknown, used, expired or of another user. */
+    std::optional<File> Take(const std::string& token, const std::string& user, std::chrono::steady_clock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
     struct Entry {
@@ -164,6 +188,16 @@ private:
     Mutex m_mutex;
     std::map<std::string, Entry> m_entries GUARDED_BY(m_mutex);
 };
+
+/**
+ * The RPC methods whose privilege each host method of the kit exercises (what a user must be allowed to call for it to
+ * run through webuihost): a host method runs for a caller with a -rpcwhitelist only when the whitelist names the
+ * host method itself, or every method of its entry here. One without an entry (a chain's own, local.cpp) only when
+ * named. An empty entry: nothing beyond webuihost (it reads nothing of the node, or what it runs is checked by name).
+ */
+const std::map<std::string, std::vector<std::string>>& HostPrivileges();
+/** Whether `allowed` (what a user may call) lets that user run a host method (HostPrivileges). */
+bool HostMethodAllowed(const std::string& method, const std::function<bool(const std::string&)>& allowed);
 
 /** A request of the pages (webuihost), read: one wallet for it, the one its method uses (ParseRequest). */
 struct Request {
@@ -184,6 +218,8 @@ Request ParseRequest(const UniValue& request);
 /** The wallet of describeconfirmation: its argument, or the wallet of the URI (/wallet/<name>); both must agree. */
 std::string DescribedWallet(const std::string& uri, const UniValue& arg);
 
+/** The options of the host over RPC (-webuichooser, -webuifiledir). */
+void AddArgs(ArgsManager& args);
 /** Add webuihost, describeconfirmation, webuievents and webuichosenfile to the table (rpc_extra::g_register of the daemon). */
 void RegisterRpcCommands(CRPCTable& table);
 /** The node is shutting down: the host stops (the waits return, its handlers go). */
